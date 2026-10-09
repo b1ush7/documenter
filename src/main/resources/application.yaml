@@ -1,5 +1,8 @@
 spring:
   application:
     name: documenter
+  profiles:
+    active:
+      - dev
 server:
   port: 8080
