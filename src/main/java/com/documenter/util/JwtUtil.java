@@ -16,13 +16,17 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Collections;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 @Component
 public class JwtUtil {
     private static final String SESSION_PREFIX = "login:session:";
+    /** 用户会话索引：记录该用户当前所有活跃会话，用于「退出全部设备」与改密后撤销。 */
+    private static final String USER_SESSIONS_PREFIX = "login:user_sessions:";
     private static final String SESSION_CLAIM = "sid";
     private static final String TYPE_CLAIM = "token_type";
     // 校验旧值和替换新值必须在 Redis 内原子执行，防止同一个 Refresh Token 被并发使用。
@@ -32,6 +36,24 @@ public class JwtUtil {
             end
             redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
             return 1
+            """, Long.class);
+    // ARGV[1] 固定为用户 ID，ARGV[2..] 为待撤销的会话 ID。
+    // 逐个检查「会话当前值是否仍属于该用户」，属于才删除。
+    // 这样即便用 SMEMBERS 取快照时该会话已被新一轮刷新替换，也不会误删新签发但尚未返回给前端的会话。
+    private static final DefaultRedisScript<Long> REVOKE_ALL_SCRIPT = new DefaultRedisScript<>("""
+            local userId = ARGV[1]
+            local removed = 0
+            for i = 2, #ARGV do
+                local sid = ARGV[i]
+                local key = KEYS[1] .. sid
+                local current = redis.call('GET', key)
+                if current and string.sub(current, 1, #userId + 1) == userId .. ':' then
+                    redis.call('DEL', key)
+                    redis.call('SREM', KEYS[2], sid)
+                    removed = removed + 1
+                end
+            end
+            return removed
             """, Long.class);
 
     private final JwtProperties properties;
@@ -62,6 +84,7 @@ public class JwtUtil {
         TokenPair pair = buildTokenPair(userId, sessionId);
         redisTemplate.opsForValue().set(sessionKey(sessionId),
                 sessionValue(userId, pair.refreshToken()), properties.getRefreshTokenTtl());
+        trackUserSession(userId, sessionId);
         return pair;
     }
 
@@ -82,6 +105,7 @@ public class JwtUtil {
         if (!Long.valueOf(1).equals(rotated)) {
             throw new BusinessException(401, "Refresh Token 已失效，请重新登录");
         }
+        trackUserSession(userId, sessionId);
         return pair;
     }
 
@@ -117,7 +141,57 @@ public class JwtUtil {
     /** 删除会话，同时撤销该会话下的 Access Token 与 Refresh Token。 */
     public void revokeTokens(String accessToken) {
         DecodedJWT jwt = verify(accessToken);
-        redisTemplate.delete(sessionKey(jwt.getClaim(SESSION_CLAIM).asString()));
+        String userId = jwt.getClaim(properties.getKey()).asString();
+        revokeSession(userId, jwt.getClaim(SESSION_CLAIM).asString());
+    }
+
+    /**
+     * 撤销该用户在指定会话之外的全部会话，即「退出全部设备」。
+     *
+     * <p>撤销包含两部分：逐个删除 Redis 中的会话记录，以及删除会话自身的 Access Token
+     * 与 Refresh Token。只删后者会导致用户索引里残留失效的会话 ID。
+     *
+     * @return 实际被撤销的会话数量
+     */
+    public long revokeAllSessions(String userId, String keepSessionId) {
+        if (userId == null || userId.isBlank()) {
+            throw new IllegalArgumentException("用户 ID 不能为空");
+        }
+        Set<String> sessionIds = redisTemplate.opsForSet().members(userSessionsKey(userId));
+        List<String> targets = sessionIds == null ? Collections.emptyList()
+                : sessionIds.stream().filter(id -> !id.equals(keepSessionId)).toList();
+        if (targets.isEmpty()) {
+            return 0L;
+        }
+        // 用 Lua 在 Redis 内原子执行「校验归属 → 删除会话 → 移出索引」，
+        // 避免与并发的刷新操作互相覆盖。
+        List<String> args = new java.util.ArrayList<>(targets.size() + 1);
+        args.add(userId);
+        args.addAll(targets);
+        Long removed = redisTemplate.execute(REVOKE_ALL_SCRIPT,
+                List.of(SESSION_PREFIX, userSessionsKey(userId)), args.toArray());
+        return removed == null ? 0L : removed;
+    }
+
+    private void revokeSession(String userId, String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return;
+        }
+        redisTemplate.delete(sessionKey(sessionId));
+        if (userId != null && !userId.isBlank()) {
+            redisTemplate.opsForSet().remove(userSessionsKey(userId), sessionId);
+        }
+    }
+
+    /** 把会话登记到用户索引，TTL 与会话一致，避免索引无限增长。 */
+    private void trackUserSession(String userId, String sessionId) {
+        String key = userSessionsKey(userId);
+        redisTemplate.opsForSet().add(key, sessionId);
+        redisTemplate.expire(key, properties.getRefreshTokenTtl());
+    }
+
+    private static String userSessionsKey(String userId) {
+        return USER_SESSIONS_PREFIX + userId;
     }
 
     private TokenPair buildTokenPair(String userId, String sessionId) {
