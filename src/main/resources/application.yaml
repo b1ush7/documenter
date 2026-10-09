@@ -6,3 +6,9 @@ spring:
       - dev
 server:
   port: 8080
+
+res:
+  jwt:
+    issuer: documenter
+    access-token-ttl: 15m
+    refresh-token-ttl: 7d
