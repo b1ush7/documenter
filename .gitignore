@@ -33,3 +33,11 @@ build/
 .vscode/
 
 src/main/resources/application-service.yaml
+
+### 本地配置与密钥（禁止提交真实凭据） ###
+.env
+.env.local
+*.local.yaml
+
+### 本地文件存储与转换临时目录（P0-4） ###
+/data/

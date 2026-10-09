@@ -35,7 +35,13 @@ public class SecurityConfig {
         http.csrf(AbstractHttpConfigurer::disable)
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(authorize -> authorize
-                        .requestMatchers("/user/login").permitAll()
+                        // register 系列必须写在 logout 之前，否则 /user/register/by-code 会被通配规则干扰
+                        .requestMatchers("/user/register", "/user/register/by-code", "/user/register/code").permitAll()
+                        .requestMatchers("/user/login", "/user/login/by-code", "/user/login/code").permitAll()
+                        .requestMatchers("/user/verify/code").permitAll()
+                        .requestMatchers("/user/refresh").permitAll()
+                        // logout-all 是业务接口，必须显式声明，避免被 logout 相关规则影响
+                        .requestMatchers("/user/logout-all").authenticated()
                         .anyRequest().authenticated());
         // 必须先认证再登出，确保登出能够撤销当前 JWT 会话。
         http.addFilterBefore(jwtAuthenticationFilter, LogoutFilter.class);

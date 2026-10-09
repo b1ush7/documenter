@@ -28,7 +28,6 @@
     </scm>
     <properties>
         <java.version>21</java.version>
-        <spring-ai.version>2.0.1</spring-ai.version>
     </properties>
     <dependencies>
 
@@ -95,18 +94,29 @@
             <artifactId>java-jwt</artifactId>
             <version>4.6.1</version>
         </dependency>
+
+        <!-- DTO 参数校验（TODO 3.1 要求补齐 DTO 参数校验） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!--
+          数据库迁移管理（TODO 3.4 要求引入迁移工具）。
+          Spring Boot 4 把自动配置按技术拆成了独立模块：spring-boot-autoconfigure 里
+          已经没有 FlywayAutoConfiguration，必须引入 spring-boot-starter-flyway，
+          否则 spring.flyway.* 配置会被静默忽略、迁移根本不会执行。
+          flyway-mysql 仍需显式引入，MariaDB 的方言支持（MariaDBDatabaseType）在这个模块里。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-flyway</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-mysql</artifactId>
+        </dependency>
     </dependencies>
-    <dependencyManagement>
-        <dependencies>
-            <dependency>
-                <groupId>org.springframework.ai</groupId>
-                <artifactId>spring-ai-bom</artifactId>
-                <version>${spring-ai.version}</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
-        </dependencies>
-    </dependencyManagement>
 
     <build>
         <plugins>

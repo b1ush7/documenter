@@ -30,9 +30,21 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         this.properties = properties;
     }
 
+    /** 免认证路径，必须与 SecurityConfig 的 permitAll 列表保持一致。 */
+    private static final java.util.Set<String> PUBLIC_PATHS = java.util.Set.of(
+            "/user/register",
+            "/user/register/by-code",
+            "/user/register/code",
+            "/user/login",
+            "/user/login/by-code",
+            "/user/login/code",
+            "/user/verify/code",
+            "/user/refresh");
+
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        return "/user/login".equals(request.getServletPath());
+        // 免认证接口：携带过期或无效的 Access Token 时不应被过滤器拦截成 401
+        return PUBLIC_PATHS.contains(request.getServletPath());
     }
 
     @Override
