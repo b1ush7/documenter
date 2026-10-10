@@ -2,6 +2,7 @@ package com.documenter.service.impl;
 
 import com.documenter.entity.FileAsset;
 import com.documenter.entity.DocumentVersion;
+import com.documenter.dto.FormatDocxParagraphsDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.EditDocxTableDTO;
@@ -24,11 +25,14 @@ import org.springframework.core.io.ByteArrayResource;
 import java.io.ByteArrayOutputStream;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.math.BigInteger;
 import java.nio.file.Path;
 import java.util.Base64;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 class DocxDocumentServiceImplTest {
@@ -283,6 +287,74 @@ class DocxDocumentServiceImplTest {
         assertEquals(422, exception.getCode());
     }
 
+    @Test
+    void formatsHeadingsBulletsAndNumberedParagraphs() throws Exception {
+        byte[] source;
+        try (XWPFDocument document = new XWPFDocument();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            document.createParagraph().createRun().setText("章节");
+            document.createParagraph().createRun().setText("要点一");
+            document.createParagraph().createRun().setText("要点二");
+            document.createParagraph().createRun().setText("步骤一");
+            XWPFParagraph clearList = document.createParagraph();
+            clearList.createRun().setText("取消列表");
+            clearList.setNumID(BigInteger.ONE);
+            clearList.setNumILvl(BigInteger.ZERO);
+            XWPFParagraph normal = document.createParagraph();
+            normal.setStyle("Heading2");
+            normal.createRun().setText("普通正文");
+            document.write(output);
+            source = output.toByteArray();
+        }
+
+        FormatDocxParagraphsDTO request = paragraphFormatRequest(
+                paragraphFormatOperation("SET_HEADING", "body/p0", 3),
+                paragraphFormatOperation("SET_BULLET", "body/p1", null),
+                paragraphFormatOperation("SET_BULLET", "body/p2", null),
+                paragraphFormatOperation("SET_NUMBERED", "body/p3", null),
+                paragraphFormatOperation("CLEAR_LIST", "body/p4", null),
+                paragraphFormatOperation("SET_NORMAL", "body/p5", null));
+        MemoryStorage storage = new MemoryStorage();
+        DocumentVersionService versionService = downloadService(
+                1L, 2L, 1, download(source, DOCX_CONTENT_TYPE, "docx"));
+
+        new DocxDocumentServiceImpl(versionService, storage, new CapturingVersionWriter())
+                .formatParagraphs(1L, 2L, 1, request);
+
+        try (XWPFDocument edited = new XWPFDocument(new ByteArrayInputStream(storage.content))) {
+            List<XWPFParagraph> paragraphs = edited.getParagraphs();
+            assertEquals("Heading3", paragraphs.get(0).getStyle());
+            assertEquals("bullet", paragraphs.get(1).getNumFmt());
+            assertEquals(paragraphs.get(1).getNumID(), paragraphs.get(2).getNumID());
+            assertEquals("decimal", paragraphs.get(3).getNumFmt());
+            assertNotEquals(paragraphs.get(1).getNumID(), paragraphs.get(3).getNumID());
+            assertNull(paragraphs.get(4).getNumID());
+            assertEquals("取消列表", paragraphs.get(4).getText());
+            assertEquals("Normal", paragraphs.get(5).getStyle());
+            assertEquals("普通正文", paragraphs.get(5).getText());
+        }
+    }
+
+    @Test
+    void rejectsHeadingFormatWithoutLevel() throws Exception {
+        byte[] source;
+        try (XWPFDocument document = new XWPFDocument();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            document.createParagraph().createRun().setText("章节");
+            document.write(output);
+            source = output.toByteArray();
+        }
+        DocumentVersionService versionService = downloadService(
+                1L, 2L, 1, download(source, DOCX_CONTENT_TYPE, "docx"));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> new DocxDocumentServiceImpl(versionService, new MemoryStorage(), unusedWriter())
+                        .formatParagraphs(1L, 2L, 1, paragraphFormatRequest(
+                                paragraphFormatOperation("SET_HEADING", "body/p0", null))));
+
+        assertEquals(400, exception.getCode());
+    }
+
     private static FileDownload download(byte[] content, String contentType, String extension) {
         FileAsset asset = new FileAsset();
         asset.setContentType(contentType);
@@ -331,6 +403,23 @@ class DocxDocumentServiceImplTest {
         operation.setBlockId(blockId);
         operation.setText(text);
         operation.setValues(values);
+        return operation;
+    }
+
+    private static FormatDocxParagraphsDTO paragraphFormatRequest(
+            FormatDocxParagraphsDTO.Operation... operations) {
+        FormatDocxParagraphsDTO request = new FormatDocxParagraphsDTO();
+        request.setInstruction("测试段落格式");
+        request.setOperations(List.of(operations));
+        return request;
+    }
+
+    private static FormatDocxParagraphsDTO.Operation paragraphFormatOperation(
+            String type, String blockId, Integer level) {
+        FormatDocxParagraphsDTO.Operation operation = new FormatDocxParagraphsDTO.Operation();
+        operation.setType(type);
+        operation.setBlockId(blockId);
+        operation.setLevel(level);
         return operation;
     }
 

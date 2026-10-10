@@ -4,6 +4,7 @@ import com.documenter.constant.ApiResponse;
 import com.documenter.dto.FileQueryDTO;
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.EditDocxTableDTO;
+import com.documenter.dto.FormatDocxParagraphsDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.dto.RenameFileDTO;
 import com.documenter.service.DocumentVersionService;
@@ -154,6 +155,15 @@ public class FileController {
                                                 @PathVariable Integer versionNo,
                                                 @Valid @RequestBody EditDocxTableDTO request) {
         return ApiResponse.success("已生成新版本", docxDocumentService.editTable(
+                SecurityUtil.requireUserId(), fileId, versionNo, request));
+    }
+
+    /** 设置指定 DOCX 版本中的标题、普通段落或列表格式。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/paragraph-formats")
+    public ApiResponse<VersionVO> formatDocxParagraphs(@PathVariable Long fileId,
+                                                       @PathVariable Integer versionNo,
+                                                       @Valid @RequestBody FormatDocxParagraphsDTO request) {
+        return ApiResponse.success("已生成新版本", docxDocumentService.formatParagraphs(
                 SecurityUtil.requireUserId(), fileId, versionNo, request));
     }
 

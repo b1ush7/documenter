@@ -2,6 +2,7 @@ package com.documenter.service.impl;
 
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.EditDocxTableDTO;
+import com.documenter.dto.FormatDocxParagraphsDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.entity.DocumentVersion;
 import com.documenter.enums.ChangeType;
@@ -25,6 +26,8 @@ import org.apache.poi.xwpf.usermodel.XWPFRun;
 import org.apache.poi.xwpf.usermodel.XWPFTable;
 import org.apache.poi.xwpf.usermodel.XWPFTableCell;
 import org.apache.poi.xwpf.usermodel.XWPFTableRow;
+import org.apache.poi.xwpf.usermodel.XWPFAbstractNum;
+import org.apache.poi.xwpf.usermodel.XWPFNumbering;
 import org.springframework.stereotype.Service;
 import org.apache.xmlbeans.XmlCursor;
 
@@ -39,6 +42,7 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.function.Consumer;
+import java.math.BigInteger;
 
 /** Apache POI 驱动的 DOCX 结构读取器。 */
 @Slf4j
@@ -134,6 +138,42 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                             edit.operation().getValues(), true);
                     case "DELETE_ROW" -> deleteRow(edit.table(), edit.row(), edit.operation().getBlockId());
                     default -> throw new BusinessException(400, "不支持的表格操作");
+                }
+            }
+        });
+    }
+
+    @Override
+    public VersionVO formatParagraphs(Long userId, Long fileId, Integer sourceVersion,
+                                      FormatDocxParagraphsDTO request) {
+        validateParagraphFormats(request.getOperations());
+        return editAndSave(userId, fileId, sourceVersion, request.getInstruction(),
+                "设置 " + request.getOperations().size() + " 个段落的标题或列表格式", document -> {
+            List<ResolvedParagraphFormat> formats = request.getOperations().stream()
+                    .map(operation -> new ResolvedParagraphFormat(
+                            operation, requireParagraph(document, operation.getBlockId())))
+                    .toList();
+            BigInteger bulletNumId = formats.stream().anyMatch(
+                    item -> "SET_BULLET".equals(item.operation().getType()))
+                    ? createNumbering(document, true) : null;
+            BigInteger numberedNumId = formats.stream().anyMatch(
+                    item -> "SET_NUMBERED".equals(item.operation().getType()))
+                    ? createNumbering(document, false) : null;
+            for (ResolvedParagraphFormat format : formats) {
+                XWPFParagraph paragraph = format.paragraph();
+                switch (format.operation().getType()) {
+                    case "SET_HEADING" -> {
+                        clearNumbering(paragraph);
+                        paragraph.setStyle("Heading" + format.operation().getLevel());
+                    }
+                    case "SET_NORMAL" -> {
+                        clearNumbering(paragraph);
+                        paragraph.setStyle("Normal");
+                    }
+                    case "SET_BULLET" -> applyNumbering(paragraph, bulletNumId);
+                    case "SET_NUMBERED" -> applyNumbering(paragraph, numberedNumId);
+                    case "CLEAR_LIST" -> clearNumbering(paragraph);
+                    default -> throw new BusinessException(400, "不支持的段落格式操作");
                 }
             }
         });
@@ -431,6 +471,63 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         }
     }
 
+    private static void validateParagraphFormats(List<FormatDocxParagraphsDTO.Operation> operations) {
+        Set<String> blockIds = new HashSet<>();
+        for (FormatDocxParagraphsDTO.Operation operation : operations) {
+            if (!blockIds.add(operation.getBlockId())) {
+                throw new BusinessException(400, "同一段落一次只能设置一种格式：" + operation.getBlockId());
+            }
+            boolean heading = "SET_HEADING".equals(operation.getType());
+            if (heading && operation.getLevel() == null) {
+                throw new BusinessException(400, "SET_HEADING 必须提供标题级别");
+            }
+            if (!heading && operation.getLevel() != null) {
+                throw new BusinessException(400, operation.getType() + " 不能包含标题级别");
+            }
+        }
+    }
+
+    private static BigInteger createNumbering(XWPFDocument document, boolean bullet) {
+        XWPFNumbering numbering = document.getNumbering();
+        if (numbering == null) {
+            numbering = document.createNumbering();
+        }
+        org.openxmlformats.schemas.wordprocessingml.x2006.main.CTAbstractNum definition =
+                org.openxmlformats.schemas.wordprocessingml.x2006.main.CTAbstractNum.Factory.newInstance();
+        BigInteger nextAbstractNumId = BigInteger.ZERO;
+        Set<BigInteger> existingIds = numbering.getAbstractNums().stream()
+                .map(item -> item.getCTAbstractNum().getAbstractNumId())
+                .collect(java.util.stream.Collectors.toSet());
+        while (existingIds.contains(nextAbstractNumId)) {
+            nextAbstractNumId = nextAbstractNumId.add(BigInteger.ONE);
+        }
+        definition.setAbstractNumId(nextAbstractNumId);
+        org.openxmlformats.schemas.wordprocessingml.x2006.main.CTLvl level = definition.addNewLvl();
+        level.setIlvl(BigInteger.ZERO);
+        level.addNewStart().setVal(BigInteger.ONE);
+        level.addNewNumFmt().setVal(bullet
+                ? org.openxmlformats.schemas.wordprocessingml.x2006.main.STNumberFormat.BULLET
+                : org.openxmlformats.schemas.wordprocessingml.x2006.main.STNumberFormat.DECIMAL);
+        level.addNewLvlText().setVal(bullet ? "•" : "%1.");
+        org.openxmlformats.schemas.wordprocessingml.x2006.main.CTInd indent =
+                level.addNewPPr().addNewInd();
+        indent.setLeft(BigInteger.valueOf(720));
+        indent.setHanging(BigInteger.valueOf(360));
+        BigInteger abstractNumId = numbering.addAbstractNum(new XWPFAbstractNum(definition));
+        return numbering.addNum(abstractNumId);
+    }
+
+    private static void applyNumbering(XWPFParagraph paragraph, BigInteger numId) {
+        paragraph.setNumID(numId);
+        paragraph.setNumILvl(BigInteger.ZERO);
+    }
+
+    private static void clearNumbering(XWPFParagraph paragraph) {
+        if (paragraph.getCTP().isSetPPr() && paragraph.getCTP().getPPr().isSetNumPr()) {
+            paragraph.getCTP().getPPr().unsetNumPr();
+        }
+    }
+
     private static ResolvedTableEdit resolveTableEdit(XWPFDocument document,
                                                        EditDocxTableDTO.Operation operation) {
         if ("SET_CELL_TEXT".equals(operation.getType())) {
@@ -607,5 +704,9 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
 
     private record ResolvedTableEdit(EditDocxTableDTO.Operation operation,
                                      XWPFTable table, XWPFTableRow row, XWPFTableCell cell) {
+    }
+
+    private record ResolvedParagraphFormat(FormatDocxParagraphsDTO.Operation operation,
+                                           XWPFParagraph paragraph) {
     }
 }
