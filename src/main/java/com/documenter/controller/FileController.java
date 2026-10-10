@@ -5,6 +5,7 @@ import com.documenter.dto.FileQueryDTO;
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.EditDocxTableDTO;
 import com.documenter.dto.FormatDocxParagraphsDTO;
+import com.documenter.dto.GenerateDocxDTO;
 import com.documenter.dto.InsertDocxImagesDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.dto.RenameFileDTO;
@@ -60,6 +61,13 @@ public class FileController {
     }
 
     // ---------------------------------------------------------------- 文件
+
+    /** 根据标题、段落、列表、表格和图片结构在本地生成 DOCX。 */
+    @PostMapping("/docx/generate")
+    public ApiResponse<FileAssetVO> generateDocx(@Valid @RequestBody GenerateDocxDTO request) {
+        return ApiResponse.success("生成成功", docxDocumentService.generate(
+                SecurityUtil.requireUserId(), request));
+    }
 
     /** 上传。真实类型由服务端按内容识别，客户端声明的类型与扩展名一律忽略。 */
     @PostMapping("/upload")

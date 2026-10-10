@@ -3,6 +3,7 @@ package com.documenter.service.impl;
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.EditDocxTableDTO;
 import com.documenter.dto.FormatDocxParagraphsDTO;
+import com.documenter.dto.GenerateDocxDTO;
 import com.documenter.dto.InsertDocxImagesDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.entity.DocumentVersion;
@@ -10,10 +11,12 @@ import com.documenter.enums.ChangeType;
 import com.documenter.exception.BusinessException;
 import com.documenter.service.DocumentVersionService;
 import com.documenter.service.DocxDocumentService;
+import com.documenter.service.FileService;
 import com.documenter.service.FileStorage;
 import com.documenter.service.VersionWriter;
 import com.documenter.util.Digests;
 import com.documenter.vo.DocxStructureVO;
+import com.documenter.vo.FileAssetVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.VersionVO;
 import lombok.extern.slf4j.Slf4j;
@@ -29,6 +32,7 @@ import org.apache.poi.xwpf.usermodel.XWPFTableCell;
 import org.apache.poi.xwpf.usermodel.XWPFTableRow;
 import org.apache.poi.xwpf.usermodel.XWPFAbstractNum;
 import org.apache.poi.xwpf.usermodel.XWPFNumbering;
+import org.apache.poi.xwpf.usermodel.ParagraphAlignment;
 import org.apache.poi.util.Units;
 import org.apache.poi.xwpf.usermodel.Document;
 import org.apache.poi.openxml4j.exceptions.InvalidFormatException;
@@ -60,13 +64,42 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
     private final DocumentVersionService versionService;
     private final FileStorage fileStorage;
     private final VersionWriter versionWriter;
+    private final FileService fileService;
 
     public DocxDocumentServiceImpl(DocumentVersionService versionService,
                                    FileStorage fileStorage,
-                                   VersionWriter versionWriter) {
+                                   VersionWriter versionWriter,
+                                   FileService fileService) {
         this.versionService = versionService;
         this.fileStorage = fileStorage;
         this.versionWriter = versionWriter;
+        this.fileService = fileService;
+    }
+
+    @Override
+    public FileAssetVO generate(Long userId, GenerateDocxDTO request) {
+        validateGeneration(request);
+        byte[] content;
+        try (XWPFDocument document = new XWPFDocument();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            configureA4Page(document);
+            if (request.getTitle() != null && !request.getTitle().isBlank()) {
+                addTextParagraph(document, request.getTitle(), "Title", 22, true,
+                        ParagraphAlignment.CENTER);
+            }
+            if (request.getBlocks() != null) {
+                for (GenerateDocxDTO.Block block : request.getBlocks()) {
+                    appendGeneratedBlock(userId, document, block);
+                }
+            }
+            document.write(output);
+            content = output.toByteArray();
+        } catch (IOException e) {
+            log.warn("本地生成 DOCX 失败, userId={}", userId, e);
+            throw new BusinessException(500, "DOCX 生成失败，请稍后重试");
+        }
+        return fileService.createGeneratedDocx(userId, request.getFileName(), content,
+                request.getInstruction());
     }
 
     @Override
@@ -506,6 +539,185 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         }
     }
 
+    private static void validateGeneration(GenerateDocxDTO request) {
+        boolean hasTitle = request.getTitle() != null && !request.getTitle().isBlank();
+        boolean hasBlocks = request.getBlocks() != null && !request.getBlocks().isEmpty();
+        if (!hasTitle && !hasBlocks) {
+            throw new BusinessException(400, "文档标题和结构块不能同时为空");
+        }
+        if (!hasBlocks) {
+            return;
+        }
+        for (int index = 0; index < request.getBlocks().size(); index++) {
+            GenerateDocxDTO.Block block = request.getBlocks().get(index);
+            if (block == null || block.getType() == null) {
+                throw new BusinessException(400, "第 " + (index + 1) + " 个结构块缺少类型");
+            }
+            switch (block.getType()) {
+                case "HEADING" -> {
+                    if (block.getText() == null || block.getText().isBlank()) {
+                        throw invalidGeneratedBlock(index, "标题文本不能为空");
+                    }
+                    if (block.getLevel() == null || block.getLevel() < 1 || block.getLevel() > 9) {
+                        throw invalidGeneratedBlock(index, "标题块的 level 必须在 1 到 9 之间");
+                    }
+                    requireNoCollectionsOrImage(block, index);
+                }
+                case "PARAGRAPH" -> {
+                    requireText(block, index);
+                    if (block.getLevel() != null) {
+                        throw invalidGeneratedBlock(index, "正文块不能包含 level");
+                    }
+                    requireNoCollectionsOrImage(block, index);
+                }
+                case "BULLET_LIST", "NUMBERED_LIST" -> {
+                    if (block.getItems() == null || block.getItems().isEmpty()
+                            || block.getItems().stream().anyMatch(item -> item == null)) {
+                        throw invalidGeneratedBlock(index, "列表块必须包含非空 items");
+                    }
+                    if (block.getText() != null || block.getLevel() != null || block.getRows() != null
+                            || hasImageFields(block)) {
+                        throw invalidGeneratedBlock(index, "列表块只能包含 items");
+                    }
+                }
+                case "TABLE" -> validateGeneratedTable(block, index);
+                case "IMAGE" -> {
+                    if (block.getImageFileId() == null || block.getImageVersionNo() == null
+                            || block.getWidthPixels() == null || block.getHeightPixels() == null) {
+                        throw invalidGeneratedBlock(index, "图片块必须包含文件、版本和宽高");
+                    }
+                    if (block.getImageFileId() <= 0 || block.getImageVersionNo() <= 0
+                            || block.getWidthPixels() < 1 || block.getWidthPixels() > 10000
+                            || block.getHeightPixels() < 1 || block.getHeightPixels() > 10000) {
+                        throw invalidGeneratedBlock(index, "图片文件、版本和宽高超出允许范围");
+                    }
+                    if (block.getText() != null || block.getLevel() != null
+                            || block.getItems() != null || block.getRows() != null) {
+                        throw invalidGeneratedBlock(index, "图片块不能包含文本、列表或表格字段");
+                    }
+                }
+                default -> throw invalidGeneratedBlock(index, "不支持的结构块类型");
+            }
+        }
+    }
+
+    private static void requireText(GenerateDocxDTO.Block block, int index) {
+        if (block.getText() == null) {
+            throw invalidGeneratedBlock(index, "文本不能为空");
+        }
+    }
+
+    private static void requireNoCollectionsOrImage(GenerateDocxDTO.Block block, int index) {
+        if (block.getItems() != null || block.getRows() != null || hasImageFields(block)) {
+            throw invalidGeneratedBlock(index, "文本块不能包含列表、表格或图片字段");
+        }
+    }
+
+    private static boolean hasImageFields(GenerateDocxDTO.Block block) {
+        return block.getImageFileId() != null || block.getImageVersionNo() != null
+                || block.getWidthPixels() != null || block.getHeightPixels() != null;
+    }
+
+    private static void validateGeneratedTable(GenerateDocxDTO.Block block, int index) {
+        if (block.getRows() == null || block.getRows().isEmpty()
+                || block.getRows().getFirst() == null || block.getRows().getFirst().isEmpty()) {
+            throw invalidGeneratedBlock(index, "表格块必须包含非空 rows");
+        }
+        int columns = block.getRows().getFirst().size();
+        if (block.getRows().stream().anyMatch(row -> row == null || row.size() != columns
+                || row.stream().anyMatch(cell -> cell == null))) {
+            throw invalidGeneratedBlock(index, "表格每行列数必须一致且单元格不能为 null");
+        }
+        if (block.getText() != null || block.getLevel() != null || block.getItems() != null
+                || hasImageFields(block)) {
+            throw invalidGeneratedBlock(index, "表格块只能包含 rows");
+        }
+    }
+
+    private static BusinessException invalidGeneratedBlock(int index, String message) {
+        return new BusinessException(400, "第 " + (index + 1) + " 个结构块无效：" + message);
+    }
+
+    private void appendGeneratedBlock(Long userId, XWPFDocument document, GenerateDocxDTO.Block block) {
+        switch (block.getType()) {
+            case "HEADING" -> addTextParagraph(document, block.getText(),
+                    "Heading" + block.getLevel(), headingFontSize(block.getLevel()), true,
+                    ParagraphAlignment.LEFT);
+            case "PARAGRAPH" -> addTextParagraph(document, block.getText(),
+                    "Normal", 12, false, ParagraphAlignment.LEFT);
+            case "BULLET_LIST", "NUMBERED_LIST" -> {
+                BigInteger numId = createNumbering(document, "BULLET_LIST".equals(block.getType()));
+                for (String item : block.getItems()) {
+                    XWPFParagraph paragraph = addTextParagraph(document, item,
+                            "Normal", 12, false, ParagraphAlignment.LEFT);
+                    applyNumbering(paragraph, numId);
+                }
+            }
+            case "TABLE" -> appendGeneratedTable(document, block.getRows());
+            case "IMAGE" -> {
+                XWPFParagraph paragraph = document.createParagraph();
+                paragraph.setAlignment(ParagraphAlignment.CENTER);
+                appendImage(userId, paragraph, block.getImageFileId(), block.getImageVersionNo(),
+                        block.getWidthPixels(), block.getHeightPixels(), "生成文档中的图片块");
+            }
+            default -> throw new BusinessException(400, "不支持的 DOCX 结构块类型");
+        }
+    }
+
+    private static XWPFParagraph addTextParagraph(XWPFDocument document, String text,
+                                                   String style, int fontSize, boolean bold,
+                                                   ParagraphAlignment alignment) {
+        XWPFParagraph paragraph = document.createParagraph();
+        paragraph.setStyle(style);
+        paragraph.setAlignment(alignment);
+        paragraph.setSpacingAfter(120);
+        paragraph.setSpacingBetween(1.5);
+        XWPFRun run = paragraph.createRun();
+        run.setFontFamily("宋体");
+        run.setFontSize(fontSize);
+        run.setBold(bold);
+        run.setText(text);
+        return paragraph;
+    }
+
+    private static int headingFontSize(int level) {
+        return switch (level) {
+            case 1 -> 18;
+            case 2 -> 16;
+            case 3 -> 14;
+            default -> 12;
+        };
+    }
+
+    private static void appendGeneratedTable(XWPFDocument document, List<List<String>> rows) {
+        XWPFTable table = document.createTable(rows.size(), rows.getFirst().size());
+        table.setStyleID("TableGrid");
+        table.setWidth("100%");
+        for (int rowIndex = 0; rowIndex < rows.size(); rowIndex++) {
+            for (int columnIndex = 0; columnIndex < rows.get(rowIndex).size(); columnIndex++) {
+                XWPFParagraph paragraph = table.getRow(rowIndex).getCell(columnIndex)
+                        .getParagraphs().getFirst();
+                XWPFRun run = paragraph.createRun();
+                run.setFontFamily("宋体");
+                run.setFontSize(11);
+                run.setText(rows.get(rowIndex).get(columnIndex));
+            }
+        }
+    }
+
+    private static void configureA4Page(XWPFDocument document) {
+        var body = document.getDocument().getBody();
+        var section = body.isSetSectPr() ? body.getSectPr() : body.addNewSectPr();
+        var pageSize = section.isSetPgSz() ? section.getPgSz() : section.addNewPgSz();
+        pageSize.setW(BigInteger.valueOf(11906));
+        pageSize.setH(BigInteger.valueOf(16838));
+        var margins = section.isSetPgMar() ? section.getPgMar() : section.addNewPgMar();
+        margins.setTop(BigInteger.valueOf(1440));
+        margins.setRight(BigInteger.valueOf(1440));
+        margins.setBottom(BigInteger.valueOf(1440));
+        margins.setLeft(BigInteger.valueOf(1440));
+    }
+
     private static BigInteger createNumbering(XWPFDocument document, boolean bullet) {
         XWPFNumbering numbering = document.getNumbering();
         if (numbering == null) {
@@ -549,21 +761,26 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
 
     private void appendImage(Long userId, XWPFParagraph paragraph,
                              InsertDocxImagesDTO.Operation operation) {
+        appendImage(userId, paragraph, operation.getImageFileId(), operation.getImageVersionNo(),
+                operation.getWidthPixels(), operation.getHeightPixels(), operation.getBlockId());
+    }
+
+    private void appendImage(Long userId, XWPFParagraph paragraph, Long imageFileId,
+                             Integer imageVersionNo, Integer widthPixels, Integer heightPixels,
+                             String targetDescription) {
         FileDownload image = versionService.downloadVersion(
-                userId, operation.getImageFileId(), operation.getImageVersionNo());
+                userId, imageFileId, imageVersionNo);
         int pictureType = pictureType(image);
         try (InputStream input = image.resource().getInputStream()) {
             String fileName = image.downloadFileName() == null
                     ? (pictureType == Document.PICTURE_TYPE_PNG ? "image.png" : "image.jpg")
                     : image.downloadFileName();
             paragraph.createRun().addPicture(input, pictureType, fileName,
-                    Units.pixelToEMU(operation.getWidthPixels()),
-                    Units.pixelToEMU(operation.getHeightPixels()));
+                    Units.pixelToEMU(widthPixels), Units.pixelToEMU(heightPixels));
         } catch (IOException | InvalidFormatException e) {
-            log.warn("图片无法写入 DOCX, imageFileId={}, versionNo={}, blockId={}",
-                    operation.getImageFileId(), operation.getImageVersionNo(),
-                    operation.getBlockId(), e);
-            throw new BusinessException(422, "图片无法写入 DOCX：" + operation.getBlockId());
+            log.warn("图片无法写入 DOCX, imageFileId={}, versionNo={}, target={}",
+                    imageFileId, imageVersionNo, targetDescription, e);
+            throw new BusinessException(422, "图片无法写入 DOCX：" + targetDescription);
         }
     }
 

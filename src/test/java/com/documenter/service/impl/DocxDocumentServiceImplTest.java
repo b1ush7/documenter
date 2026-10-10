@@ -4,6 +4,8 @@ import com.documenter.entity.FileAsset;
 import com.documenter.entity.DocumentVersion;
 import com.documenter.dto.FormatDocxParagraphsDTO;
 import com.documenter.dto.InsertDocxImagesDTO;
+import com.documenter.dto.GenerateDocxDTO;
+import com.documenter.dto.FileQueryDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.EditDocxTableDTO;
@@ -11,10 +13,13 @@ import com.documenter.enums.ChangeType;
 import com.documenter.exception.BusinessException;
 import com.documenter.service.DocumentVersionService;
 import com.documenter.service.FileStorage;
+import com.documenter.service.FileService;
 import com.documenter.service.VersionWriter;
 import com.documenter.util.Digests;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.FileDownload;
+import com.documenter.vo.FileAssetVO;
+import com.documenter.vo.PageResult;
 import com.documenter.vo.VersionVO;
 import org.apache.poi.xwpf.usermodel.Document;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
@@ -23,6 +28,7 @@ import org.apache.poi.xwpf.usermodel.XWPFRun;
 import org.apache.poi.util.Units;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.ByteArrayResource;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.io.ByteArrayOutputStream;
 import java.io.ByteArrayInputStream;
@@ -43,6 +49,71 @@ class DocxDocumentServiceImplTest {
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
     private static final byte[] ONE_PIXEL_PNG = Base64.getDecoder().decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+
+    @Test
+    void generatesStructuredDocxAndPersistsItAsNewFile() throws Exception {
+        GenerateDocxDTO request = new GenerateDocxDTO();
+        request.setFileName("项目报告");
+        request.setTitle("年度总结");
+        request.setInstruction("根据前端结构生成");
+        request.setBlocks(List.of(
+                generatedTextBlock("HEADING", "第一章", 1),
+                generatedTextBlock("PARAGRAPH", "正文内容", null),
+                generatedListBlock("BULLET_LIST", List.of("要点一", "要点二")),
+                generatedListBlock("NUMBERED_LIST", List.of("步骤一")),
+                generatedTableBlock(List.of(List.of("姓名", "分数"), List.of("小明", "95"))),
+                generatedImageBlock(9L, 2, 80, 60)));
+        CapturingGeneratedFileService fileService = new CapturingGeneratedFileService();
+        DocumentVersionService versionService = imageDownloadService(
+                7L, 9L, 2, download(ONE_PIXEL_PNG, "image/png", "png"));
+
+        FileAssetVO result = new DocxDocumentServiceImpl(
+                versionService, unusedStorage(), unusedWriter(), fileService)
+                .generate(7L, request);
+
+        assertEquals(31L, result.getId());
+        assertEquals("项目报告", fileService.displayName);
+        assertEquals("根据前端结构生成", fileService.instruction);
+        try (XWPFDocument generated = new XWPFDocument(new ByteArrayInputStream(fileService.content))) {
+            List<XWPFParagraph> paragraphs = generated.getParagraphs();
+            assertEquals("年度总结", paragraphs.get(0).getText());
+            assertEquals("Title", paragraphs.get(0).getStyle());
+            assertEquals("CENTER", paragraphs.get(0).getAlignment().name());
+            assertEquals("Heading1", paragraphs.get(1).getStyle());
+            assertEquals("正文内容", paragraphs.get(2).getText());
+            assertEquals("bullet", paragraphs.get(3).getNumFmt());
+            assertEquals(paragraphs.get(3).getNumID(), paragraphs.get(4).getNumID());
+            assertEquals("decimal", paragraphs.get(5).getNumFmt());
+            assertEquals(1, generated.getTables().size());
+            assertEquals("姓名", generated.getTables().getFirst().getRow(0).getCell(0).getText());
+            assertEquals("95", generated.getTables().getFirst().getRow(1).getCell(1).getText());
+            var picture = paragraphs.get(6).getRuns().getFirst().getEmbeddedPictures().getFirst();
+            assertEquals(Units.pixelToEMU(80),
+                    picture.getCTPicture().getSpPr().getXfrm().getExt().getCx());
+            assertEquals(Units.pixelToEMU(60),
+                    picture.getCTPicture().getSpPr().getXfrm().getExt().getCy());
+            var section = generated.getDocument().getBody().getSectPr();
+            assertEquals(BigInteger.valueOf(11906), section.getPgSz().getW());
+            assertEquals(BigInteger.valueOf(1440), section.getPgMar().getLeft());
+        }
+    }
+
+    @Test
+    void rejectsGeneratedTableWithUnequalColumnCounts() {
+        GenerateDocxDTO request = new GenerateDocxDTO();
+        request.setFileName("invalid.docx");
+        request.setBlocks(List.of(generatedTableBlock(
+                List.of(List.of("A", "B"), List.of("C")))));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> new DocxDocumentServiceImpl(
+                        downloadService(1L, 2L, 1,
+                                download(new byte[]{1}, DOCX_CONTENT_TYPE, "docx")),
+                        unusedStorage(), unusedWriter(), unusedFileService())
+                        .generate(1L, request));
+
+        assertEquals(400, exception.getCode());
+    }
 
     @Test
     void readsParagraphHeadingTableAndImageInDocumentOrder() throws Exception {
@@ -70,7 +141,7 @@ class DocxDocumentServiceImplTest {
                 7L, 11L, 3, download(content, DOCX_CONTENT_TYPE, "docx"));
 
         DocxStructureVO structure = new DocxDocumentServiceImpl(
-                versionService, unusedStorage(), unusedWriter())
+                versionService, unusedStorage(), unusedWriter(), unusedFileService())
                 .readStructure(7L, 11L, 3);
 
         assertEquals(11L, structure.fileId());
@@ -95,7 +166,8 @@ class DocxDocumentServiceImplTest {
                 1L, 2L, 1, download(new byte[]{1, 2, 3}, "application/pdf", "pdf"));
 
         BusinessException exception = assertThrows(BusinessException.class,
-                () -> new DocxDocumentServiceImpl(versionService, unusedStorage(), unusedWriter())
+                () -> new DocxDocumentServiceImpl(versionService, unusedStorage(), unusedWriter(),
+                        unusedFileService())
                         .readStructure(1L, 2L, 1));
 
         assertEquals(400, exception.getCode());
@@ -121,7 +193,7 @@ class DocxDocumentServiceImplTest {
         DocumentVersionService versionService = downloadService(
                 8L, 12L, 1, download(source, DOCX_CONTENT_TYPE, "docx"));
 
-        VersionVO result = new DocxDocumentServiceImpl(versionService, storage, writer)
+        VersionVO result = new DocxDocumentServiceImpl(versionService, storage, writer, unusedFileService())
                 .replaceParagraphText(8L, 12L, 1, request);
 
         assertEquals(2, result.getVersionNo());
@@ -150,7 +222,8 @@ class DocxDocumentServiceImplTest {
                 1L, 2L, 1, download(source, DOCX_CONTENT_TYPE, "docx"));
 
         BusinessException exception = assertThrows(BusinessException.class,
-                () -> new DocxDocumentServiceImpl(versionService, new MemoryStorage(), unusedWriter())
+                () -> new DocxDocumentServiceImpl(versionService, new MemoryStorage(), unusedWriter(),
+                        unusedFileService())
                         .replaceParagraphText(1L, 2L, 1, request("body/p0", "不能覆盖图片")));
 
         assertEquals(422, exception.getCode());
@@ -180,7 +253,7 @@ class DocxDocumentServiceImplTest {
         DocumentVersionService versionService = downloadService(
                 2L, 3L, 1, download(source, DOCX_CONTENT_TYPE, "docx"));
 
-        new DocxDocumentServiceImpl(versionService, storage, writer)
+        new DocxDocumentServiceImpl(versionService, storage, writer, unusedFileService())
                 .editParagraphs(2L, 3L, 1, request);
 
         try (XWPFDocument edited = new XWPFDocument(new ByteArrayInputStream(storage.content))) {
@@ -205,7 +278,8 @@ class DocxDocumentServiceImplTest {
                 1L, 2L, 1, download(source, DOCX_CONTENT_TYPE, "docx"));
 
         BusinessException exception = assertThrows(BusinessException.class,
-                () -> new DocxDocumentServiceImpl(versionService, new MemoryStorage(), unusedWriter())
+                () -> new DocxDocumentServiceImpl(versionService, new MemoryStorage(), unusedWriter(),
+                        unusedFileService())
                         .editParagraphs(1L, 2L, 1, paragraphEditRequest(
                                 paragraphOperation("DELETE", "body/t0/r0/c0/p0", null))));
 
@@ -225,7 +299,8 @@ class DocxDocumentServiceImplTest {
         DocumentVersionService versionService = downloadService(
                 1L, 2L, 1, download(source, DOCX_CONTENT_TYPE, "docx"));
 
-        new DocxDocumentServiceImpl(versionService, storage, new CapturingVersionWriter())
+        new DocxDocumentServiceImpl(versionService, storage, new CapturingVersionWriter(),
+                unusedFileService())
                 .editParagraphs(1L, 2L, 1, paragraphEditRequest(
                         paragraphOperation("INSERT_AFTER", "body/t0/r0/c0/p0", "第二段")));
 
@@ -256,7 +331,8 @@ class DocxDocumentServiceImplTest {
                 tableOperation("INSERT_ROW_AFTER", "body/t0/r0", null, List.of("新增1", "新增2")),
                 tableOperation("DELETE_ROW", "body/t0/r1", null, null));
 
-        new DocxDocumentServiceImpl(versionService, storage, new CapturingVersionWriter())
+        new DocxDocumentServiceImpl(versionService, storage, new CapturingVersionWriter(),
+                unusedFileService())
                 .editTable(1L, 2L, 1, request);
 
         try (XWPFDocument edited = new XWPFDocument(new ByteArrayInputStream(storage.content))) {
@@ -282,7 +358,8 @@ class DocxDocumentServiceImplTest {
                 1L, 2L, 1, download(source, DOCX_CONTENT_TYPE, "docx"));
 
         BusinessException exception = assertThrows(BusinessException.class,
-                () -> new DocxDocumentServiceImpl(versionService, new MemoryStorage(), unusedWriter())
+                () -> new DocxDocumentServiceImpl(versionService, new MemoryStorage(), unusedWriter(),
+                        unusedFileService())
                         .editTable(1L, 2L, 1, tableEditRequest(
                                 tableOperation("DELETE_ROW", "body/t0/r0", null, null))));
 
@@ -320,7 +397,8 @@ class DocxDocumentServiceImplTest {
         DocumentVersionService versionService = downloadService(
                 1L, 2L, 1, download(source, DOCX_CONTENT_TYPE, "docx"));
 
-        new DocxDocumentServiceImpl(versionService, storage, new CapturingVersionWriter())
+        new DocxDocumentServiceImpl(versionService, storage, new CapturingVersionWriter(),
+                unusedFileService())
                 .formatParagraphs(1L, 2L, 1, request);
 
         try (XWPFDocument edited = new XWPFDocument(new ByteArrayInputStream(storage.content))) {
@@ -350,7 +428,8 @@ class DocxDocumentServiceImplTest {
                 1L, 2L, 1, download(source, DOCX_CONTENT_TYPE, "docx"));
 
         BusinessException exception = assertThrows(BusinessException.class,
-                () -> new DocxDocumentServiceImpl(versionService, new MemoryStorage(), unusedWriter())
+                () -> new DocxDocumentServiceImpl(versionService, new MemoryStorage(), unusedWriter(),
+                        unusedFileService())
                         .formatParagraphs(1L, 2L, 1, paragraphFormatRequest(
                                 paragraphFormatOperation("SET_HEADING", "body/p0", null))));
 
@@ -375,7 +454,8 @@ class DocxDocumentServiceImplTest {
                 1L, 2L, 1, download(source, DOCX_CONTENT_TYPE, "docx"),
                 9L, 2, download(ONE_PIXEL_PNG, "image/png", "png"));
 
-        new DocxDocumentServiceImpl(versionService, storage, new CapturingVersionWriter())
+        new DocxDocumentServiceImpl(versionService, storage, new CapturingVersionWriter(),
+                unusedFileService())
                 .insertImages(1L, 2L, 1, request);
 
         try (XWPFDocument edited = new XWPFDocument(new ByteArrayInputStream(storage.content))) {
@@ -405,7 +485,8 @@ class DocxDocumentServiceImplTest {
                 9L, 2, download(new byte[]{1, 2, 3}, "application/pdf", "pdf"));
 
         BusinessException exception = assertThrows(BusinessException.class,
-                () -> new DocxDocumentServiceImpl(versionService, new MemoryStorage(), unusedWriter())
+                () -> new DocxDocumentServiceImpl(versionService, new MemoryStorage(), unusedWriter(),
+                        unusedFileService())
                         .insertImages(1L, 2L, 1, imageInsertRequest(
                                 imageInsertOperation("body/p0", 9L, 2, 80, 60))));
 
@@ -419,6 +500,39 @@ class DocxDocumentServiceImplTest {
         asset.setDisplayName("sample." + extension);
         return new FileDownload(asset, new ByteArrayResource(content), content.length,
                 contentType, asset.getDisplayName());
+    }
+
+    private static GenerateDocxDTO.Block generatedTextBlock(String type, String text, Integer level) {
+        GenerateDocxDTO.Block block = new GenerateDocxDTO.Block();
+        block.setType(type);
+        block.setText(text);
+        block.setLevel(level);
+        return block;
+    }
+
+    private static GenerateDocxDTO.Block generatedListBlock(String type, List<String> items) {
+        GenerateDocxDTO.Block block = new GenerateDocxDTO.Block();
+        block.setType(type);
+        block.setItems(items);
+        return block;
+    }
+
+    private static GenerateDocxDTO.Block generatedTableBlock(List<List<String>> rows) {
+        GenerateDocxDTO.Block block = new GenerateDocxDTO.Block();
+        block.setType("TABLE");
+        block.setRows(rows);
+        return block;
+    }
+
+    private static GenerateDocxDTO.Block generatedImageBlock(Long fileId, Integer versionNo,
+                                                              Integer width, Integer height) {
+        GenerateDocxDTO.Block block = new GenerateDocxDTO.Block();
+        block.setType("IMAGE");
+        block.setImageFileId(fileId);
+        block.setImageVersionNo(versionNo);
+        block.setWidthPixels(width);
+        block.setHeightPixels(height);
+        return block;
     }
 
     private static ReplaceDocxTextDTO request(String blockId, String text) {
@@ -509,6 +623,10 @@ class DocxDocumentServiceImplTest {
         };
     }
 
+    private static FileService unusedFileService() {
+        return new StubFileService();
+    }
+
     private static DocumentVersionService downloadService(Long expectedUserId, Long expectedFileId,
                                                           Integer expectedVersion, FileDownload download) {
         return new DocumentVersionService() {
@@ -568,6 +686,102 @@ class DocxDocumentServiceImplTest {
                 throw new AssertionError("unexpected file version: " + fileId + "/" + versionNo);
             }
         };
+    }
+
+    private static DocumentVersionService imageDownloadService(
+            Long expectedUserId, Long imageFileId, Integer imageVersion, FileDownload image) {
+        return new DocumentVersionService() {
+            @Override
+            public List<VersionVO> listVersions(Long userId, Long fileId) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public VersionVO getVersion(Long userId, Long fileId, Integer versionNo) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public VersionVO restore(Long userId, Long fileId, Integer versionNo, Integer expectVersion) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public FileDownload downloadVersion(Long userId, Long fileId, Integer versionNo) {
+                assertEquals(expectedUserId, userId);
+                assertEquals(imageFileId, fileId);
+                assertEquals(imageVersion, versionNo);
+                return image;
+            }
+        };
+    }
+
+    private static class StubFileService implements FileService {
+        @Override
+        public FileAssetVO upload(Long userId, MultipartFile file) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public FileAssetVO createGeneratedDocx(Long userId, String displayName, byte[] content,
+                                               String instruction) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public PageResult<FileAssetVO> list(Long userId, FileQueryDTO query) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public FileAssetVO detail(Long userId, Long fileId) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public FileAssetVO rename(Long userId, Long fileId, String displayName) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void delete(Long userId, Long fileId) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public FileDownload download(Long userId, Long fileId) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public FileAsset requireOwned(Long userId, Long fileId) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public long usedBytes(Long userId) {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    private static final class CapturingGeneratedFileService extends StubFileService {
+        private String displayName;
+        private String instruction;
+        private byte[] content;
+
+        @Override
+        public FileAssetVO createGeneratedDocx(Long userId, String displayName, byte[] content,
+                                               String instruction) {
+            assertEquals(7L, userId);
+            this.displayName = displayName;
+            this.content = content;
+            this.instruction = instruction;
+            FileAssetVO result = new FileAssetVO();
+            result.setId(31L);
+            result.setDisplayName(displayName + ".docx");
+            result.setLatestVersion(1);
+            return result;
+        }
     }
 
     private static final class MemoryStorage implements FileStorage {

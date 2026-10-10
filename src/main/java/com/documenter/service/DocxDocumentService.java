@@ -3,13 +3,18 @@ package com.documenter.service;
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.EditDocxTableDTO;
 import com.documenter.dto.FormatDocxParagraphsDTO;
+import com.documenter.dto.GenerateDocxDTO;
 import com.documenter.dto.InsertDocxImagesDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.vo.DocxStructureVO;
+import com.documenter.vo.FileAssetVO;
 import com.documenter.vo.VersionVO;
 
 /** DOCX 版本的结构化读取能力。 */
 public interface DocxDocumentService {
+
+    /** 根据受限结构块在本地生成一个新的 DOCX 文件。 */
+    FileAssetVO generate(Long userId, GenerateDocxDTO request);
 
     /**
      * 读取用户拥有的一个明确版本。
