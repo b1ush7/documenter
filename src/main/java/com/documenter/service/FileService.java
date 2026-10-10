@@ -19,6 +19,10 @@ public interface FileService {
     /** 上传文件。存储前校验真实类型与大小，落库后返回元数据。 */
     FileAssetVO upload(Long userId, MultipartFile file);
 
+    /** 保存服务端本地生成的 DOCX，并建立版本 1。 */
+    FileAssetVO createGeneratedDocx(Long userId, String displayName, byte[] content,
+                                    String instruction);
+
     /** 分页查询当前用户的文件。 */
     PageResult<FileAssetVO> list(Long userId, FileQueryDTO query);
 

@@ -6,11 +6,13 @@ import com.documenter.component.UploadRateLimiter;
 import com.documenter.configuration.StorageProperties;
 import com.documenter.dto.FileQueryDTO;
 import com.documenter.entity.FileAsset;
+import com.documenter.enums.ChangeType;
 import com.documenter.exception.BusinessException;
 import com.documenter.mapper.FileAssetMapper;
 import com.documenter.service.FileService;
 import com.documenter.service.FileStorage;
 import com.documenter.util.FileTypeDetector;
+import com.documenter.util.Digests;
 import com.documenter.vo.FileAssetVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.PageResult;
@@ -39,6 +41,9 @@ public class FileServiceImpl implements FileService {
     private static final String STATUS_READY = "READY";
     private static final String STATUS_DELETED = "DELETED";
     private static final String SOURCE_UPLOAD = "UPLOAD";
+    private static final String SOURCE_GENERATED = "GENERATED";
+    private static final String DOCX_CONTENT_TYPE =
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
     private final FileAssetMapper fileAssetMapper;
     private final FileStorage fileStorage;
@@ -135,6 +140,58 @@ public class FileServiceImpl implements FileService {
         } catch (IOException e) {
             cleanupOrphan(userId, storageKey);
             throw new BusinessException(500, "文件保存失败，请稍后重试");
+        } catch (RuntimeException e) {
+            cleanupOrphan(userId, storageKey);
+            throw e;
+        }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public FileAssetVO createGeneratedDocx(Long userId, String displayName, byte[] content,
+                                           String instruction) {
+        if (userId == null) {
+            throw new BusinessException(400, "用户 ID 不能为空");
+        }
+        if (content == null || content.length == 0) {
+            throw new BusinessException(400, "生成的 DOCX 内容不能为空");
+        }
+        long maxSize = properties.getUpload().getMaxSizeBytes();
+        if (content.length > maxSize) {
+            throw new BusinessException(413, "生成文件超过大小限制（最大 "
+                    + (maxSize / 1024 / 1024) + "MB）");
+        }
+        String safeName = FileTypeDetector.sanitizeDisplayName(displayName);
+        if (!safeName.toLowerCase(java.util.Locale.ROOT).endsWith(".docx")) {
+            safeName += ".docx";
+        }
+
+        String storageKey = null;
+        try {
+            storageKey = fileStorage.store(content, "docx");
+            FileAsset asset = new FileAsset();
+            asset.setUserId(userId);
+            asset.setOriginalName(safeName);
+            asset.setDisplayName(safeName);
+            asset.setStorageKey(storageKey);
+            asset.setContentType(DOCX_CONTENT_TYPE);
+            asset.setExtension("docx");
+            asset.setSizeBytes((long) content.length);
+            asset.setSha256(Digests.sha256Hex(content));
+            asset.setSource(SOURCE_GENERATED);
+            asset.setStatus(STATUS_READY);
+            asset.setLatestVersion(0);
+            fileAssetMapper.insert(asset);
+            if (asset.getId() == null) {
+                throw new BusinessException(500, "保存生成文件记录失败，请稍后重试");
+            }
+
+            initialVersionWriter.createInitialVersion(asset, userId, ChangeType.MANUAL_EDIT,
+                    instruction, "本地结构化生成 DOCX");
+            asset.setLatestVersion(1);
+            log.info("生成文件保存成功, userId={}, fileId={}, size={}",
+                    userId, asset.getId(), content.length);
+            return FileAssetVO.from(asset);
         } catch (RuntimeException e) {
             cleanupOrphan(userId, storageKey);
             throw e;
@@ -259,6 +316,6 @@ public class FileServiceImpl implements FileService {
             return;
         }
         boolean deleted = fileStorage.delete(storageKey);
-        log.warn("上传失败，已清理落盘文件, userId={}, storageKey={}, deleted={}", userId, storageKey, deleted);
+        log.warn("文件保存失败，已清理落盘文件, userId={}, storageKey={}, deleted={}", userId, storageKey, deleted);
     }
 }

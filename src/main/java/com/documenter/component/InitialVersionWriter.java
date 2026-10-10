@@ -40,6 +40,14 @@ public class InitialVersionWriter {
      */
     @Transactional(rollbackFor = Exception.class)
     public DocumentVersion createInitialVersion(FileAsset asset, Long userId) {
+        return createInitialVersion(asset, userId, ChangeType.UPLOAD, null, "原始上传");
+    }
+
+    /** 为刚创建的文件建立版本 1，可用于上传或服务端生成的文件。 */
+    @Transactional(rollbackFor = Exception.class)
+    public DocumentVersion createInitialVersion(FileAsset asset, Long userId,
+                                                 ChangeType changeType, String instruction,
+                                                 String summary) {
         DocumentVersion version = new DocumentVersion();
         version.setFileId(asset.getId());
         version.setUserId(userId);
@@ -49,9 +57,9 @@ public class InitialVersionWriter {
         version.setStorageKey(asset.getStorageKey());
         version.setSizeBytes(asset.getSizeBytes());
         version.setSha256(asset.getSha256());
-        version.setInstruction(null);
-        version.setResultSummary("原始上传");
-        version.setChangeType(ChangeType.UPLOAD.name());
+        version.setInstruction(instruction);
+        version.setResultSummary(summary);
+        version.setChangeType(changeType.name());
         versionMapper.insert(version);
 
         // latest_version 同步为 1，与刚写入的版本记录保持一致
