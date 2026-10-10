@@ -4,6 +4,7 @@ import com.documenter.entity.FileAsset;
 import com.documenter.entity.DocumentVersion;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.dto.EditDocxParagraphsDTO;
+import com.documenter.dto.EditDocxTableDTO;
 import com.documenter.enums.ChangeType;
 import com.documenter.exception.BusinessException;
 import com.documenter.service.DocumentVersionService;
@@ -228,6 +229,60 @@ class DocxDocumentServiceImplTest {
         }
     }
 
+    @Test
+    void editsCellInsertsRowAndDeletesOriginalRow() throws Exception {
+        byte[] source;
+        try (XWPFDocument document = new XWPFDocument();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            var table = document.createTable(2, 2);
+            table.getRow(0).getCell(0).setText("A1");
+            table.getRow(0).getCell(1).setText("A2");
+            table.getRow(1).getCell(0).setText("B1");
+            table.getRow(1).getCell(1).setText("B2");
+            document.write(output);
+            source = output.toByteArray();
+        }
+        MemoryStorage storage = new MemoryStorage();
+        DocumentVersionService versionService = downloadService(
+                1L, 2L, 1, download(source, DOCX_CONTENT_TYPE, "docx"));
+        EditDocxTableDTO request = tableEditRequest(
+                tableOperation("SET_CELL_TEXT", "body/t0/r0/c1", "已修改", null),
+                tableOperation("INSERT_ROW_AFTER", "body/t0/r0", null, List.of("新增1", "新增2")),
+                tableOperation("DELETE_ROW", "body/t0/r1", null, null));
+
+        new DocxDocumentServiceImpl(versionService, storage, new CapturingVersionWriter())
+                .editTable(1L, 2L, 1, request);
+
+        try (XWPFDocument edited = new XWPFDocument(new ByteArrayInputStream(storage.content))) {
+            var rows = edited.getTables().getFirst().getRows();
+            assertEquals(2, rows.size());
+            assertEquals("A1", rows.get(0).getCell(0).getText());
+            assertEquals("已修改", rows.get(0).getCell(1).getText());
+            assertEquals("新增1", rows.get(1).getCell(0).getText());
+            assertEquals("新增2", rows.get(1).getCell(1).getText());
+        }
+    }
+
+    @Test
+    void rejectsDeletingOnlyTableRow() throws Exception {
+        byte[] source;
+        try (XWPFDocument document = new XWPFDocument();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            document.createTable(1, 1).getRow(0).getCell(0).setText("保留行");
+            document.write(output);
+            source = output.toByteArray();
+        }
+        DocumentVersionService versionService = downloadService(
+                1L, 2L, 1, download(source, DOCX_CONTENT_TYPE, "docx"));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> new DocxDocumentServiceImpl(versionService, new MemoryStorage(), unusedWriter())
+                        .editTable(1L, 2L, 1, tableEditRequest(
+                                tableOperation("DELETE_ROW", "body/t0/r0", null, null))));
+
+        assertEquals(422, exception.getCode());
+    }
+
     private static FileDownload download(byte[] content, String contentType, String extension) {
         FileAsset asset = new FileAsset();
         asset.setContentType(contentType);
@@ -259,6 +314,23 @@ class DocxDocumentServiceImplTest {
         operation.setType(type);
         operation.setBlockId(blockId);
         operation.setText(text);
+        return operation;
+    }
+
+    private static EditDocxTableDTO tableEditRequest(EditDocxTableDTO.Operation... operations) {
+        EditDocxTableDTO request = new EditDocxTableDTO();
+        request.setInstruction("测试表格编辑");
+        request.setOperations(List.of(operations));
+        return request;
+    }
+
+    private static EditDocxTableDTO.Operation tableOperation(String type, String blockId,
+                                                             String text, List<String> values) {
+        EditDocxTableDTO.Operation operation = new EditDocxTableDTO.Operation();
+        operation.setType(type);
+        operation.setBlockId(blockId);
+        operation.setText(text);
+        operation.setValues(values);
         return operation;
     }
 

@@ -3,6 +3,7 @@ package com.documenter.controller;
 import com.documenter.constant.ApiResponse;
 import com.documenter.dto.FileQueryDTO;
 import com.documenter.dto.EditDocxParagraphsDTO;
+import com.documenter.dto.EditDocxTableDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.dto.RenameFileDTO;
 import com.documenter.service.DocumentVersionService;
@@ -144,6 +145,15 @@ public class FileController {
                                                       @PathVariable Integer versionNo,
                                                       @Valid @RequestBody EditDocxParagraphsDTO request) {
         return ApiResponse.success("已生成新版本", docxDocumentService.editParagraphs(
+                SecurityUtil.requireUserId(), fileId, versionNo, request));
+    }
+
+    /** 修改指定 DOCX 版本的单元格文本或表格行，并保存为新版本。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/table-edits")
+    public ApiResponse<VersionVO> editDocxTable(@PathVariable Long fileId,
+                                                @PathVariable Integer versionNo,
+                                                @Valid @RequestBody EditDocxTableDTO request) {
+        return ApiResponse.success("已生成新版本", docxDocumentService.editTable(
                 SecurityUtil.requireUserId(), fileId, versionNo, request));
     }
 

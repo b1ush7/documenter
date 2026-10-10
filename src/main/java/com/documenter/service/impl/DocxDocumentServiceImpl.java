@@ -1,6 +1,7 @@
 package com.documenter.service.impl;
 
 import com.documenter.dto.EditDocxParagraphsDTO;
+import com.documenter.dto.EditDocxTableDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.entity.DocumentVersion;
 import com.documenter.enums.ChangeType;
@@ -109,6 +110,30 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                     case "INSERT_AFTER" -> insertParagraph(edit.paragraph(), edit.operation().getText(), true);
                     case "DELETE" -> deleteParagraph(edit.paragraph(), edit.operation().getBlockId());
                     default -> throw new BusinessException(400, "不支持的段落操作");
+                }
+            }
+        });
+    }
+
+    @Override
+    public VersionVO editTable(Long userId, Long fileId, Integer sourceVersion,
+                               EditDocxTableDTO request) {
+        validateTableEdits(request.getOperations());
+        return editAndSave(userId, fileId, sourceVersion, request.getInstruction(),
+                "执行 " + request.getOperations().size() + " 个表格编辑操作", document -> {
+            List<ResolvedTableEdit> edits = request.getOperations().stream()
+                    .map(operation -> resolveTableEdit(document, operation))
+                    .toList();
+            for (ResolvedTableEdit edit : edits) {
+                switch (edit.operation().getType()) {
+                    case "SET_CELL_TEXT" -> replaceCellText(edit.cell(), edit.operation().getBlockId(),
+                            edit.operation().getText());
+                    case "INSERT_ROW_BEFORE" -> insertRow(edit.table(), edit.row(),
+                            edit.operation().getValues(), false);
+                    case "INSERT_ROW_AFTER" -> insertRow(edit.table(), edit.row(),
+                            edit.operation().getValues(), true);
+                    case "DELETE_ROW" -> deleteRow(edit.table(), edit.row(), edit.operation().getBlockId());
+                    default -> throw new BusinessException(400, "不支持的表格操作");
                 }
             }
         });
@@ -258,6 +283,64 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         throw new BusinessException(400, "段落块不存在于源版本中：" + blockId);
     }
 
+    private static XWPFTable requireTable(XWPFDocument document, String blockId) {
+        String[] segments = blockId.split("/");
+        IBody body = document;
+        int index = 1;
+        try {
+            while (index < segments.length) {
+                String tableSegment = segments[index];
+                if (!tableSegment.startsWith("t")) {
+                    break;
+                }
+                XWPFTable table = body.getTables().get(parseIndex(tableSegment));
+                if (index == segments.length - 1) {
+                    return table;
+                }
+                if (index + 2 >= segments.length) {
+                    break;
+                }
+                String rowSegment = segments[index + 1];
+                String cellSegment = segments[index + 2];
+                if (!rowSegment.startsWith("r") || !cellSegment.startsWith("c")) {
+                    break;
+                }
+                body = table.getRows().get(parseIndex(rowSegment))
+                        .getTableCells().get(parseIndex(cellSegment));
+                index += 3;
+            }
+        } catch (IndexOutOfBoundsException | NumberFormatException e) {
+            // 统一转成块不存在错误
+        }
+        throw new BusinessException(400, "表格块不存在于源版本中：" + blockId);
+    }
+
+    private static XWPFTableRow requireRow(XWPFDocument document, String blockId) {
+        int rowSeparator = blockId.lastIndexOf("/r");
+        if (rowSeparator < 0) {
+            throw new BusinessException(400, "行块 ID 格式错误：" + blockId);
+        }
+        XWPFTable table = requireTable(document, blockId.substring(0, rowSeparator));
+        try {
+            return table.getRows().get(Integer.parseInt(blockId.substring(rowSeparator + 2)));
+        } catch (IndexOutOfBoundsException | NumberFormatException e) {
+            throw new BusinessException(400, "表格行不存在于源版本中：" + blockId);
+        }
+    }
+
+    private static XWPFTableCell requireCell(XWPFDocument document, String blockId) {
+        int cellSeparator = blockId.lastIndexOf("/c");
+        if (cellSeparator < 0) {
+            throw new BusinessException(400, "单元格块 ID 格式错误：" + blockId);
+        }
+        XWPFTableRow row = requireRow(document, blockId.substring(0, cellSeparator));
+        try {
+            return row.getTableCells().get(Integer.parseInt(blockId.substring(cellSeparator + 2)));
+        } catch (IndexOutOfBoundsException | NumberFormatException e) {
+            throw new BusinessException(400, "单元格不存在于源版本中：" + blockId);
+        }
+    }
+
     private static int parseIndex(String segment) {
         return Integer.parseInt(segment.substring(1));
     }
@@ -289,6 +372,139 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                 }
                 insertedTargets.add(operation.getBlockId());
             }
+        }
+    }
+
+    private static void validateTableEdits(List<EditDocxTableDTO.Operation> operations) {
+        Pattern rowPattern = Pattern.compile("^body(?:/t\\d+/r\\d+/c\\d+)*/t\\d+/r\\d+$");
+        Pattern cellPattern = Pattern.compile("^body(?:/t\\d+/r\\d+/c\\d+)*/t\\d+/r\\d+/c\\d+$");
+        Set<String> operationKeys = new HashSet<>();
+        Set<String> deletedRows = new HashSet<>();
+        Set<String> insertedRows = new HashSet<>();
+        for (EditDocxTableDTO.Operation operation : operations) {
+            if (!operationKeys.add(operation.getType() + ":" + operation.getBlockId())) {
+                throw new BusinessException(400, "同一表格块不能重复执行相同操作：" + operation.getBlockId());
+            }
+            boolean setCell = "SET_CELL_TEXT".equals(operation.getType());
+            boolean insert = operation.getType().startsWith("INSERT_ROW_");
+            boolean delete = "DELETE_ROW".equals(operation.getType());
+            if (setCell) {
+                if (!cellPattern.matcher(operation.getBlockId()).matches() || operation.getText() == null
+                        || operation.getValues() != null) {
+                    throw new BusinessException(400, "SET_CELL_TEXT 必须指向单元格且只包含 text");
+                }
+                for (String deletedRow : deletedRows) {
+                    if (operation.getBlockId().startsWith(deletedRow + "/")) {
+                        throw new BusinessException(400, "不能修改同一请求中将被删除的行");
+                    }
+                }
+            } else {
+                if (!rowPattern.matcher(operation.getBlockId()).matches() || operation.getText() != null) {
+                    throw new BusinessException(400, "行操作必须指向表格行且不能包含 text");
+                }
+                if (insert && (operation.getValues() == null || operation.getValues().isEmpty())) {
+                    throw new BusinessException(400, operation.getType() + " 必须包含 values");
+                }
+                if (delete && operation.getValues() != null) {
+                    throw new BusinessException(400, "DELETE_ROW 不能包含 values");
+                }
+                if (delete) {
+                    if (insertedRows.contains(operation.getBlockId())) {
+                        throw new BusinessException(400, "同一行不能同时作为插入参照和删除目标");
+                    }
+                    deletedRows.add(operation.getBlockId());
+                } else {
+                    if (deletedRows.contains(operation.getBlockId())) {
+                        throw new BusinessException(400, "同一行不能同时作为插入参照和删除目标");
+                    }
+                    insertedRows.add(operation.getBlockId());
+                }
+            }
+        }
+        for (EditDocxTableDTO.Operation operation : operations) {
+            if ("SET_CELL_TEXT".equals(operation.getType())) {
+                int cellSeparator = operation.getBlockId().lastIndexOf("/c");
+                if (deletedRows.contains(operation.getBlockId().substring(0, cellSeparator))) {
+                    throw new BusinessException(400, "不能修改同一请求中将被删除的行");
+                }
+            }
+        }
+    }
+
+    private static ResolvedTableEdit resolveTableEdit(XWPFDocument document,
+                                                       EditDocxTableDTO.Operation operation) {
+        if ("SET_CELL_TEXT".equals(operation.getType())) {
+            return new ResolvedTableEdit(operation, null, null,
+                    requireCell(document, operation.getBlockId()));
+        }
+        XWPFTableRow row = requireRow(document, operation.getBlockId());
+        return new ResolvedTableEdit(operation, row.getTable(), row, null);
+    }
+
+    private static void replaceCellText(XWPFTableCell cell, String blockId, String text) {
+        if (!cell.getTables().isEmpty()) {
+            throw new BusinessException(422, "包含嵌套表格的单元格暂不支持整体替换：" + blockId);
+        }
+        List<XWPFParagraph> paragraphs = new ArrayList<>(cell.getParagraphs());
+        if (paragraphs.isEmpty()) {
+            throw new BusinessException(422, "单元格缺少必要段落：" + blockId);
+        }
+        for (XWPFParagraph paragraph : paragraphs) {
+            assertSimpleParagraph(paragraph, blockId);
+        }
+        replaceSimpleParagraph(paragraphs.getFirst(), blockId, text);
+        for (int index = cell.getParagraphs().size() - 1; index >= 1; index--) {
+            cell.removeParagraph(index);
+        }
+    }
+
+    private static void insertRow(XWPFTable table, XWPFTableRow reference,
+                                  List<String> values, boolean after) {
+        int referenceIndex = table.getRows().indexOf(reference);
+        if (referenceIndex < 0) {
+            throw new BusinessException(422, "参照行已经不存在");
+        }
+        if (values.size() != reference.getTableCells().size()) {
+            throw new BusinessException(400, "插入行的单元格数量必须与参照行一致");
+        }
+        int insertIndex = after ? referenceIndex + 1 : referenceIndex;
+        XWPFTableRow inserted = table.insertNewTableRow(insertIndex);
+        if (reference.getCtRow().isSetTrPr()) {
+            inserted.getCtRow().setTrPr((org.openxmlformats.schemas.wordprocessingml.x2006.main.CTTrPr)
+                    reference.getCtRow().getTrPr().copy());
+        }
+        for (int index = 0; index < values.size(); index++) {
+            XWPFTableCell referenceCell = reference.getTableCells().get(index);
+            XWPFTableCell insertedCell = inserted.addNewTableCell();
+            if (referenceCell.getCTTc().isSetTcPr()) {
+                insertedCell.getCTTc().setTcPr(
+                        (org.openxmlformats.schemas.wordprocessingml.x2006.main.CTTcPr)
+                                referenceCell.getCTTc().getTcPr().copy());
+            }
+            XWPFParagraph insertedParagraph = insertedCell.getParagraphs().isEmpty()
+                    ? insertedCell.addParagraph() : insertedCell.getParagraphs().getFirst();
+            XWPFParagraph referenceParagraph = referenceCell.getParagraphs().isEmpty()
+                    ? null : referenceCell.getParagraphs().getFirst();
+            if (referenceParagraph != null) {
+                copyParagraphFormatting(referenceParagraph, insertedParagraph);
+            }
+            XWPFRun run = insertedParagraph.createRun();
+            if (referenceParagraph != null && !referenceParagraph.getRuns().isEmpty()
+                    && referenceParagraph.getRuns().getFirst().getCTR().isSetRPr()) {
+                run.getCTR().setRPr((org.openxmlformats.schemas.wordprocessingml.x2006.main.CTRPr)
+                        referenceParagraph.getRuns().getFirst().getCTR().getRPr().copy());
+            }
+            run.setText(values.get(index));
+        }
+    }
+
+    private static void deleteRow(XWPFTable table, XWPFTableRow row, String blockId) {
+        if (table.getRows().size() <= 1) {
+            throw new BusinessException(422, "表格必须保留至少一行：" + blockId);
+        }
+        int index = table.getRows().indexOf(row);
+        if (index < 0 || !table.removeRow(index)) {
+            throw new BusinessException(422, "无法删除表格行：" + blockId);
         }
     }
 
@@ -387,5 +603,9 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
 
     private record ResolvedParagraphEdit(EditDocxParagraphsDTO.Operation operation,
                                          XWPFParagraph paragraph) {
+    }
+
+    private record ResolvedTableEdit(EditDocxTableDTO.Operation operation,
+                                     XWPFTable table, XWPFTableRow row, XWPFTableCell cell) {
     }
 }

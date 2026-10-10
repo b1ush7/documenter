@@ -1,6 +1,7 @@
 package com.documenter.service;
 
 import com.documenter.dto.EditDocxParagraphsDTO;
+import com.documenter.dto.EditDocxTableDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.VersionVO;
@@ -26,4 +27,8 @@ public interface DocxDocumentService {
     /** 在明确源版本中插入或删除段落，并保存为新版本。 */
     VersionVO editParagraphs(Long userId, Long fileId, Integer sourceVersion,
                              EditDocxParagraphsDTO request);
+
+    /** 修改单元格文本或增删表格行，并保存为新版本。 */
+    VersionVO editTable(Long userId, Long fileId, Integer sourceVersion,
+                        EditDocxTableDTO request);
 }
