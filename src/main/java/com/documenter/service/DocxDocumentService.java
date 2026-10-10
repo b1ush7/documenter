@@ -3,6 +3,7 @@ package com.documenter.service;
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.EditDocxTableDTO;
 import com.documenter.dto.FormatDocxParagraphsDTO;
+import com.documenter.dto.InsertDocxImagesDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.VersionVO;
@@ -36,4 +37,8 @@ public interface DocxDocumentService {
     /** 设置标题、普通段落、项目符号或编号列表格式，并保存为新版本。 */
     VersionVO formatParagraphs(Long userId, Long fileId, Integer sourceVersion,
                                FormatDocxParagraphsDTO request);
+
+    /** 将已有 PNG/JPEG 文件版本以内嵌方式追加到段落，并保存为新版本。 */
+    VersionVO insertImages(Long userId, Long fileId, Integer sourceVersion,
+                           InsertDocxImagesDTO request);
 }

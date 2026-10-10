@@ -3,6 +3,7 @@ package com.documenter.service.impl;
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.EditDocxTableDTO;
 import com.documenter.dto.FormatDocxParagraphsDTO;
+import com.documenter.dto.InsertDocxImagesDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.entity.DocumentVersion;
 import com.documenter.enums.ChangeType;
@@ -28,6 +29,9 @@ import org.apache.poi.xwpf.usermodel.XWPFTableCell;
 import org.apache.poi.xwpf.usermodel.XWPFTableRow;
 import org.apache.poi.xwpf.usermodel.XWPFAbstractNum;
 import org.apache.poi.xwpf.usermodel.XWPFNumbering;
+import org.apache.poi.util.Units;
+import org.apache.poi.xwpf.usermodel.Document;
+import org.apache.poi.openxml4j.exceptions.InvalidFormatException;
 import org.springframework.stereotype.Service;
 import org.apache.xmlbeans.XmlCursor;
 
@@ -175,6 +179,21 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                     case "CLEAR_LIST" -> clearNumbering(paragraph);
                     default -> throw new BusinessException(400, "不支持的段落格式操作");
                 }
+            }
+        });
+    }
+
+    @Override
+    public VersionVO insertImages(Long userId, Long fileId, Integer sourceVersion,
+                                  InsertDocxImagesDTO request) {
+        return editAndSave(userId, fileId, sourceVersion, request.getInstruction(),
+                "插入 " + request.getOperations().size() + " 张内嵌图片", document -> {
+            List<ResolvedImageInsertion> resolved = request.getOperations().stream()
+                    .map(operation -> new ResolvedImageInsertion(operation,
+                            requireParagraph(document, operation.getBlockId())))
+                    .toList();
+            for (ResolvedImageInsertion insertion : resolved) {
+                appendImage(userId, insertion.paragraph(), insertion.operation());
             }
         });
     }
@@ -528,6 +547,47 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         }
     }
 
+    private void appendImage(Long userId, XWPFParagraph paragraph,
+                             InsertDocxImagesDTO.Operation operation) {
+        FileDownload image = versionService.downloadVersion(
+                userId, operation.getImageFileId(), operation.getImageVersionNo());
+        int pictureType = pictureType(image);
+        try (InputStream input = image.resource().getInputStream()) {
+            String fileName = image.downloadFileName() == null
+                    ? (pictureType == Document.PICTURE_TYPE_PNG ? "image.png" : "image.jpg")
+                    : image.downloadFileName();
+            paragraph.createRun().addPicture(input, pictureType, fileName,
+                    Units.pixelToEMU(operation.getWidthPixels()),
+                    Units.pixelToEMU(operation.getHeightPixels()));
+        } catch (IOException | InvalidFormatException e) {
+            log.warn("图片无法写入 DOCX, imageFileId={}, versionNo={}, blockId={}",
+                    operation.getImageFileId(), operation.getImageVersionNo(),
+                    operation.getBlockId(), e);
+            throw new BusinessException(422, "图片无法写入 DOCX：" + operation.getBlockId());
+        }
+    }
+
+    private static int pictureType(FileDownload image) {
+        String contentType = image.contentType();
+        String extension = image.asset().getExtension();
+        if (contentType != null) {
+            if ("image/png".equalsIgnoreCase(contentType)) {
+                return Document.PICTURE_TYPE_PNG;
+            }
+            if ("image/jpeg".equalsIgnoreCase(contentType)) {
+                return Document.PICTURE_TYPE_JPEG;
+            }
+        } else if (extension != null) {
+            if ("png".equalsIgnoreCase(extension)) {
+                return Document.PICTURE_TYPE_PNG;
+            }
+            if ("jpg".equalsIgnoreCase(extension) || "jpeg".equalsIgnoreCase(extension)) {
+                return Document.PICTURE_TYPE_JPEG;
+            }
+        }
+        throw new BusinessException(400, "DOCX 图片插入仅支持 PNG 和 JPEG");
+    }
+
     private static ResolvedTableEdit resolveTableEdit(XWPFDocument document,
                                                        EditDocxTableDTO.Operation operation) {
         if ("SET_CELL_TEXT".equals(operation.getType())) {
@@ -708,5 +768,9 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
 
     private record ResolvedParagraphFormat(FormatDocxParagraphsDTO.Operation operation,
                                            XWPFParagraph paragraph) {
+    }
+
+    private record ResolvedImageInsertion(InsertDocxImagesDTO.Operation operation,
+                                          XWPFParagraph paragraph) {
     }
 }

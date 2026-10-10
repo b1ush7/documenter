@@ -3,6 +3,7 @@ package com.documenter.service.impl;
 import com.documenter.entity.FileAsset;
 import com.documenter.entity.DocumentVersion;
 import com.documenter.dto.FormatDocxParagraphsDTO;
+import com.documenter.dto.InsertDocxImagesDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.EditDocxTableDTO;
@@ -19,6 +20,7 @@ import org.apache.poi.xwpf.usermodel.Document;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.apache.poi.xwpf.usermodel.XWPFParagraph;
 import org.apache.poi.xwpf.usermodel.XWPFRun;
+import org.apache.poi.util.Units;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.ByteArrayResource;
 
@@ -355,6 +357,61 @@ class DocxDocumentServiceImplTest {
         assertEquals(400, exception.getCode());
     }
 
+    @Test
+    void appendsOwnedImageVersionToParagraphWithRequestedSize() throws Exception {
+        byte[] source;
+        try (XWPFDocument document = new XWPFDocument();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            XWPFRun existing = document.createParagraph().createRun();
+            existing.setBold(true);
+            existing.setText("保留正文");
+            document.write(output);
+            source = output.toByteArray();
+        }
+        InsertDocxImagesDTO request = imageInsertRequest(
+                imageInsertOperation("body/p0", 9L, 2, 80, 60));
+        MemoryStorage storage = new MemoryStorage();
+        DocumentVersionService versionService = docAndImageDownloadService(
+                1L, 2L, 1, download(source, DOCX_CONTENT_TYPE, "docx"),
+                9L, 2, download(ONE_PIXEL_PNG, "image/png", "png"));
+
+        new DocxDocumentServiceImpl(versionService, storage, new CapturingVersionWriter())
+                .insertImages(1L, 2L, 1, request);
+
+        try (XWPFDocument edited = new XWPFDocument(new ByteArrayInputStream(storage.content))) {
+            XWPFParagraph paragraph = edited.getParagraphs().getFirst();
+            assertEquals("保留正文", paragraph.getText());
+            assertTrue(paragraph.getRuns().getFirst().isBold());
+            var picture = paragraph.getRuns().get(1).getEmbeddedPictures().getFirst();
+            assertEquals("image/png", picture.getPictureData().getPackagePart().getContentType());
+            assertEquals(Units.pixelToEMU(80),
+                    picture.getCTPicture().getSpPr().getXfrm().getExt().getCx());
+            assertEquals(Units.pixelToEMU(60),
+                    picture.getCTPicture().getSpPr().getXfrm().getExt().getCy());
+        }
+    }
+
+    @Test
+    void rejectsUnsupportedInlineImageType() throws Exception {
+        byte[] source;
+        try (XWPFDocument document = new XWPFDocument();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            document.createParagraph().createRun().setText("正文");
+            document.write(output);
+            source = output.toByteArray();
+        }
+        DocumentVersionService versionService = docAndImageDownloadService(
+                1L, 2L, 1, download(source, DOCX_CONTENT_TYPE, "docx"),
+                9L, 2, download(new byte[]{1, 2, 3}, "application/pdf", "pdf"));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> new DocxDocumentServiceImpl(versionService, new MemoryStorage(), unusedWriter())
+                        .insertImages(1L, 2L, 1, imageInsertRequest(
+                                imageInsertOperation("body/p0", 9L, 2, 80, 60))));
+
+        assertEquals(400, exception.getCode());
+    }
+
     private static FileDownload download(byte[] content, String contentType, String extension) {
         FileAsset asset = new FileAsset();
         asset.setContentType(contentType);
@@ -423,6 +480,25 @@ class DocxDocumentServiceImplTest {
         return operation;
     }
 
+    private static InsertDocxImagesDTO imageInsertRequest(InsertDocxImagesDTO.Operation... operations) {
+        InsertDocxImagesDTO request = new InsertDocxImagesDTO();
+        request.setInstruction("测试插入图片");
+        request.setOperations(List.of(operations));
+        return request;
+    }
+
+    private static InsertDocxImagesDTO.Operation imageInsertOperation(
+            String blockId, Long imageFileId, Integer imageVersionNo,
+            Integer widthPixels, Integer heightPixels) {
+        InsertDocxImagesDTO.Operation operation = new InsertDocxImagesDTO.Operation();
+        operation.setBlockId(blockId);
+        operation.setImageFileId(imageFileId);
+        operation.setImageVersionNo(imageVersionNo);
+        operation.setWidthPixels(widthPixels);
+        operation.setHeightPixels(heightPixels);
+        return operation;
+    }
+
     private static FileStorage unusedStorage() {
         return new MemoryStorage();
     }
@@ -457,6 +533,39 @@ class DocxDocumentServiceImplTest {
                 assertEquals(expectedFileId, fileId);
                 assertEquals(expectedVersion, versionNo);
                 return download;
+            }
+        };
+    }
+
+    private static DocumentVersionService docAndImageDownloadService(
+            Long expectedUserId, Long docFileId, Integer docVersion, FileDownload document,
+            Long imageFileId, Integer imageVersion, FileDownload image) {
+        return new DocumentVersionService() {
+            @Override
+            public List<VersionVO> listVersions(Long userId, Long fileId) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public VersionVO getVersion(Long userId, Long fileId, Integer versionNo) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public VersionVO restore(Long userId, Long fileId, Integer versionNo, Integer expectVersion) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public FileDownload downloadVersion(Long userId, Long fileId, Integer versionNo) {
+                assertEquals(expectedUserId, userId);
+                if (docFileId.equals(fileId) && docVersion.equals(versionNo)) {
+                    return document;
+                }
+                if (imageFileId.equals(fileId) && imageVersion.equals(versionNo)) {
+                    return image;
+                }
+                throw new AssertionError("unexpected file version: " + fileId + "/" + versionNo);
             }
         };
     }

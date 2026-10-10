@@ -5,6 +5,7 @@ import com.documenter.dto.FileQueryDTO;
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.EditDocxTableDTO;
 import com.documenter.dto.FormatDocxParagraphsDTO;
+import com.documenter.dto.InsertDocxImagesDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.dto.RenameFileDTO;
 import com.documenter.service.DocumentVersionService;
@@ -164,6 +165,15 @@ public class FileController {
                                                        @PathVariable Integer versionNo,
                                                        @Valid @RequestBody FormatDocxParagraphsDTO request) {
         return ApiResponse.success("已生成新版本", docxDocumentService.formatParagraphs(
+                SecurityUtil.requireUserId(), fileId, versionNo, request));
+    }
+
+    /** 将已有 PNG/JPEG 文件版本以内嵌方式追加到指定 DOCX 段落。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/inline-images")
+    public ApiResponse<VersionVO> insertDocxImages(@PathVariable Long fileId,
+                                                   @PathVariable Integer versionNo,
+                                                   @Valid @RequestBody InsertDocxImagesDTO request) {
+        return ApiResponse.success("已生成新版本", docxDocumentService.insertImages(
                 SecurityUtil.requireUserId(), fileId, versionNo, request));
     }
 
