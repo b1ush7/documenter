@@ -1,5 +1,6 @@
 package com.documenter.service.impl;
 
+import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.entity.DocumentVersion;
 import com.documenter.enums.ChangeType;
@@ -24,6 +25,7 @@ import org.apache.poi.xwpf.usermodel.XWPFTable;
 import org.apache.poi.xwpf.usermodel.XWPFTableCell;
 import org.apache.poi.xwpf.usermodel.XWPFTableRow;
 import org.springframework.stereotype.Service;
+import org.apache.xmlbeans.XmlCursor;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -35,6 +37,7 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.function.Consumer;
 
 /** Apache POI 驱动的 DOCX 结构读取器。 */
 @Slf4j
@@ -80,20 +83,50 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
     @Override
     public VersionVO replaceParagraphText(Long userId, Long fileId, Integer sourceVersion,
                                           ReplaceDocxTextDTO request) {
+        ensureDistinctBlockIds(request.getOperations());
+        return editAndSave(userId, fileId, sourceVersion, request.getInstruction(),
+                "替换 " + request.getOperations().size() + " 个段落的文本", document -> {
+            for (ReplaceDocxTextDTO.Operation operation : request.getOperations()) {
+                XWPFParagraph paragraph = requireParagraph(document, operation.getBlockId());
+                replaceSimpleParagraph(paragraph, operation.getBlockId(), operation.getText());
+            }
+        });
+    }
+
+    @Override
+    public VersionVO editParagraphs(Long userId, Long fileId, Integer sourceVersion,
+                                    EditDocxParagraphsDTO request) {
+        validateParagraphEdits(request.getOperations());
+        return editAndSave(userId, fileId, sourceVersion, request.getInstruction(),
+                "执行 " + request.getOperations().size() + " 个段落插入或删除操作", document -> {
+            List<ResolvedParagraphEdit> edits = request.getOperations().stream()
+                    .map(operation -> new ResolvedParagraphEdit(
+                            operation, requireParagraph(document, operation.getBlockId())))
+                    .toList();
+            for (ResolvedParagraphEdit edit : edits) {
+                switch (edit.operation().getType()) {
+                    case "INSERT_BEFORE" -> insertParagraph(edit.paragraph(), edit.operation().getText(), false);
+                    case "INSERT_AFTER" -> insertParagraph(edit.paragraph(), edit.operation().getText(), true);
+                    case "DELETE" -> deleteParagraph(edit.paragraph(), edit.operation().getBlockId());
+                    default -> throw new BusinessException(400, "不支持的段落操作");
+                }
+            }
+        });
+    }
+
+    private VersionVO editAndSave(Long userId, Long fileId, Integer sourceVersion,
+                                  String instruction, String summary,
+                                  Consumer<XWPFDocument> editor) {
         FileDownload version = versionService.downloadVersion(userId, fileId, sourceVersion);
         if (!isDocx(version)) {
             throw new BusinessException(400, "当前版本不是 DOCX 文档");
         }
-        ensureDistinctBlockIds(request.getOperations());
 
         byte[] edited;
         try (InputStream input = version.resource().getInputStream();
              XWPFDocument document = new XWPFDocument(input);
              ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-            for (ReplaceDocxTextDTO.Operation operation : request.getOperations()) {
-                XWPFParagraph paragraph = requireParagraph(document, operation.getBlockId());
-                replaceSimpleParagraph(paragraph, operation.getBlockId(), operation.getText());
-            }
+            editor.accept(document);
             document.write(output);
             edited = output.toByteArray();
         } catch (IOException e) {
@@ -107,8 +140,8 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                     fileId, userId,
                     new VersionWriter.VersionContent(storageKey, edited.length, Digests.sha256Hex(edited)),
                     ChangeType.MANUAL_EDIT,
-                    request.getInstruction(),
-                    "替换 " + request.getOperations().size() + " 个段落的文本",
+                    instruction,
+                    summary,
                     sourceVersion);
             return VersionVO.from(created);
         } catch (RuntimeException e) {
@@ -229,16 +262,105 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         return Integer.parseInt(segment.substring(1));
     }
 
+    private static void validateParagraphEdits(List<EditDocxParagraphsDTO.Operation> operations) {
+        Set<String> operationKeys = new HashSet<>();
+        Set<String> insertedTargets = new HashSet<>();
+        Set<String> deletedTargets = new HashSet<>();
+        for (EditDocxParagraphsDTO.Operation operation : operations) {
+            String operationKey = operation.getType() + ":" + operation.getBlockId();
+            if (!operationKeys.add(operationKey)) {
+                throw new BusinessException(400, "同一段落不能重复执行相同结构操作：" + operation.getBlockId());
+            }
+            boolean delete = "DELETE".equals(operation.getType());
+            if (delete && operation.getText() != null) {
+                throw new BusinessException(400, "DELETE 操作不能包含新文本");
+            }
+            if (!delete && operation.getText() == null) {
+                throw new BusinessException(400, operation.getType() + " 操作必须包含新文本");
+            }
+            if (delete) {
+                if (insertedTargets.contains(operation.getBlockId())) {
+                    throw new BusinessException(400, "同一段落不能同时插入和删除：" + operation.getBlockId());
+                }
+                deletedTargets.add(operation.getBlockId());
+            } else {
+                if (deletedTargets.contains(operation.getBlockId())) {
+                    throw new BusinessException(400, "同一段落不能同时插入和删除：" + operation.getBlockId());
+                }
+                insertedTargets.add(operation.getBlockId());
+            }
+        }
+    }
+
+    private static void insertParagraph(XWPFParagraph reference, String text, boolean after) {
+        IBody body = reference.getBody();
+        XWPFParagraph inserted;
+        try (XmlCursor cursor = reference.getCTP().newCursor()) {
+            if (after && !cursor.toNextSibling()) {
+                inserted = appendParagraph(body);
+            } else {
+                inserted = body.insertNewParagraph(cursor);
+            }
+        }
+        if (inserted == null) {
+            throw new BusinessException(422, "无法在目标位置插入段落");
+        }
+        copyParagraphFormatting(reference, inserted);
+        XWPFRun run = inserted.createRun();
+        if (!reference.getRuns().isEmpty() && reference.getRuns().getFirst().getCTR().isSetRPr()) {
+            run.getCTR().setRPr((org.openxmlformats.schemas.wordprocessingml.x2006.main.CTRPr)
+                    reference.getRuns().getFirst().getCTR().getRPr().copy());
+        }
+        run.setText(text);
+    }
+
+    private static XWPFParagraph appendParagraph(IBody body) {
+        if (body instanceof XWPFDocument document) {
+            return document.createParagraph();
+        }
+        if (body instanceof XWPFTableCell cell) {
+            return cell.addParagraph();
+        }
+        throw new BusinessException(422, "当前文档区域不支持追加段落");
+    }
+
+    private static void copyParagraphFormatting(XWPFParagraph source, XWPFParagraph target) {
+        if (source.getCTP().isSetPPr()) {
+            target.getCTP().setPPr((org.openxmlformats.schemas.wordprocessingml.x2006.main.CTPPr)
+                    source.getCTP().getPPr().copy());
+        }
+    }
+
+    private static void deleteParagraph(XWPFParagraph paragraph, String blockId) {
+        assertSimpleParagraph(paragraph, blockId);
+        IBody body = paragraph.getBody();
+        if (body instanceof XWPFDocument document) {
+            int position = document.getPosOfParagraph(paragraph);
+            if (position < 0 || !document.removeBodyElement(position)) {
+                throw new BusinessException(422, "无法删除段落：" + blockId);
+            }
+            return;
+        }
+        if (body instanceof XWPFTableCell cell) {
+            if (cell.getParagraphs().size() <= 1) {
+                throw new BusinessException(422, "表格单元格必须保留至少一个段落：" + blockId);
+            }
+            int position = cell.getParagraphs().indexOf(paragraph);
+            if (position < 0) {
+                throw new BusinessException(422, "无法删除段落：" + blockId);
+            }
+            cell.removeParagraph(position);
+            return;
+        }
+        throw new BusinessException(422, "当前文档区域不支持删除段落：" + blockId);
+    }
+
     /**
      * 替换简单段落并保留段落属性与首个文本运行的字符格式。
      * 图片或复杂运行会被拒绝，避免静默破坏未要求修改的内容。
      */
     private static void replaceSimpleParagraph(XWPFParagraph paragraph, String blockId, String text) {
-        for (IRunElement runElement : paragraph.getIRuns()) {
-            if (!(runElement instanceof XWPFRun run) || !run.getEmbeddedPictures().isEmpty()) {
-                throw new BusinessException(422, "段落包含图片或复杂内容，暂不支持直接替换：" + blockId);
-            }
-        }
+        assertSimpleParagraph(paragraph, blockId);
 
         org.openxmlformats.schemas.wordprocessingml.x2006.main.CTRPr runProperties = null;
         if (!paragraph.getRuns().isEmpty() && paragraph.getRuns().getFirst().getCTR().isSetRPr()) {
@@ -253,5 +375,17 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
             replacement.getCTR().setRPr(runProperties);
         }
         replacement.setText(text);
+    }
+
+    private static void assertSimpleParagraph(XWPFParagraph paragraph, String blockId) {
+        for (IRunElement runElement : paragraph.getIRuns()) {
+            if (!(runElement instanceof XWPFRun run) || !run.getEmbeddedPictures().isEmpty()) {
+                throw new BusinessException(422, "段落包含图片或复杂内容，暂不支持直接替换：" + blockId);
+            }
+        }
+    }
+
+    private record ResolvedParagraphEdit(EditDocxParagraphsDTO.Operation operation,
+                                         XWPFParagraph paragraph) {
     }
 }

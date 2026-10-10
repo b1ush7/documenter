@@ -3,6 +3,7 @@ package com.documenter.service.impl;
 import com.documenter.entity.FileAsset;
 import com.documenter.entity.DocumentVersion;
 import com.documenter.dto.ReplaceDocxTextDTO;
+import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.enums.ChangeType;
 import com.documenter.exception.BusinessException;
 import com.documenter.service.DocumentVersionService;
@@ -148,6 +149,85 @@ class DocxDocumentServiceImplTest {
         assertEquals(422, exception.getCode());
     }
 
+    @Test
+    void insertsBeforeAndAfterThenDeletesParagraphWhileKeepingReferenceStyle() throws Exception {
+        byte[] source;
+        try (XWPFDocument document = new XWPFDocument();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            XWPFParagraph first = document.createParagraph();
+            first.setStyle("Heading2");
+            XWPFRun firstRun = first.createRun();
+            firstRun.setItalic(true);
+            firstRun.setText("参照段落");
+            document.createParagraph().createRun().setText("待删除段落");
+            document.write(output);
+            source = output.toByteArray();
+        }
+
+        EditDocxParagraphsDTO request = paragraphEditRequest(
+                paragraphOperation("INSERT_BEFORE", "body/p0", "前置段落"),
+                paragraphOperation("INSERT_AFTER", "body/p0", "后置段落"),
+                paragraphOperation("DELETE", "body/p1", null));
+        MemoryStorage storage = new MemoryStorage();
+        CapturingVersionWriter writer = new CapturingVersionWriter();
+        DocumentVersionService versionService = downloadService(
+                2L, 3L, 1, download(source, DOCX_CONTENT_TYPE, "docx"));
+
+        new DocxDocumentServiceImpl(versionService, storage, writer)
+                .editParagraphs(2L, 3L, 1, request);
+
+        try (XWPFDocument edited = new XWPFDocument(new ByteArrayInputStream(storage.content))) {
+            assertEquals(List.of("前置段落", "参照段落", "后置段落"),
+                    edited.getParagraphs().stream().map(XWPFParagraph::getText).toList());
+            assertEquals("Heading2", edited.getParagraphs().getFirst().getStyle());
+            assertTrue(edited.getParagraphs().getFirst().getRuns().getFirst().isItalic());
+            assertEquals("Heading2", edited.getParagraphs().get(2).getStyle());
+        }
+    }
+
+    @Test
+    void rejectsDeletingOnlyParagraphFromTableCell() throws Exception {
+        byte[] source;
+        try (XWPFDocument document = new XWPFDocument();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            document.createTable(1, 1).getRow(0).getCell(0).setText("唯一段落");
+            document.write(output);
+            source = output.toByteArray();
+        }
+        DocumentVersionService versionService = downloadService(
+                1L, 2L, 1, download(source, DOCX_CONTENT_TYPE, "docx"));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> new DocxDocumentServiceImpl(versionService, new MemoryStorage(), unusedWriter())
+                        .editParagraphs(1L, 2L, 1, paragraphEditRequest(
+                                paragraphOperation("DELETE", "body/t0/r0/c0/p0", null))));
+
+        assertEquals(422, exception.getCode());
+    }
+
+    @Test
+    void insertsParagraphInsideTableCell() throws Exception {
+        byte[] source;
+        try (XWPFDocument document = new XWPFDocument();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            document.createTable(1, 1).getRow(0).getCell(0).setText("第一段");
+            document.write(output);
+            source = output.toByteArray();
+        }
+        MemoryStorage storage = new MemoryStorage();
+        DocumentVersionService versionService = downloadService(
+                1L, 2L, 1, download(source, DOCX_CONTENT_TYPE, "docx"));
+
+        new DocxDocumentServiceImpl(versionService, storage, new CapturingVersionWriter())
+                .editParagraphs(1L, 2L, 1, paragraphEditRequest(
+                        paragraphOperation("INSERT_AFTER", "body/t0/r0/c0/p0", "第二段")));
+
+        try (XWPFDocument edited = new XWPFDocument(new ByteArrayInputStream(storage.content))) {
+            assertEquals(List.of("第一段", "第二段"), edited.getTables().getFirst().getRow(0).getCell(0)
+                    .getParagraphs().stream().map(XWPFParagraph::getText).toList());
+        }
+    }
+
     private static FileDownload download(byte[] content, String contentType, String extension) {
         FileAsset asset = new FileAsset();
         asset.setContentType(contentType);
@@ -165,6 +245,21 @@ class DocxDocumentServiceImplTest {
         request.setInstruction("测试替换");
         request.setOperations(List.of(operation));
         return request;
+    }
+
+    private static EditDocxParagraphsDTO paragraphEditRequest(EditDocxParagraphsDTO.Operation... operations) {
+        EditDocxParagraphsDTO request = new EditDocxParagraphsDTO();
+        request.setInstruction("测试段落结构编辑");
+        request.setOperations(List.of(operations));
+        return request;
+    }
+
+    private static EditDocxParagraphsDTO.Operation paragraphOperation(String type, String blockId, String text) {
+        EditDocxParagraphsDTO.Operation operation = new EditDocxParagraphsDTO.Operation();
+        operation.setType(type);
+        operation.setBlockId(blockId);
+        operation.setText(text);
+        return operation;
     }
 
     private static FileStorage unusedStorage() {

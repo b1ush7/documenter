@@ -1,5 +1,6 @@
 package com.documenter.service;
 
+import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.VersionVO;
@@ -21,4 +22,8 @@ public interface DocxDocumentService {
      */
     VersionVO replaceParagraphText(Long userId, Long fileId, Integer sourceVersion,
                                    ReplaceDocxTextDTO request);
+
+    /** 在明确源版本中插入或删除段落，并保存为新版本。 */
+    VersionVO editParagraphs(Long userId, Long fileId, Integer sourceVersion,
+                             EditDocxParagraphsDTO request);
 }

@@ -2,6 +2,7 @@ package com.documenter.controller;
 
 import com.documenter.constant.ApiResponse;
 import com.documenter.dto.FileQueryDTO;
+import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.dto.RenameFileDTO;
 import com.documenter.service.DocumentVersionService;
@@ -134,6 +135,15 @@ public class FileController {
                                                            @PathVariable Integer versionNo,
                                                            @Valid @RequestBody ReplaceDocxTextDTO request) {
         return ApiResponse.success("已生成新版本", docxDocumentService.replaceParagraphText(
+                SecurityUtil.requireUserId(), fileId, versionNo, request));
+    }
+
+    /** 在指定 DOCX 版本中插入或删除段落，并保存为新版本。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/paragraph-edits")
+    public ApiResponse<VersionVO> editDocxParagraphs(@PathVariable Long fileId,
+                                                      @PathVariable Integer versionNo,
+                                                      @Valid @RequestBody EditDocxParagraphsDTO request) {
+        return ApiResponse.success("已生成新版本", docxDocumentService.editParagraphs(
                 SecurityUtil.requireUserId(), fileId, versionNo, request));
     }
 
