@@ -4,10 +4,12 @@ import com.documenter.constant.ApiResponse;
 import com.documenter.dto.FileQueryDTO;
 import com.documenter.dto.RenameFileDTO;
 import com.documenter.service.DocumentVersionService;
+import com.documenter.service.DocxDocumentService;
 import com.documenter.service.FileService;
 import com.documenter.util.SecurityUtil;
 import com.documenter.vo.FileAssetVO;
 import com.documenter.vo.FileDownload;
+import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.PageResult;
 import com.documenter.vo.VersionVO;
 import jakarta.validation.Valid;
@@ -43,10 +45,13 @@ public class FileController {
 
     private final FileService fileService;
     private final DocumentVersionService versionService;
+    private final DocxDocumentService docxDocumentService;
 
-    public FileController(FileService fileService, DocumentVersionService versionService) {
+    public FileController(FileService fileService, DocumentVersionService versionService,
+                          DocxDocumentService docxDocumentService) {
         this.fileService = fileService;
         this.versionService = versionService;
+        this.docxDocumentService = docxDocumentService;
     }
 
     // ---------------------------------------------------------------- 文件
@@ -112,6 +117,14 @@ public class FileController {
     public ResponseEntity<Resource> downloadVersion(@PathVariable Long fileId,
                                                    @PathVariable Integer versionNo) {
         return toResponse(versionService.downloadVersion(SecurityUtil.requireUserId(), fileId, versionNo));
+    }
+
+    /** 读取指定 DOCX 版本的段落、表格与图片结构，不修改原文件。 */
+    @GetMapping("/{fileId}/versions/{versionNo}/structure")
+    public ApiResponse<DocxStructureVO> readDocxStructure(@PathVariable Long fileId,
+                                                          @PathVariable Integer versionNo) {
+        return ApiResponse.success(docxDocumentService.readStructure(
+                SecurityUtil.requireUserId(), fileId, versionNo));
     }
 
     /**
