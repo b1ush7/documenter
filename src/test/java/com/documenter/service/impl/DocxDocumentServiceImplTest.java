@@ -1,8 +1,14 @@
 package com.documenter.service.impl;
 
 import com.documenter.entity.FileAsset;
+import com.documenter.entity.DocumentVersion;
+import com.documenter.dto.ReplaceDocxTextDTO;
+import com.documenter.enums.ChangeType;
 import com.documenter.exception.BusinessException;
 import com.documenter.service.DocumentVersionService;
+import com.documenter.service.FileStorage;
+import com.documenter.service.VersionWriter;
+import com.documenter.util.Digests;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.VersionVO;
@@ -14,6 +20,9 @@ import org.junit.jupiter.api.Test;
 import org.springframework.core.io.ByteArrayResource;
 
 import java.io.ByteArrayOutputStream;
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.nio.file.Path;
 import java.util.Base64;
 import java.util.List;
 
@@ -52,7 +61,8 @@ class DocxDocumentServiceImplTest {
         DocumentVersionService versionService = downloadService(
                 7L, 11L, 3, download(content, DOCX_CONTENT_TYPE, "docx"));
 
-        DocxStructureVO structure = new DocxDocumentServiceImpl(versionService)
+        DocxStructureVO structure = new DocxDocumentServiceImpl(
+                versionService, unusedStorage(), unusedWriter())
                 .readStructure(7L, 11L, 3);
 
         assertEquals(11L, structure.fileId());
@@ -77,9 +87,65 @@ class DocxDocumentServiceImplTest {
                 1L, 2L, 1, download(new byte[]{1, 2, 3}, "application/pdf", "pdf"));
 
         BusinessException exception = assertThrows(BusinessException.class,
-                () -> new DocxDocumentServiceImpl(versionService).readStructure(1L, 2L, 1));
+                () -> new DocxDocumentServiceImpl(versionService, unusedStorage(), unusedWriter())
+                        .readStructure(1L, 2L, 1));
 
         assertEquals(400, exception.getCode());
+    }
+
+    @Test
+    void replacesParagraphTextAndCreatesVersionWhileKeepingParagraphStyle() throws Exception {
+        byte[] source;
+        try (XWPFDocument document = new XWPFDocument();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            XWPFParagraph paragraph = document.createParagraph();
+            paragraph.setStyle("Heading1");
+            XWPFRun run = paragraph.createRun();
+            run.setBold(true);
+            run.setText("旧内容");
+            document.write(output);
+            source = output.toByteArray();
+        }
+
+        MemoryStorage storage = new MemoryStorage();
+        CapturingVersionWriter writer = new CapturingVersionWriter();
+        ReplaceDocxTextDTO request = request("body/p0", "新内容");
+        DocumentVersionService versionService = downloadService(
+                8L, 12L, 1, download(source, DOCX_CONTENT_TYPE, "docx"));
+
+        VersionVO result = new DocxDocumentServiceImpl(versionService, storage, writer)
+                .replaceParagraphText(8L, 12L, 1, request);
+
+        assertEquals(2, result.getVersionNo());
+        assertEquals(ChangeType.MANUAL_EDIT, writer.changeType);
+        assertEquals(1, writer.expectVersion);
+        assertEquals(Digests.sha256Hex(storage.content), writer.content.sha256());
+        try (XWPFDocument edited = new XWPFDocument(new ByteArrayInputStream(storage.content))) {
+            assertEquals("新内容", edited.getParagraphs().getFirst().getText());
+            assertEquals("Heading1", edited.getParagraphs().getFirst().getStyle());
+            assertTrue(edited.getParagraphs().getFirst().getRuns().getFirst().isBold());
+        }
+    }
+
+    @Test
+    void rejectsReplacingParagraphThatContainsImage() throws Exception {
+        byte[] source;
+        try (XWPFDocument document = new XWPFDocument();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            XWPFRun run = document.createParagraph().createRun();
+            run.addPicture(new ByteArrayInputStream(ONE_PIXEL_PNG), Document.PICTURE_TYPE_PNG,
+                    "pixel.png", 9525, 9525);
+            document.write(output);
+            source = output.toByteArray();
+        }
+        DocumentVersionService versionService = downloadService(
+                1L, 2L, 1, download(source, DOCX_CONTENT_TYPE, "docx"));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> new DocxDocumentServiceImpl(versionService, new MemoryStorage(), unusedWriter())
+                        .replaceParagraphText(1L, 2L, 1, request("body/p0", "不能覆盖图片")));
+
+        assertEquals(422, exception.getCode());
     }
 
     private static FileDownload download(byte[] content, String contentType, String extension) {
@@ -89,6 +155,26 @@ class DocxDocumentServiceImplTest {
         asset.setDisplayName("sample." + extension);
         return new FileDownload(asset, new ByteArrayResource(content), content.length,
                 contentType, asset.getDisplayName());
+    }
+
+    private static ReplaceDocxTextDTO request(String blockId, String text) {
+        ReplaceDocxTextDTO.Operation operation = new ReplaceDocxTextDTO.Operation();
+        operation.setBlockId(blockId);
+        operation.setText(text);
+        ReplaceDocxTextDTO request = new ReplaceDocxTextDTO();
+        request.setInstruction("测试替换");
+        request.setOperations(List.of(operation));
+        return request;
+    }
+
+    private static FileStorage unusedStorage() {
+        return new MemoryStorage();
+    }
+
+    private static VersionWriter unusedWriter() {
+        return (fileId, userId, content, changeType, instruction, summary, expectVersion) -> {
+            throw new UnsupportedOperationException();
+        };
     }
 
     private static DocumentVersionService downloadService(Long expectedUserId, Long expectedFileId,
@@ -117,5 +203,70 @@ class DocxDocumentServiceImplTest {
                 return download;
             }
         };
+    }
+
+    private static final class MemoryStorage implements FileStorage {
+        private byte[] content;
+
+        @Override
+        public String store(byte[] content, String extension) {
+            this.content = content;
+            return "memory/result." + extension;
+        }
+
+        @Override
+        public String store(InputStream inputStream, String extension) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public InputStream read(String storageKey) {
+            return new ByteArrayInputStream(content);
+        }
+
+        @Override
+        public boolean exists(String storageKey) {
+            return content != null;
+        }
+
+        @Override
+        public boolean delete(String storageKey) {
+            boolean existed = content != null;
+            content = null;
+            return existed;
+        }
+
+        @Override
+        public Path resolvePath(String storageKey) {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    private static final class CapturingVersionWriter implements VersionWriter {
+        private VersionContent content;
+        private ChangeType changeType;
+        private Integer expectVersion;
+
+        @Override
+        public DocumentVersion appendVersion(Long fileId, Long userId, VersionContent content,
+                                             ChangeType changeType, String instruction, String summary,
+                                             Integer expectVersion) {
+            this.content = content;
+            this.changeType = changeType;
+            this.expectVersion = expectVersion;
+            DocumentVersion version = new DocumentVersion();
+            version.setId(22L);
+            version.setFileId(fileId);
+            version.setUserId(userId);
+            version.setVersionNo(expectVersion + 1);
+            version.setParentVersion(expectVersion);
+            version.setStorageKey(content.storageKey());
+            version.setSizeBytes(content.sizeBytes());
+            version.setSha256(content.sha256());
+            version.setInstruction(instruction);
+            version.setResultSummary(summary);
+            version.setChangeType(changeType.name());
+            return version;
+        }
     }
 }
