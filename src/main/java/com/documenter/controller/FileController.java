@@ -4,6 +4,7 @@ import com.documenter.constant.ApiResponse;
 import com.documenter.dto.FileQueryDTO;
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.EditDocxTableDTO;
+import com.documenter.dto.EditXlsxCellsDTO;
 import com.documenter.dto.FormatDocxParagraphsDTO;
 import com.documenter.dto.GenerateDocxDTO;
 import com.documenter.dto.InsertDocxImagesDTO;
@@ -13,6 +14,7 @@ import com.documenter.service.DocumentVersionService;
 import com.documenter.service.DocxDocumentService;
 import com.documenter.service.FileService;
 import com.documenter.service.PdfDocumentService;
+import com.documenter.service.XlsxDocumentService;
 import com.documenter.util.SecurityUtil;
 import com.documenter.vo.FileAssetVO;
 import com.documenter.vo.FileDownload;
@@ -21,6 +23,7 @@ import com.documenter.vo.PageResult;
 import com.documenter.vo.PdfContentVO;
 import com.documenter.vo.PdfPagePreview;
 import com.documenter.vo.VersionVO;
+import com.documenter.vo.XlsxStructureVO;
 import jakarta.validation.Valid;
 import org.springframework.core.io.Resource;
 import org.springframework.http.ContentDisposition;
@@ -56,14 +59,17 @@ public class FileController {
     private final DocumentVersionService versionService;
     private final DocxDocumentService docxDocumentService;
     private final PdfDocumentService pdfDocumentService;
+    private final XlsxDocumentService xlsxDocumentService;
 
     public FileController(FileService fileService, DocumentVersionService versionService,
                           DocxDocumentService docxDocumentService,
-                          PdfDocumentService pdfDocumentService) {
+                          PdfDocumentService pdfDocumentService,
+                          XlsxDocumentService xlsxDocumentService) {
         this.fileService = fileService;
         this.versionService = versionService;
         this.docxDocumentService = docxDocumentService;
         this.pdfDocumentService = pdfDocumentService;
+        this.xlsxDocumentService = xlsxDocumentService;
     }
 
     // ---------------------------------------------------------------- 文件
@@ -162,6 +168,23 @@ public class FileController {
                                                  @RequestParam(required = false) Integer dpi) {
         return toPreview(pdfDocumentService.renderPage(
                 SecurityUtil.requireUserId(), fileId, versionNo, pageNo, dpi));
+    }
+
+    /** 读取指定 XLSX 版本的工作表、单元格、样式、公式、合并区域与图表结构。 */
+    @GetMapping("/{fileId}/versions/{versionNo}/xlsx/structure")
+    public ApiResponse<XlsxStructureVO> readXlsxStructure(@PathVariable Long fileId,
+                                                           @PathVariable Integer versionNo) {
+        return ApiResponse.success(xlsxDocumentService.readStructure(
+                SecurityUtil.requireUserId(), fileId, versionNo));
+    }
+
+    /** 修改指定 XLSX 版本中的单元格值或公式，并保存为新版本。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/xlsx/cell-edits")
+    public ApiResponse<VersionVO> editXlsxCells(@PathVariable Long fileId,
+                                                @PathVariable Integer versionNo,
+                                                @Valid @RequestBody EditXlsxCellsDTO request) {
+        return ApiResponse.success("已生成新版本", xlsxDocumentService.editCells(
+                SecurityUtil.requireUserId(), fileId, versionNo, request));
     }
 
     /** 批量替换指定 DOCX 版本中的简单段落，并保存为新版本。 */

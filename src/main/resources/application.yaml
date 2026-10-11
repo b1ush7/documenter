@@ -65,6 +65,9 @@ res:
       max-extracted-chars-total: ${PDF_MAX_EXTRACTED_CHARS_TOTAL:2000000}
       preview-dpi: ${PDF_PREVIEW_DPI:144}
       max-preview-dpi: ${PDF_MAX_PREVIEW_DPI:200}
+    xlsx:
+      max-read-cells: ${XLSX_MAX_READ_CELLS:100000}
+      max-edit-operations: ${XLSX_MAX_EDIT_OPERATIONS:500}
   # 处理任务（TODO 3.4）
   task:
     # 有界队列 + CallerRuns 拒绝策略：队列满时由提交线程执行，形成背压而不是丢任务

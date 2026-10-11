@@ -13,6 +13,7 @@ import com.documenter.service.DocxDocumentService;
 import com.documenter.service.FileService;
 import com.documenter.service.PdfDocumentService;
 import com.documenter.service.TaskService;
+import com.documenter.service.XlsxDocumentService;
 import com.documenter.vo.AdminOverviewVO;
 import com.documenter.vo.AdminUserUsageVO;
 import com.documenter.vo.FileDownload;
@@ -20,6 +21,7 @@ import com.documenter.vo.PdfContentVO;
 import com.documenter.vo.PdfPagePreview;
 import com.documenter.vo.TaskDetailVO;
 import com.documenter.vo.TaskVO;
+import com.documenter.vo.XlsxStructureVO;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -41,11 +43,27 @@ class AdminResourceServiceImplTest {
     private final DocumentVersionService versionService = mock(DocumentVersionService.class);
     private final DocxDocumentService docxDocumentService = mock(DocxDocumentService.class);
     private final PdfDocumentService pdfDocumentService = mock(PdfDocumentService.class);
+    private final XlsxDocumentService xlsxDocumentService = mock(XlsxDocumentService.class);
     private final TaskService taskService = mock(TaskService.class);
     private final AuditService auditService = mock(AuditService.class);
     private final AdminResourceServiceImpl service = new AdminResourceServiceImpl(
             fileAssetMapper, taskMapper, statisticsMapper, fileService, versionService,
-            docxDocumentService, pdfDocumentService, taskService, auditService);
+            docxDocumentService, pdfDocumentService, xlsxDocumentService, taskService, auditService);
+
+    @Test
+    void readsXlsxWithActualOwnerAndWritesAudit() {
+        FileAsset asset = file(10L, 7L);
+        XlsxStructureVO expected = new XlsxStructureVO(10L, 1, 0, 0, false, List.of());
+        when(fileAssetMapper.selectById(10L)).thenReturn(asset);
+        when(xlsxDocumentService.readStructure(7L, 10L, 1)).thenReturn(expected);
+
+        var result = service.readXlsxStructure(10L, 1);
+
+        assertSame(expected, result);
+        verify(xlsxDocumentService).readStructure(7L, 10L, 1);
+        verify(auditService).success(AuditAction.ADMIN_FILE_VIEW, "FILE", 10L,
+                "读取 XLSX 版本 1 的结构");
+    }
 
     @Test
     void overviewReturnsAggregatesAndWritesAudit() {

@@ -27,6 +27,9 @@ public class StorageProperties {
     /** PDF 原生文本提取限制。 */
     private Pdf pdf = new Pdf();
 
+    /** XLSX 结构读取与编辑限制。 */
+    private Xlsx xlsx = new Xlsx();
+
     @Getter
     @Setter
     public static class Local {
@@ -88,5 +91,15 @@ public class StorageProperties {
 
         /** 调用方可请求的最大预览 DPI。 */
         private int maxPreviewDpi = 200;
+    }
+
+    @Getter
+    @Setter
+    public static class Xlsx {
+        /** 单次结构读取最多返回的单元格数量，超出部分以 truncated 标记。 */
+        private int maxReadCells = 100_000;
+
+        /** 单次允许修改的单元格数量。 */
+        private int maxEditOperations = 500;
     }
 }

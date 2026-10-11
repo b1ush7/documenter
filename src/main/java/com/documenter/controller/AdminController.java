@@ -22,6 +22,7 @@ import com.documenter.vo.PageResult;
 import com.documenter.vo.PdfContentVO;
 import com.documenter.vo.PdfPagePreview;
 import com.documenter.vo.VersionVO;
+import com.documenter.vo.XlsxStructureVO;
 import jakarta.validation.Valid;
 import org.springframework.core.io.Resource;
 import org.springframework.http.ContentDisposition;
@@ -157,6 +158,12 @@ public class AdminController {
                                                  @RequestParam(required = false) Integer dpi) {
         return toPreview(adminResourceService.previewPdfPage(
                 fileId, versionNo, pageNo, dpi));
+    }
+
+    @GetMapping("/files/{fileId}/versions/{versionNo}/xlsx/structure")
+    public ApiResponse<XlsxStructureVO> readXlsxStructure(@PathVariable Long fileId,
+                                                           @PathVariable Integer versionNo) {
+        return ApiResponse.success(adminResourceService.readXlsxStructure(fileId, versionNo));
     }
 
     @GetMapping("/tasks")

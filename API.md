@@ -131,6 +131,8 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | DOCX | GET | `/file/{fileId}/versions/{versionNo}/structure` | 是 | 读取 DOCX 结构 |
 | PDF | GET | `/file/{fileId}/versions/{versionNo}/pdf/content` | 是 | 提取 PDF 原生文本并检测页面类型 |
 | PDF | GET | `/file/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview` | 是 | 渲染 PDF 指定页 PNG 预览 |
+| XLSX | GET | `/file/{fileId}/versions/{versionNo}/xlsx/structure` | 是 | 读取工作表与单元格结构 |
+| XLSX | POST | `/file/{fileId}/versions/{versionNo}/xlsx/cell-edits` | 是 | 编辑单元格值或公式并新建版本 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/paragraph-text` | 是 | 替换段落文本 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/paragraph-edits` | 是 | 插入或删除段落 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/table-edits` | 是 | 编辑表格 |
@@ -160,6 +162,7 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/structure` | 管理员 | 读取任意用户 DOCX 结构 |
 | 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/pdf/content` | 管理员 | 读取任意用户 PDF 原生文本 |
 | 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview` | 管理员 | 预览任意用户 PDF 页面 |
+| 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/xlsx/structure` | 管理员 | 读取任意用户 XLSX 结构 |
 | 管理员 | GET | `/admin/tasks` | 管理员 | 跨用户任务分页列表 |
 | 管理员 | GET | `/admin/tasks/{taskId}` | 管理员 | 任意用户任务与步骤详情 |
 | 管理员 | POST | `/admin/tasks/{taskId}/cancel` | 管理员 | 取消任意用户任务 |
@@ -516,6 +519,117 @@ POST /file/10/versions/2/restore?expectVersion=5
 可选查询参数 `dpi`，默认 `144`，允许范围为 `72`～`200`。成功时直接返回 `image/png`，不使用统一 JSON 包装，并设置内联文件名、`Content-Length`、`X-Image-Width` 和 `X-Image-Height`。
 
 渲染前会按页面裁剪框和 DPI 估算像素数，并复用上传图片像素上限；超过限制返回业务码 `413`。页码从 1 开始，越界返回业务码 `404`。默认 DPI、最大 DPI 和像素上限均可通过部署配置调整。
+
+### 3.13 读取 XLSX 结构
+
+`GET /file/{fileId}/versions/{versionNo}/xlsx/structure`
+
+响应示例：
+
+```json
+{
+  "code": 0,
+  "msg": "",
+  "data": {
+    "fileId": 10,
+    "versionNo": 2,
+    "totalSheets": 1,
+    "includedCells": 3,
+    "truncated": false,
+    "sheets": [
+      {
+        "index": 0,
+        "name": "数据",
+        "firstRow": 0,
+        "lastRow": 1,
+        "mergedRegions": ["A2:B2"],
+        "charts": [
+          {"index": 0, "title": "销售额", "titleFormula": null, "types": ["BAR"]}
+        ],
+        "cells": [
+          {
+            "address": "A1",
+            "rowIndex": 0,
+            "columnIndex": 0,
+            "type": "STRING",
+            "cachedValueType": null,
+            "value": "项目",
+            "formula": null,
+            "style": {
+              "styleIndex": 1,
+              "dataFormat": 0,
+              "dataFormatString": "General",
+              "horizontalAlignment": "CENTER",
+              "verticalAlignment": "BOTTOM",
+              "wrapText": true,
+              "locked": true,
+              "hidden": false,
+              "fillPattern": "NO_FILL",
+              "fillForegroundColor": 64,
+              "borderTop": "NONE",
+              "borderRight": "NONE",
+              "borderBottom": "NONE",
+              "borderLeft": "NONE",
+              "fontName": "Calibri",
+              "fontSize": 11.0,
+              "bold": true,
+              "italic": false
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+- 只返回实际存在的单元格；空工作表的 `firstRow`、`lastRow` 为 `null`。
+- `address` 使用 A1 格式，行列下标从 0 开始。公式单元格的 `type` 为 `FORMULA`，`formula` 不含开头等号，`value` 和 `cachedValueType` 来自文件中已有的缓存结果；接口不会执行公式。
+- `mergedRegions` 使用 A1 区域格式；图表以工作表内的 `index` 定位，并返回可读取的标题和图表类型。
+- 单次默认最多返回 100000 个单元格，由 `res.storage.xlsx.max-read-cells` 控制；超出时 `truncated=true`。
+
+### 3.14 编辑 XLSX 单元格
+
+`POST /file/{fileId}/versions/{versionNo}/xlsx/cell-edits`
+
+```json
+{
+  "instruction": "更新数量并计算合计",
+  "operations": [
+    {
+      "type": "SET_VALUE",
+      "sheetName": "数据",
+      "cell": "B2",
+      "valueType": "NUMBER",
+      "value": "12.5"
+    },
+    {
+      "type": "SET_FORMULA",
+      "sheetName": "数据",
+      "cell": "C2",
+      "formula": "B2*2"
+    },
+    {
+      "type": "CLEAR",
+      "sheetName": "数据",
+      "cell": "D2"
+    }
+  ]
+}
+```
+
+| 操作 | 必须字段 | 说明 |
+| --- | --- | --- |
+| `SET_VALUE` | `sheetName`、`cell`、`valueType`、`value` | `valueType` 支持 `STRING`、`NUMBER`、`BOOLEAN`、`DATE` |
+| `SET_FORMULA` | `sheetName`、`cell`、`formula` | 公式可带或不带开头等号，最长 8192 个字符 |
+| `CLEAR` | `sheetName`、`cell` | 清空内容但保留单元格样式 |
+
+- `instruction` 可选，最长 2000；`operations` 必填，默认最多 500 项，由 `res.storage.xlsx.max-edit-operations` 控制。
+- `cell` 必须是 XLSX 范围内的 A1 地址；同一请求不能重复修改同一目标。合并区域只能修改左上角，数组公式单元格暂不支持修改。
+- `STRING` 即使以 `=` 开头也只写为文本。`DATE` 接受 `yyyy-MM-dd` 或 ISO 本地日期时间；原单元格没有日期格式时自动补充基础日期格式。
+- 新公式不允许外部工作簿引用、URL、DDE 管道，或 `WEBSERVICE`、`HYPERLINK`、`RTD`、`DDE`、`CALL`、`REGISTER.ID` 等外部调用函数。服务端只校验并写入公式，不执行公式；文件在办公软件中打开时重算。
+- 成功后以路径中的 `versionNo` 作为并发期望版本，创建新的 `MANUAL_EDIT` 版本，原版本不变；返回新 [Version](#64-version)。
+- 当前接口不支持区域批量写入、行列插入删除、工作表增删改名、排序筛选、格式编辑或图表编辑。
 
 ## 4. DOCX 生成与编辑
 
@@ -1007,6 +1121,10 @@ PENDING -> RUNNING -> SUCCEEDED
 
 顶层字段包括 `fileId`、`versionNo`、`documentType`、`totalPages`、各页面类型数量、实际返回的 `extractedTextChars`、`textTruncated` 和 `pages`。每个页面包含 `pageNo`、`type`、`text`、截断前的 `textCharCount`、`imageCount` 和 `textTruncated`。
 
+### 6.12 XlsxStructure
+
+顶层包含 `fileId`、`versionNo`、`totalSheets`、`includedCells`、`truncated` 和 `sheets`。每个工作表包含名称、行范围、合并区域、基础图表信息及单元格。每个单元格包含 A1 地址、零基行列下标、类型、值、公式、公式缓存值类型和基础样式；内部存储路径不会返回。
+
 ## 7. 管理员
 
 所有 `/admin/**` 接口都必须携带有效 Access Token，并要求当前账号角色为 `ADMIN`。普通用户访问时返回 HTTP `403`。系统不提供匿名管理员注册或初始化接口；首个管理员需要通过受控部署流程或数据库设置。
@@ -1076,6 +1194,7 @@ PENDING -> RUNNING -> SUCCEEDED
 - `GET /admin/files/{fileId}/versions/{versionNo}/structure`：读取指定 DOCX 版本的段落、表格和图片结构。
 - `GET /admin/files/{fileId}/versions/{versionNo}/pdf/content`：读取指定 PDF 版本的原生文本和页面类型。
 - `GET /admin/files/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview`：渲染指定 PDF 页面的 PNG 预览。
+- `GET /admin/files/{fileId}/versions/{versionNo}/xlsx/structure`：读取指定 XLSX 版本的工作表和单元格结构。
 
 这些接口使用文件真实所有者完成版本定位，不依赖客户端传入用户 ID。查看或下载行为会写入审计日志。
 

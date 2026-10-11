@@ -17,6 +17,7 @@ import com.documenter.service.DocxDocumentService;
 import com.documenter.service.FileService;
 import com.documenter.service.PdfDocumentService;
 import com.documenter.service.TaskService;
+import com.documenter.service.XlsxDocumentService;
 import com.documenter.vo.AdminFileVO;
 import com.documenter.vo.AdminOverviewVO;
 import com.documenter.vo.AdminTaskDetailVO;
@@ -30,6 +31,7 @@ import com.documenter.vo.PdfPagePreview;
 import com.documenter.vo.TaskDetailVO;
 import com.documenter.vo.TaskVO;
 import com.documenter.vo.VersionVO;
+import com.documenter.vo.XlsxStructureVO;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -47,6 +49,7 @@ public class AdminResourceServiceImpl implements AdminResourceService {
     private final DocumentVersionService versionService;
     private final DocxDocumentService docxDocumentService;
     private final PdfDocumentService pdfDocumentService;
+    private final XlsxDocumentService xlsxDocumentService;
     private final TaskService taskService;
     private final AuditService auditService;
 
@@ -57,6 +60,7 @@ public class AdminResourceServiceImpl implements AdminResourceService {
                                     DocumentVersionService versionService,
                                     DocxDocumentService docxDocumentService,
                                     PdfDocumentService pdfDocumentService,
+                                    XlsxDocumentService xlsxDocumentService,
                                     TaskService taskService,
                                     AuditService auditService) {
         this.fileAssetMapper = fileAssetMapper;
@@ -66,6 +70,7 @@ public class AdminResourceServiceImpl implements AdminResourceService {
         this.versionService = versionService;
         this.docxDocumentService = docxDocumentService;
         this.pdfDocumentService = pdfDocumentService;
+        this.xlsxDocumentService = xlsxDocumentService;
         this.taskService = taskService;
         this.auditService = auditService;
     }
@@ -207,6 +212,16 @@ public class AdminResourceServiceImpl implements AdminResourceService {
         auditService.success(AuditAction.ADMIN_FILE_VIEW, "FILE", fileId,
                 "预览 PDF 版本 " + versionNo + " 第 " + pageNo + " 页");
         return preview;
+    }
+
+    @Override
+    public XlsxStructureVO readXlsxStructure(Long fileId, Integer versionNo) {
+        FileAsset asset = requireFile(fileId);
+        XlsxStructureVO structure = xlsxDocumentService.readStructure(
+                asset.getUserId(), fileId, versionNo);
+        auditService.success(AuditAction.ADMIN_FILE_VIEW, "FILE", fileId,
+                "读取 XLSX 版本 " + versionNo + " 的结构");
+        return structure;
     }
 
     @Override
