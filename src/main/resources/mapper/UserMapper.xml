@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="com.documenter.entity.User">
+<!--
+  namespace 必须是 Mapper 接口的全限定名。
+  原值为 com.documenter.entity.User，MyBatis 启动时会因找不到该命名空间对应的接口而报错。
+  本文件暂无自定义 SQL，UserMapper 完全依赖 MyBatis-Plus 的 BaseMapper。
+-->
+<mapper namespace="com.documenter.mapper.UserMapper">
 </mapper>
