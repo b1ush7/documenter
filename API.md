@@ -141,6 +141,10 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | 任务 | POST | `/task/{taskId}/cancel` | 是 | 取消任务 |
 | 任务 | POST | `/task/{taskId}/retry` | 是 | 重试任务 |
 | 任务 | GET | `/task/by-file/{fileId}` | 是 | 查询文件处理历史 |
+| 管理员 | GET | `/admin/users` | 管理员 | 用户分页列表 |
+| 管理员 | GET | `/admin/users/{userId}` | 管理员 | 用户详情 |
+| 管理员 | PUT | `/admin/users/{userId}/status` | 管理员 | 启用或禁用账号 |
+| 管理员 | PUT | `/admin/users/{userId}/role` | 管理员 | 调整用户角色 |
 
 ## 2. 用户与认证
 
@@ -929,7 +933,59 @@ PENDING -> RUNNING -> SUCCEEDED
 
 终态为 `SUCCEEDED`、`FAILED`、`CANCELLED`。
 
-## 7. 当前实现边界
+### 6.6 AdminUser
+
+管理员用户响应不会包含密码或密码哈希，字段为：`id`、`username`、`phone`、`role`、`status`、`balance`、`createTime`、`updateTime`、`lastLoginTime`。
+
+## 7. 管理员
+
+所有 `/admin/**` 接口都必须携带有效 Access Token，并要求当前账号角色为 `ADMIN`。普通用户访问时返回 HTTP `403`。系统不提供匿名管理员注册或初始化接口；首个管理员需要通过受控部署流程或数据库设置。
+
+### 7.1 用户列表
+
+`GET /admin/users`
+
+| 查询参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `page` | `1` | 大于等于 1 |
+| `size` | `20` | 1～100 |
+| `keyword` | - | 按用户名或手机号模糊查询，最长 100 字符 |
+| `status` | - | `ENABLED` 或 `DISABLED` |
+| `role` | - | `USER` 或 `ADMIN` |
+
+返回 `PageResult<AdminUser>`，按创建时间倒序。
+
+### 7.2 用户详情
+
+`GET /admin/users/{userId}`
+
+成功时返回 `AdminUser`；用户不存在时返回业务码 `404`。
+
+### 7.3 启用或禁用账号
+
+`PUT /admin/users/{userId}/status`
+
+```json
+{
+  "status": "DISABLED"
+}
+```
+
+`status` 只支持 `ENABLED`、`DISABLED`。禁用账号会立即撤销该用户的全部登录会话，而且 JWT 过滤器会在每次请求时检查账号状态。管理员不能禁用自己的账号。变更会写入审计日志。
+
+### 7.4 调整用户角色
+
+`PUT /admin/users/{userId}/role`
+
+```json
+{
+  "role": "ADMIN"
+}
+```
+
+`role` 只支持 `USER`、`ADMIN`。角色变化后撤销目标用户的全部会话，使其重新登录后获得新权限。管理员不能把自己的角色降为普通用户。变更会写入审计日志。
+
+## 8. 当前实现边界
 
 - 尚未提供 AI 对话或自然语言文档编辑 HTTP 接口。
 - 尚未把 LangChain4j 工具调用接入 Controller 或任务处理器。

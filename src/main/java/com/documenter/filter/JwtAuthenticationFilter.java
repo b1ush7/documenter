@@ -63,7 +63,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             try {
                 String userId = jwtUtil.getAuthenticatedUserId(token);
                 User user = userMapper.selectById(Long.valueOf(userId));
-                if (user == null) {
+                if (user == null || !user.isEnabled()) {
                     throw new BusinessException(401, "未授权访问");
                 }
                 List<SimpleGrantedAuthority> authorities = "ADMIN".equals(user.getRole())
