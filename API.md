@@ -130,6 +130,7 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | 版本 | GET | `/file/{fileId}/versions/{versionNo}/download` | 是 | 下载指定版本 |
 | DOCX | GET | `/file/{fileId}/versions/{versionNo}/structure` | 是 | 读取 DOCX 结构 |
 | PDF | GET | `/file/{fileId}/versions/{versionNo}/pdf/content` | 是 | 提取 PDF 原生文本并检测页面类型 |
+| PDF | GET | `/file/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview` | 是 | 渲染 PDF 指定页 PNG 预览 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/paragraph-text` | 是 | 替换段落文本 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/paragraph-edits` | 是 | 插入或删除段落 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/table-edits` | 是 | 编辑表格 |
@@ -158,6 +159,7 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/download` | 管理员 | 下载任意用户指定版本 |
 | 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/structure` | 管理员 | 读取任意用户 DOCX 结构 |
 | 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/pdf/content` | 管理员 | 读取任意用户 PDF 原生文本 |
+| 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview` | 管理员 | 预览任意用户 PDF 页面 |
 | 管理员 | GET | `/admin/tasks` | 管理员 | 跨用户任务分页列表 |
 | 管理员 | GET | `/admin/tasks/{taskId}` | 管理员 | 任意用户任务与步骤详情 |
 | 管理员 | POST | `/admin/tasks/{taskId}/cancel` | 管理员 | 取消任意用户任务 |
@@ -506,6 +508,14 @@ POST /file/10/versions/2/restore?expectVersion=5
 - `EMPTY`：没有检测到原生文字或内嵌图片。
 
 这是基于 PDF 内容对象的启发式分类，不执行 OCR，也不保证能识别只使用矢量路径绘制的文字或扫描内容。默认每页最多返回 100,000 个 Unicode 字符，整份文档最多返回 2,000,000 个；超出时通过 `textTruncated` 明确标记，限制可由部署环境变量调整。
+
+### 3.12 渲染 PDF 页面预览
+
+`GET /file/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview`
+
+可选查询参数 `dpi`，默认 `144`，允许范围为 `72`～`200`。成功时直接返回 `image/png`，不使用统一 JSON 包装，并设置内联文件名、`Content-Length`、`X-Image-Width` 和 `X-Image-Height`。
+
+渲染前会按页面裁剪框和 DPI 估算像素数，并复用上传图片像素上限；超过限制返回业务码 `413`。页码从 1 开始，越界返回业务码 `404`。默认 DPI、最大 DPI 和像素上限均可通过部署配置调整。
 
 ## 4. DOCX 生成与编辑
 
@@ -1065,6 +1075,7 @@ PENDING -> RUNNING -> SUCCEEDED
 - `GET /admin/files/{fileId}/versions/{versionNo}/download`：下载指定版本。
 - `GET /admin/files/{fileId}/versions/{versionNo}/structure`：读取指定 DOCX 版本的段落、表格和图片结构。
 - `GET /admin/files/{fileId}/versions/{versionNo}/pdf/content`：读取指定 PDF 版本的原生文本和页面类型。
+- `GET /admin/files/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview`：渲染指定 PDF 页面的 PNG 预览。
 
 这些接口使用文件真实所有者完成版本定位，不依赖客户端传入用户 ID。查看或下载行为会写入审计日志。
 

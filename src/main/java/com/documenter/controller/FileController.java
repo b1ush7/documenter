@@ -19,6 +19,7 @@ import com.documenter.vo.FileDownload;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.PageResult;
 import com.documenter.vo.PdfContentVO;
+import com.documenter.vo.PdfPagePreview;
 import com.documenter.vo.VersionVO;
 import jakarta.validation.Valid;
 import org.springframework.core.io.Resource;
@@ -153,6 +154,16 @@ public class FileController {
                 SecurityUtil.requireUserId(), fileId, versionNo));
     }
 
+    /** 将一个明确 PDF 版本的指定页渲染为 PNG。 */
+    @GetMapping("/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview")
+    public ResponseEntity<byte[]> previewPdfPage(@PathVariable Long fileId,
+                                                 @PathVariable Integer versionNo,
+                                                 @PathVariable Integer pageNo,
+                                                 @RequestParam(required = false) Integer dpi) {
+        return toPreview(pdfDocumentService.renderPage(
+                SecurityUtil.requireUserId(), fileId, versionNo, pageNo, dpi));
+    }
+
     /** 批量替换指定 DOCX 版本中的简单段落，并保存为新版本。 */
     @PostMapping("/{fileId}/versions/{versionNo}/paragraph-text")
     public ApiResponse<VersionVO> replaceDocxParagraphText(@PathVariable Long fileId,
@@ -225,5 +236,19 @@ public class FileController {
                 .contentType(MediaType.parseMediaType(download.contentType()))
                 .contentLength(download.contentLength())
                 .body(download.resource());
+    }
+
+    private static ResponseEntity<byte[]> toPreview(PdfPagePreview preview) {
+        ContentDisposition disposition = ContentDisposition.inline()
+                .filename(preview.fileName(), StandardCharsets.UTF_8)
+                .build();
+        byte[] content = preview.content();
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, disposition.toString())
+                .header("X-Image-Width", String.valueOf(preview.widthPixels()))
+                .header("X-Image-Height", String.valueOf(preview.heightPixels()))
+                .contentType(MediaType.IMAGE_PNG)
+                .contentLength(content.length)
+                .body(content);
     }
 }

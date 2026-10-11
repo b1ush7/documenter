@@ -63,6 +63,8 @@ res:
     pdf:
       max-extracted-chars-per-page: ${PDF_MAX_EXTRACTED_CHARS_PER_PAGE:100000}
       max-extracted-chars-total: ${PDF_MAX_EXTRACTED_CHARS_TOTAL:2000000}
+      preview-dpi: ${PDF_PREVIEW_DPI:144}
+      max-preview-dpi: ${PDF_MAX_PREVIEW_DPI:200}
   # 处理任务（TODO 3.4）
   task:
     # 有界队列 + CallerRuns 拒绝策略：队列满时由提交线程执行，形成背压而不是丢任务

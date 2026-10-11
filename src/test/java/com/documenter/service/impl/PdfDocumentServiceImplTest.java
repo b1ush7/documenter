@@ -18,6 +18,8 @@ import java.awt.Color;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 
+import javax.imageio.ImageIO;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -106,11 +108,52 @@ class PdfDocumentServiceImplTest {
         assertEquals(400, error.getCode());
     }
 
+    @Test
+    void rendersRequestedPageAsBoundedPngPreview() throws Exception {
+        byte[] pdf = createPdf(document -> addTextPage(document, "Preview"));
+        when(versionService.downloadVersion(USER_ID, FILE_ID, VERSION_NO)).thenReturn(download(pdf, true));
+
+        var result = service.renderPage(USER_ID, FILE_ID, VERSION_NO, 1, 72);
+
+        assertEquals(1, result.pageNo());
+        assertEquals(72, result.dpi());
+        assertTrue(result.content().length > 0);
+        var image = ImageIO.read(new java.io.ByteArrayInputStream(result.content()));
+        assertEquals(result.widthPixels(), image.getWidth());
+        assertEquals(result.heightPixels(), image.getHeight());
+        assertTrue(result.fileName().endsWith(".png"));
+    }
+
+    @Test
+    void rejectsPreviewThatWouldExceedPixelLimit() throws Exception {
+        properties.getUpload().setMaxImagePixels(100);
+        byte[] pdf = createPdf(document -> addTextPage(document, "Large page"));
+        when(versionService.downloadVersion(USER_ID, FILE_ID, VERSION_NO)).thenReturn(download(pdf, true));
+
+        BusinessException error = assertThrows(BusinessException.class,
+                () -> service.renderPage(USER_ID, FILE_ID, VERSION_NO, 1, 72));
+
+        assertEquals(413, error.getCode());
+    }
+
+    @Test
+    void rejectsPreviewPageOutsideDocument() throws Exception {
+        byte[] pdf = createPdf(document -> addTextPage(document, "One page"));
+        when(versionService.downloadVersion(USER_ID, FILE_ID, VERSION_NO)).thenReturn(download(pdf, true));
+
+        BusinessException error = assertThrows(BusinessException.class,
+                () -> service.renderPage(USER_ID, FILE_ID, VERSION_NO, 2, null));
+
+        assertEquals(404, error.getCode());
+    }
+
     private static StorageProperties properties() {
         StorageProperties properties = new StorageProperties();
         properties.getUpload().setMaxPdfPages(10);
         properties.getPdf().setMaxExtractedCharsPerPage(100_000);
         properties.getPdf().setMaxExtractedCharsTotal(2_000_000);
+        properties.getPdf().setPreviewDpi(144);
+        properties.getPdf().setMaxPreviewDpi(200);
         return properties;
     }
 

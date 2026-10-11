@@ -26,6 +26,7 @@ import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.PageResult;
 import com.documenter.vo.PdfContentVO;
+import com.documenter.vo.PdfPagePreview;
 import com.documenter.vo.TaskDetailVO;
 import com.documenter.vo.TaskVO;
 import com.documenter.vo.VersionVO;
@@ -195,6 +196,17 @@ public class AdminResourceServiceImpl implements AdminResourceService {
         auditService.success(AuditAction.ADMIN_FILE_VIEW, "FILE", fileId,
                 "读取 PDF 版本 " + versionNo + " 的原生文本");
         return content;
+    }
+
+    @Override
+    public PdfPagePreview previewPdfPage(Long fileId, Integer versionNo,
+                                         Integer pageNo, Integer dpi) {
+        FileAsset asset = requireFile(fileId);
+        PdfPagePreview preview = pdfDocumentService.renderPage(
+                asset.getUserId(), fileId, versionNo, pageNo, dpi);
+        auditService.success(AuditAction.ADMIN_FILE_VIEW, "FILE", fileId,
+                "预览 PDF 版本 " + versionNo + " 第 " + pageNo + " 页");
+        return preview;
     }
 
     @Override

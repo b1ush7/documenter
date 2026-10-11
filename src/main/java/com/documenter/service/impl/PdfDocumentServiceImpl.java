@@ -6,6 +6,7 @@ import com.documenter.service.DocumentVersionService;
 import com.documenter.service.PdfDocumentService;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.PdfContentVO;
+import com.documenter.vo.PdfPagePreview;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.cos.COSBase;
@@ -15,9 +16,12 @@ import org.apache.pdfbox.pdmodel.PDResources;
 import org.apache.pdfbox.pdmodel.graphics.PDXObject;
 import org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
+import org.apache.pdfbox.rendering.ImageType;
+import org.apache.pdfbox.rendering.PDFRenderer;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.springframework.stereotype.Service;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
@@ -26,12 +30,15 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
+import javax.imageio.ImageIO;
+
 /** 基于 PDFBox 的 PDF 原生文本读取器。 */
 @Slf4j
 @Service
 public class PdfDocumentServiceImpl implements PdfDocumentService {
 
     private static final String PDF_CONTENT_TYPE = "application/pdf";
+    private static final int MIN_PREVIEW_DPI = 72;
 
     private final DocumentVersionService versionService;
     private final StorageProperties properties;
@@ -60,6 +67,55 @@ public class PdfDocumentServiceImpl implements PdfDocumentService {
         } catch (IOException | RuntimeException e) {
             log.warn("读取 PDF 内容失败, fileId={}, versionNo={}", fileId, versionNo, e);
             throw new BusinessException(422, "PDF 文档无法解析或内容已损坏");
+        }
+    }
+
+    @Override
+    public PdfPagePreview renderPage(Long userId, Long fileId, Integer versionNo,
+                                     Integer pageNo, Integer dpi) {
+        if (pageNo == null || pageNo <= 0) {
+            throw new BusinessException(400, "PDF 页码必须大于 0");
+        }
+        int actualDpi = dpi == null ? properties.getPdf().getPreviewDpi() : dpi;
+        if (actualDpi < MIN_PREVIEW_DPI || actualDpi > properties.getPdf().getMaxPreviewDpi()) {
+            throw new BusinessException(400, "预览 DPI 必须在 " + MIN_PREVIEW_DPI + " 到 "
+                    + properties.getPdf().getMaxPreviewDpi() + " 之间");
+        }
+
+        FileDownload version = versionService.downloadVersion(userId, fileId, versionNo);
+        if (!isPdf(version)) {
+            throw new BusinessException(400, "当前版本不是 PDF 文档");
+        }
+
+        try (InputStream input = version.resource().getInputStream();
+             PDDocument document = Loader.loadPDF(input.readAllBytes())) {
+            if (pageNo > document.getNumberOfPages()) {
+                throw new BusinessException(404, "PDF 页面不存在");
+            }
+            PDPage page = document.getPage(pageNo - 1);
+            int expectedWidth = (int) Math.ceil(page.getCropBox().getWidth() * actualDpi / 72.0);
+            int expectedHeight = (int) Math.ceil(page.getCropBox().getHeight() * actualDpi / 72.0);
+            long expectedPixels = (long) expectedWidth * expectedHeight;
+            if (expectedPixels > properties.getUpload().getMaxImagePixels()) {
+                throw new BusinessException(413, "PDF 页面预览像素超过限制");
+            }
+
+            var image = new PDFRenderer(document).renderImageWithDPI(
+                    pageNo - 1, actualDpi, ImageType.RGB);
+            try (ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+                if (!ImageIO.write(image, "png", output)) {
+                    throw new BusinessException(500, "当前环境不支持 PNG 预览编码");
+                }
+                String fileName = "file-" + fileId + "-v" + versionNo + "-page-" + pageNo + ".png";
+                return new PdfPagePreview(output.toByteArray(), pageNo, actualDpi,
+                        image.getWidth(), image.getHeight(), fileName);
+            }
+        } catch (BusinessException e) {
+            throw e;
+        } catch (IOException | RuntimeException e) {
+            log.warn("渲染 PDF 页面失败, fileId={}, versionNo={}, pageNo={}",
+                    fileId, versionNo, pageNo, e);
+            throw new BusinessException(422, "PDF 页面无法渲染或内容已损坏");
         }
     }
 

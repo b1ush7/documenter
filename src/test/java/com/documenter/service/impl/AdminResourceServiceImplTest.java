@@ -17,6 +17,7 @@ import com.documenter.vo.AdminOverviewVO;
 import com.documenter.vo.AdminUserUsageVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.PdfContentVO;
+import com.documenter.vo.PdfPagePreview;
 import com.documenter.vo.TaskDetailVO;
 import com.documenter.vo.TaskVO;
 import org.junit.jupiter.api.Test;
@@ -167,6 +168,21 @@ class AdminResourceServiceImplTest {
         assertSame(expected, result);
         verify(auditService).success(AuditAction.ADMIN_FILE_VIEW, "FILE", 10L,
                 "读取 PDF 版本 1 的原生文本");
+    }
+
+    @Test
+    void pdfPreviewDelegatesWithActualOwnerAndWritesAudit() {
+        FileAsset asset = file(10L, 7L);
+        PdfPagePreview expected = new PdfPagePreview(new byte[]{1, 2}, 1,
+                144, 100, 200, "preview.png");
+        when(fileAssetMapper.selectById(10L)).thenReturn(asset);
+        when(pdfDocumentService.renderPage(7L, 10L, 1, 1, 144)).thenReturn(expected);
+
+        var result = service.previewPdfPage(10L, 1, 1, 144);
+
+        assertSame(expected, result);
+        verify(auditService).success(AuditAction.ADMIN_FILE_VIEW, "FILE", 10L,
+                "预览 PDF 版本 1 第 1 页");
     }
 
     @Test

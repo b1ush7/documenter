@@ -20,6 +20,7 @@ import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.PageResult;
 import com.documenter.vo.PdfContentVO;
+import com.documenter.vo.PdfPagePreview;
 import com.documenter.vo.VersionVO;
 import jakarta.validation.Valid;
 import org.springframework.core.io.Resource;
@@ -149,6 +150,15 @@ public class AdminController {
         return ApiResponse.success(adminResourceService.readPdfContent(fileId, versionNo));
     }
 
+    @GetMapping("/files/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview")
+    public ResponseEntity<byte[]> previewPdfPage(@PathVariable Long fileId,
+                                                 @PathVariable Integer versionNo,
+                                                 @PathVariable Integer pageNo,
+                                                 @RequestParam(required = false) Integer dpi) {
+        return toPreview(adminResourceService.previewPdfPage(
+                fileId, versionNo, pageNo, dpi));
+    }
+
     @GetMapping("/tasks")
     public ApiResponse<PageResult<AdminTaskVO>> listTasks(
             @RequestParam(required = false) Long userId,
@@ -180,5 +190,19 @@ public class AdminController {
                 .contentType(MediaType.parseMediaType(download.contentType()))
                 .contentLength(download.contentLength())
                 .body(download.resource());
+    }
+
+    private static ResponseEntity<byte[]> toPreview(PdfPagePreview preview) {
+        ContentDisposition disposition = ContentDisposition.inline()
+                .filename(preview.fileName(), StandardCharsets.UTF_8)
+                .build();
+        byte[] content = preview.content();
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, disposition.toString())
+                .header("X-Image-Width", String.valueOf(preview.widthPixels()))
+                .header("X-Image-Height", String.valueOf(preview.heightPixels()))
+                .contentType(MediaType.IMAGE_PNG)
+                .contentLength(content.length)
+                .body(content);
     }
 }

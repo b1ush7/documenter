@@ -11,6 +11,7 @@ import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.PageResult;
 import com.documenter.vo.PdfContentVO;
+import com.documenter.vo.PdfPagePreview;
 import com.documenter.vo.VersionVO;
 
 import java.util.List;
@@ -41,6 +42,8 @@ public interface AdminResourceService {
     DocxStructureVO readDocxStructure(Long fileId, Integer versionNo);
 
     PdfContentVO readPdfContent(Long fileId, Integer versionNo);
+
+    PdfPagePreview previewPdfPage(Long fileId, Integer versionNo, Integer pageNo, Integer dpi);
 
     PageResult<AdminTaskVO> listTasks(Long userId, TaskQueryDTO query);
 

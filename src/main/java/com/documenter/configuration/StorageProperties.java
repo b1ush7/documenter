@@ -82,5 +82,11 @@ public class StorageProperties {
 
         /** 单个 PDF 接口响应最多返回的 Unicode 字符数。 */
         private int maxExtractedCharsTotal = 2_000_000;
+
+        /** PDF 页面预览默认 DPI。 */
+        private int previewDpi = 144;
+
+        /** 调用方可请求的最大预览 DPI。 */
+        private int maxPreviewDpi = 200;
     }
 }
