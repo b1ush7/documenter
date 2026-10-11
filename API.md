@@ -133,6 +133,7 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | PDF | GET | `/file/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview` | 是 | 渲染 PDF 指定页 PNG 预览 |
 | XLSX | GET | `/file/{fileId}/versions/{versionNo}/xlsx/structure` | 是 | 读取工作表与单元格结构 |
 | XLSX | GET | `/file/{fileId}/versions/{versionNo}/xlsx/range` | 是 | 读取指定矩形区域 |
+| XLSX | GET | `/file/{fileId}/versions/{versionNo}/xlsx/formula-results` | 是 | 即时计算区域内公式，返回结果或错误 |
 | XLSX | POST | `/file/{fileId}/versions/{versionNo}/xlsx/cell-edits` | 是 | 编辑单元格值或公式并新建版本 |
 | XLSX | POST | `/file/{fileId}/versions/{versionNo}/xlsx/structure-edits` | 是 | 插入或删除行列并新建版本 |
 | XLSX | POST | `/file/{fileId}/versions/{versionNo}/xlsx/sheet-edits` | 是 | 新增、重命名或删除工作表并新建版本 |
@@ -169,6 +170,7 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview` | 管理员 | 预览任意用户 PDF 页面 |
 | 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/xlsx/structure` | 管理员 | 读取任意用户 XLSX 结构 |
 | 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/xlsx/range` | 管理员 | 读取任意用户 XLSX 区域 |
+| 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/xlsx/formula-results` | 管理员 | 查看任意用户 XLSX 公式计算结果 |
 | 管理员 | GET | `/admin/tasks` | 管理员 | 跨用户任务分页列表 |
 | 管理员 | GET | `/admin/tasks/{taskId}` | 管理员 | 任意用户任务与步骤详情 |
 | 管理员 | POST | `/admin/tasks/{taskId}/cancel` | 管理员 | 取消任意用户任务 |
@@ -638,13 +640,28 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 | `SET_FORMULA` | `sheetName`、`cell`、`formula` | 公式可带或不带开头等号，最长 8192 个字符 |
 | `CLEAR` | `sheetName`、`cell` | 清空内容但保留单元格样式 |
 | `SET_RANGE` | `sheetName`、`range`、`values` | 按二维矩阵批量写入，矩阵尺寸必须与区域完全一致 |
+| `FILL_FORMULA` | `sheetName`、`range`、`formula` | 以区域左上角的公式为模板，向整个矩形区域填充 |
 
 - `instruction` 可选，最长 2000；`operations` 必填，默认最多 500 项，由 `res.storage.xlsx.max-edit-operations` 控制。
 - `cell` 必须是 XLSX 范围内的 A1 地址；同一请求不能重复修改同一目标。合并区域只能修改左上角，数组公式单元格暂不支持修改。
 - `STRING` 即使以 `=` 开头也只写为文本。`DATE` 接受 `yyyy-MM-dd` 或 ISO 本地日期时间；原单元格没有日期格式时自动补充基础日期格式。
 - 新公式不允许外部工作簿引用、URL、DDE 管道，或 `WEBSERVICE`、`HYPERLINK`、`RTD`、`DDE`、`CALL`、`REGISTER.ID` 等外部调用函数。服务端只校验并写入公式，不执行公式；文件在办公软件中打开时重算。
+- 写入或填充公式时检查语法、直接引用的工作表是否存在、引用是否位于 XLSX 范围内，并拒绝 `#REF!`。对 `INDIRECT` 等动态引用的实际目标和输入类型，需通过计算结果检查，写入校验不能提前保证结果正确。
 - 成功后以路径中的 `versionNo` 作为并发期望版本，创建新的 `MANUAL_EDIT` 版本，原版本不变；返回新 [Version](#64-version)。
 `SET_RANGE` 中每个值的结构为 `{"valueType":"STRING","value":"示例"}`。`valueType` 支持 `STRING`、`NUMBER`、`BOOLEAN`、`DATE`、`FORMULA` 和 `BLANK`；`BLANK` 必须不传 `value`。单次请求按实际影响的单元格数计入 500 个默认上限，同一目标不能同时出现在单元格操作和区域操作中。
+
+`FILL_FORMULA` 示例：
+
+```json
+{
+  "instruction": "计算各行金额",
+  "operations": [
+    {"type": "FILL_FORMULA", "sheetName": "数据", "range": "D2:D20", "formula": "B2*C2*$F$1"}
+  ]
+}
+```
+
+模板代表左上角 `D2` 的公式，`D3` 得到 `B3*C3*$F$1`。二维填充同时调整行和列，相对引用随位置移动，绝对引用保持不变，混合引用只调整相对的部分。工作表名称包含空格时沿用 Excel 的单引号规则，例如 `'年度 数据'!B2`。填充按实际目标数计入默认 500 个上限；生成越界引用、重复目标或命中不能编辑的位置时整个请求失败，不保存部分结果。目标既有单元格样式保留。
 
 当前接口仍不支持图表编辑。
 
@@ -757,6 +774,39 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 - `borderStyle` 支持 `NONE`、`THIN`、`MEDIUM`、`DASHED`、`DOTTED`、`THICK`、`DOUBLE`。颜色接受带或不带 `#` 的 6 位 RGB。
 - 单次最多 100 个格式操作，实际影响单元格总数默认不能超过 500；格式区域不能只覆盖合并区域的一部分，受保护工作表不支持格式编辑。
 - 成功后创建新的 `MANUAL_EDIT` 版本，源版本保持不变。
+
+### 3.19 即时计算 XLSX 公式
+
+`GET /file/{fileId}/versions/{versionNo}/xlsx/formula-results?sheetName=数据&range=D2:D20`
+
+查询参数 `sheetName`、`range` 必填，`range` 接受 `D2` 或 `D2:D20`。返回区域内实际存在的公式单元格；普通值和空白位置不返回。计算基于指定版本中的实际数据，不使用文件中可能过期的公式缓存，不创建版本，也不更新原文件缓存。
+
+响应示例：
+
+```json
+{
+  "code": 0,
+  "msg": "",
+  "data": {
+    "fileId": 10,
+    "versionNo": 2,
+    "sheetName": "数据",
+    "range": "D2:D3",
+    "results": [
+      {"address": "D2", "formula": "B2*C2", "status": "OK", "valueType": "NUMERIC", "value": "120", "message": null},
+      {"address": "D3", "formula": "1/0", "status": "ERROR", "valueType": "ERROR", "value": "#DIV/0!", "message": null}
+    ]
+  }
+}
+```
+
+- `OK`：得到实际结果，`valueType` 为 `NUMERIC`、`STRING`、`BOOLEAN` 等；`value` 统一为字符串。具有日期格式的数值结果按 ISO 本地日期时间返回。
+- `ERROR`：公式已执行但得到 Excel 错误，例如 `#DIV/0!`、`#VALUE!`、`#N/A`、`#REF!`。这些是单元格结果，外层响应仍成功。
+- `UNSUPPORTED`：POI 明确报告函数或依赖尚未支持；`valueType`、`value` 为 `null`，`message` 提示在办公软件中重算。
+- `EVALUATION_FAILED`：该公式或依赖计算失败；同样返回空结果和提示，不冒用旧缓存。动态数组等能力以实际计算引擎支持情况为准。
+- 默认计算区域最多 500 个位置，整个工作簿最多 500 个公式、100000 个已创建单元格，分别沿用 `res.storage.xlsx.max-edit-operations` 和 `max-read-cells`；超出限制返回业务码 `413`。这些限制控制数量，不保证任意复杂公式的固定执行耗时。
+- 工作簿或命名公式含外部引用、高风险函数时返回业务码 `400`；当前计算引擎不支持 1904 日期系统，返回业务码 `422` 并提示在办公软件中重算。
+- XLSX 编辑后的下载文件仍标记为打开时重算；本接口用于检查计算结果，导出缓存写回和完整办公软件兼容性验收尚未完成。
 
 ## 4. DOCX 生成与编辑
 
@@ -1256,6 +1306,10 @@ PENDING -> RUNNING -> SUCCEEDED
 
 包含 `fileId`、`versionNo`、`sheetName`、规范化后的 `range`、零基 `firstRow`、`firstColumn`、`rowCount`、`columnCount` 和二维 `rows`。区域内每个位置都有一个 `XlsxStructure.Cell`，未创建的空白位置 `style` 为 `null`。
 
+### 6.14 XlsxFormulaResults
+
+包含 `fileId`、`versionNo`、`sheetName`、规范化后的 `range` 和 `results`。每项包含 `address`、`formula`、`status`、`valueType`、`value`、`message`；状态和错误含义见 3.19。
+
 ## 7. 管理员
 
 所有 `/admin/**` 接口都必须携带有效 Access Token，并要求当前账号角色为 `ADMIN`。普通用户访问时返回 HTTP `403`。系统不提供匿名管理员注册或初始化接口；首个管理员需要通过受控部署流程或数据库设置。
@@ -1327,6 +1381,7 @@ PENDING -> RUNNING -> SUCCEEDED
 - `GET /admin/files/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview`：渲染指定 PDF 页面的 PNG 预览。
 - `GET /admin/files/{fileId}/versions/{versionNo}/xlsx/structure`：读取指定 XLSX 版本的工作表和单元格结构。
 - `GET /admin/files/{fileId}/versions/{versionNo}/xlsx/range`：读取指定 XLSX 版本中的矩形区域。
+- `GET /admin/files/{fileId}/versions/{versionNo}/xlsx/formula-results`：即时计算指定版本区域内的公式，参数与普通用户接口相同；按真实所有者访问并记录管理员审计。
 
 这些接口使用文件真实所有者完成版本定位，不依赖客户端传入用户 ID。查看或下载行为会写入审计日志。
 

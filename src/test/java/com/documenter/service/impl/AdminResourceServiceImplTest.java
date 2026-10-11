@@ -23,6 +23,7 @@ import com.documenter.vo.TaskDetailVO;
 import com.documenter.vo.TaskVO;
 import com.documenter.vo.XlsxStructureVO;
 import com.documenter.vo.XlsxRangeVO;
+import com.documenter.vo.XlsxFormulaResultsVO;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -81,6 +82,21 @@ class AdminResourceServiceImplTest {
         verify(xlsxDocumentService).readRange(7L, 10L, 1, "数据", "A1:B2");
         verify(auditService).success(AuditAction.ADMIN_FILE_VIEW, "FILE", 10L,
                 "读取 XLSX 版本 1 的区域 A1:B2");
+    }
+
+    @Test
+    void calculatesXlsxFormulasWithActualOwnerAndWritesAudit() {
+        when(fileAssetMapper.selectById(10L)).thenReturn(file(10L, 7L));
+        var expected = new XlsxFormulaResultsVO(10L, 1, "数据", "A1", List.of());
+        when(xlsxDocumentService.calculateFormulas(7L, 10L, 1, "数据", "A1"))
+                .thenReturn(expected);
+
+        var result = service.calculateXlsxFormulas(10L, 1, "数据", "A1");
+
+        assertSame(expected, result);
+        verify(xlsxDocumentService).calculateFormulas(7L, 10L, 1, "数据", "A1");
+        verify(auditService).success(AuditAction.ADMIN_FILE_VIEW, "FILE", 10L,
+                "计算 XLSX 版本 1 的区域公式 A1");
     }
 
     @Test

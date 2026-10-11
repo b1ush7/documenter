@@ -16,19 +16,32 @@ import com.documenter.service.XlsxDocumentService;
 import com.documenter.util.Digests;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.VersionVO;
+import com.documenter.vo.XlsxFormulaResultsVO;
 import com.documenter.vo.XlsxRangeVO;
 import com.documenter.vo.XlsxStructureVO;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.ss.SpreadsheetVersion;
 import org.apache.poi.ss.formula.FormulaParseException;
+import org.apache.poi.ss.formula.FormulaParser;
+import org.apache.poi.ss.formula.FormulaRenderer;
+import org.apache.poi.ss.formula.FormulaShifter;
+import org.apache.poi.ss.formula.FormulaType;
+import org.apache.poi.ss.formula.eval.NotImplementedException;
+import org.apache.poi.ss.formula.ptg.AreaPtgBase;
+import org.apache.poi.ss.formula.ptg.Ptg;
+import org.apache.poi.ss.formula.ptg.Pxg;
+import org.apache.poi.ss.formula.ptg.Pxg3D;
+import org.apache.poi.ss.formula.ptg.RefPtgBase;
 import org.apache.poi.ss.usermodel.Cell;
 import org.apache.poi.ss.usermodel.CellStyle;
 import org.apache.poi.ss.usermodel.CellType;
+import org.apache.poi.ss.usermodel.CellValue;
 import org.apache.poi.ss.usermodel.DateUtil;
 import org.apache.poi.ss.usermodel.BorderStyle;
 import org.apache.poi.ss.usermodel.FillPatternType;
 import org.apache.poi.ss.usermodel.Font;
 import org.apache.poi.ss.usermodel.FormulaError;
+import org.apache.poi.ss.usermodel.FormulaEvaluator;
 import org.apache.poi.ss.usermodel.HorizontalAlignment;
 import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.VerticalAlignment;
@@ -43,6 +56,7 @@ import org.apache.poi.xssf.usermodel.XSSFCellStyle;
 import org.apache.poi.xssf.usermodel.XSSFColor;
 import org.apache.poi.xssf.usermodel.XSSFDrawing;
 import org.apache.poi.xssf.usermodel.XSSFFont;
+import org.apache.poi.xssf.usermodel.XSSFEvaluationWorkbook;
 import org.apache.poi.xssf.usermodel.XSSFSheet;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.springframework.stereotype.Service;
@@ -152,6 +166,114 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
             log.warn("读取 XLSX 区域失败, fileId={}, versionNo={}, range={}",
                     fileId, versionNo, range, e);
             throw new BusinessException(422, "XLSX 文档无法解析或内容已损坏");
+        }
+    }
+
+    @Override
+    public XlsxFormulaResultsVO calculateFormulas(Long userId, Long fileId, Integer versionNo,
+                                                 String sheetName, String rawRange) {
+        CellRangeAddress range = parseArea(rawRange);
+        if (area(range) > properties.getXlsx().getMaxEditOperations()) {
+            throw new BusinessException(413, "单次公式计算区域超过处理限制");
+        }
+        FileDownload version = versionService.downloadVersion(userId, fileId, versionNo);
+        if (!isXlsx(version)) {
+            throw new BusinessException(400, "当前版本不是 XLSX 文档");
+        }
+        try (InputStream input = version.resource().getInputStream();
+             XSSFWorkbook workbook = new XSSFWorkbook(input)) {
+            XSSFSheet sheet = workbook.getSheet(sheetName);
+            if (sheet == null) {
+                throw new BusinessException(404, "工作表不存在：" + sheetName);
+            }
+            requireCalculableWorkbook(workbook);
+            FormulaEvaluator evaluator = workbook.getCreationHelper().createFormulaEvaluator();
+            List<XlsxFormulaResultsVO.Result> results = new ArrayList<>();
+            for (int rowIndex = range.getFirstRow(); rowIndex <= range.getLastRow(); rowIndex++) {
+                Row row = sheet.getRow(rowIndex);
+                if (row == null) {
+                    continue;
+                }
+                for (int column = range.getFirstColumn(); column <= range.getLastColumn(); column++) {
+                    Cell cell = row.getCell(column);
+                    if (cell != null && cell.getCellType() == CellType.FORMULA) {
+                        results.add(evaluateFormula(workbook, evaluator, cell));
+                    }
+                }
+            }
+            return new XlsxFormulaResultsVO(fileId, versionNo, sheet.getSheetName(),
+                    range.formatAsString(), results);
+        } catch (BusinessException e) {
+            throw e;
+        } catch (IOException | RuntimeException e) {
+            log.warn("计算 XLSX 公式失败, fileId={}, versionNo={}", fileId, versionNo, e);
+            throw new BusinessException(422, "XLSX 文档无法计算或内容已损坏");
+        }
+    }
+
+    private void requireCalculableWorkbook(XSSFWorkbook workbook) {
+        // POI 部分日期函数按 1900 日期系统计算，1904 工作簿会产生日期偏差。
+        if (workbook.isDate1904()) {
+            throw new BusinessException(422, "当前计算引擎暂不支持 1904 日期系统，请在办公软件中重算");
+        }
+        int cells = 0;
+        int formulas = 0;
+        for (int sheetIndex = 0; sheetIndex < workbook.getNumberOfSheets(); sheetIndex++) {
+            XSSFSheet sheet = workbook.getSheetAt(sheetIndex);
+            for (Row row : sheet) {
+                for (Cell cell : row) {
+                    if (++cells > properties.getXlsx().getMaxReadCells()) {
+                        throw new BusinessException(413, "工作簿单元格数量超过公式计算限制");
+                    }
+                    if (cell.getCellType() == CellType.FORMULA) {
+                        if (++formulas > properties.getXlsx().getMaxEditOperations()) {
+                            throw new BusinessException(413, "工作簿公式数量超过计算限制");
+                        }
+                        requireSafeFormula(cell.getCellFormula(), cell.getAddress().formatAsString());
+                    }
+                }
+            }
+        }
+        for (var name : workbook.getAllNames()) {
+            if (name.getRefersToFormula() != null) {
+                requireSafeFormula(name.getRefersToFormula(), name.getNameName());
+            }
+        }
+    }
+
+    private static XlsxFormulaResultsVO.Result evaluateFormula(XSSFWorkbook workbook,
+                                                               FormulaEvaluator evaluator,
+                                                               Cell cell) {
+        String address = cell.getAddress().formatAsString();
+        String formula = cell.getCellFormula();
+        try {
+            CellValue result = evaluator.evaluate(cell);
+            if (result == null) {
+                return new XlsxFormulaResultsVO.Result(address, formula, "EVALUATION_FAILED",
+                        null, null, "计算引擎未返回结果，请在办公软件中重算");
+            }
+            String value = switch (result.getCellType()) {
+                case STRING -> result.getStringValue();
+                case BOOLEAN -> Boolean.toString(result.getBooleanValue());
+                case ERROR -> formulaError(result.getErrorValue());
+                case NUMERIC -> DateUtil.isADateFormat(cell.getCellStyle().getDataFormat(),
+                        cell.getCellStyle().getDataFormatString())
+                        && DateUtil.isValidExcelDate(result.getNumberValue())
+                        ? DateUtil.getLocalDateTime(result.getNumberValue(), workbook.isDate1904())
+                        .format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)
+                        : NumberToTextConverter.toText(result.getNumberValue());
+                case BLANK, _NONE -> "";
+                case FORMULA -> throw new IllegalStateException("unexpected formula result");
+            };
+            String status = result.getCellType() == CellType.ERROR ? "ERROR" : "OK";
+            return new XlsxFormulaResultsVO.Result(address, formula, status,
+                    result.getCellType().name(), value, null);
+        } catch (NotImplementedException e) {
+            return new XlsxFormulaResultsVO.Result(address, formula, "UNSUPPORTED",
+                    null, null, "当前计算引擎不支持此公式或其依赖，请在办公软件中重算");
+        } catch (RuntimeException e) {
+            return new XlsxFormulaResultsVO.Result(address, formula, "EVALUATION_FAILED",
+                    null, null, "此公式或其依赖无法计算，请在办公软件中重算");
         }
     }
 
@@ -357,7 +479,8 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
     private static int countAffectedCells(List<EditXlsxCellsDTO.Operation> operations) {
         long count = 0;
         for (EditXlsxCellsDTO.Operation operation : operations) {
-            if (operation != null && "SET_RANGE".equals(operation.getType())) {
+            if (operation != null && ("SET_RANGE".equals(operation.getType())
+                    || "FILL_FORMULA".equals(operation.getType()))) {
                 CellRangeAddress range = parseRange(operation.getRange());
                 count += (long) (range.getLastRow() - range.getFirstRow() + 1)
                         * (range.getLastColumn() - range.getFirstColumn() + 1);
@@ -386,6 +509,10 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
             validateOperation(operation);
             if ("SET_RANGE".equals(operation.getType())) {
                 applyRange(workbook, sheet, operation, targets);
+                continue;
+            }
+            if ("FILL_FORMULA".equals(operation.getType())) {
+                applyFormulaFill(workbook, sheet, operation, targets);
                 continue;
             }
             CellAddress address = parseAddress(operation.getCell());
@@ -485,11 +612,45 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
         }
     }
 
+    private static void applyFormulaFill(XSSFWorkbook workbook, XSSFSheet sheet,
+                                          EditXlsxCellsDTO.Operation operation, Set<String> targets) {
+        CellRangeAddress range = parseRange(operation.getRange());
+        String template = normalizeFormula(operation.getFormula(), range.formatAsString());
+        int sheetIndex = workbook.getSheetIndex(sheet);
+        XSSFEvaluationWorkbook evaluationWorkbook = XSSFEvaluationWorkbook.create(workbook);
+        // 每个目标从原始模板重新解析，防止上一个目标的位移累积到下一个目标。
+        for (int row = range.getFirstRow(); row <= range.getLastRow(); row++) {
+            for (int column = range.getFirstColumn(); column <= range.getLastColumn(); column++) {
+                Ptg[] tokens = parseFormula(workbook, sheetIndex, range.getFirstRow(), template);
+                int rowOffset = row - range.getFirstRow();
+                int columnOffset = column - range.getFirstColumn();
+                if (rowOffset != 0) {
+                    FormulaShifter.createForRowCopy(sheetIndex, sheet.getSheetName(),
+                            range.getFirstRow(), range.getFirstRow(), rowOffset,
+                            SpreadsheetVersion.EXCEL2007).adjustFormula(tokens, sheetIndex);
+                }
+                if (columnOffset != 0) {
+                    FormulaShifter.createForColumnCopy(sheetIndex, sheet.getSheetName(),
+                            range.getFirstColumn(), range.getFirstColumn(), columnOffset,
+                            SpreadsheetVersion.EXCEL2007).adjustFormula(tokens, sheetIndex);
+                }
+                validateFormulaReferences(workbook, tokens);
+                EditXlsxCellsDTO.Operation target = new EditXlsxCellsDTO.Operation();
+                target.setType("SET_FORMULA");
+                target.setFormula(FormulaRenderer.toFormulaString(evaluationWorkbook, tokens));
+                applySingleCell(workbook, sheet, new CellAddress(row, column), target, targets);
+            }
+        }
+    }
+
     private static CellAddress parseAddress(String rawAddress) {
         if (rawAddress == null) {
             throw new BusinessException(400, "单元格地址不能为空");
         }
         String normalized = rawAddress.replace("$", "").toUpperCase(Locale.ROOT);
+        if (!normalized.matches("^[A-Z]{1,3}[1-9][0-9]{0,6}$")) {
+            throw new BusinessException(400, "单元格地址必须使用 A1 格式");
+        }
         CellReference reference;
         try {
             reference = new CellReference(normalized);
@@ -574,6 +735,14 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
                     throw new BusinessException(400, "SET_RANGE 必须且只能提供 range 和 values");
                 }
             }
+            case "FILL_FORMULA" -> {
+                if (operation.getRange() == null || operation.getFormula() == null
+                        || operation.getFormula().isBlank() || operation.getCell() != null
+                        || operation.getValueType() != null || operation.getValue() != null
+                        || operation.getValues() != null) {
+                    throw new BusinessException(400, "FILL_FORMULA 必须且只能提供 range 和 formula");
+                }
+            }
             default -> throw new BusinessException(400, "不支持的单元格操作");
         }
     }
@@ -585,6 +754,8 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
 
     private static void setTypedValue(XSSFWorkbook workbook, Cell cell, String valueType,
                                       String value, String target) {
+        // POI 的 setCellValue 在已有公式上只更新缓存；显式移除公式才能真正替换为普通值。
+        cell.setBlank();
         switch (valueType) {
             case "STRING" -> cell.setCellValue(value);
             case "NUMBER" -> {
@@ -1275,6 +1446,22 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
     }
 
     private static void setFormula(Cell cell, String rawFormula, String target) {
+        String formula = normalizeFormula(rawFormula, target);
+        XSSFWorkbook workbook = (XSSFWorkbook) cell.getSheet().getWorkbook();
+        Ptg[] tokens = parseFormula(workbook, workbook.getSheetIndex(cell.getSheet()),
+                cell.getRowIndex(), formula);
+        validateFormulaReferences(workbook, tokens);
+        try {
+            cell.setCellFormula(formula);
+        } catch (FormulaParseException | IllegalArgumentException | IllegalStateException e) {
+            throw new BusinessException(400, "公式语法无效：" + target);
+        }
+    }
+
+    private static String normalizeFormula(String rawFormula, String target) {
+        if (rawFormula == null) {
+            throw new BusinessException(400, "公式不能为空：" + target);
+        }
         String formula = rawFormula.trim();
         if (formula.startsWith("=")) {
             formula = formula.substring(1).trim();
@@ -1285,15 +1472,66 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
         if (formula.length() > 8192) {
             throw new BusinessException(400, "公式长度不能超过 8192：" + target);
         }
+        requireSafeFormula(formula, target);
+        return formula;
+    }
+
+    private static void requireSafeFormula(String formula, String target) {
         if (formula.contains("://") || formula.contains("|")
                 || EXTERNAL_WORKBOOK_REFERENCE.matcher(formula).find()
                 || UNSAFE_FORMULA_FUNCTION.matcher(formula).find()) {
             throw new BusinessException(400, "公式包含外部引用或高风险函数：" + target);
         }
+    }
+
+    private static Ptg[] parseFormula(XSSFWorkbook workbook, int sheetIndex, int rowIndex,
+                                      String formula) {
         try {
-            cell.setCellFormula(formula);
+            return FormulaParser.parse(formula, XSSFEvaluationWorkbook.create(workbook),
+                    FormulaType.CELL, sheetIndex, rowIndex);
         } catch (FormulaParseException | IllegalArgumentException | IllegalStateException e) {
-            throw new BusinessException(400, "公式语法无效：" + target);
+            throw new BusinessException(400, "公式语法无效或引用无法解析");
+        }
+    }
+
+    private static void validateFormulaReferences(XSSFWorkbook workbook, Ptg[] tokens) {
+        for (Ptg token : tokens) {
+            if (token instanceof org.apache.poi.ss.formula.ptg.RefErrorPtg
+                    || token instanceof org.apache.poi.ss.formula.ptg.AreaErrPtg
+                    || token instanceof org.apache.poi.ss.formula.ptg.DeletedRef3DPtg
+                    || token instanceof org.apache.poi.ss.formula.ptg.DeletedArea3DPtg
+                    || token instanceof org.apache.poi.ss.formula.ptg.Deleted3DPxg
+                    || (token instanceof org.apache.poi.ss.formula.ptg.ErrPtg error
+                    && error.getErrorCode() == FormulaError.REF.getCode())) {
+                throw new BusinessException(400, "公式包含无效或越界的引用");
+            }
+            if (token instanceof RefPtgBase reference) {
+                validateReferenceBounds(reference.getRow(), reference.getColumn());
+            }
+            if (token instanceof AreaPtgBase reference) {
+                validateReferenceBounds(reference.getFirstRow(), reference.getFirstColumn());
+                validateReferenceBounds(reference.getLastRow(), reference.getLastColumn());
+            }
+            if (token instanceof Pxg reference) {
+                if (reference.getExternalWorkbookNumber() >= 0) {
+                    throw new BusinessException(400, "公式不允许外部工作簿引用");
+                }
+                if (reference.getSheetName() != null
+                        && workbook.getSheet(reference.getSheetName()) == null) {
+                    throw new BusinessException(400, "公式引用的工作表不存在：" + reference.getSheetName());
+                }
+                if (reference instanceof Pxg3D multiSheet && multiSheet.getLastSheetName() != null
+                        && workbook.getSheet(multiSheet.getLastSheetName()) == null) {
+                    throw new BusinessException(400, "公式引用的工作表不存在：" + multiSheet.getLastSheetName());
+                }
+            }
+        }
+    }
+
+    private static void validateReferenceBounds(int row, int column) {
+        if (row < 0 || row > SpreadsheetVersion.EXCEL2007.getLastRowIndex()
+                || column < 0 || column > SpreadsheetVersion.EXCEL2007.getLastColumnIndex()) {
+            throw new BusinessException(400, "公式引用超出 XLSX 范围");
         }
     }
 

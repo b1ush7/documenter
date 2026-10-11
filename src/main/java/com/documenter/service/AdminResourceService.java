@@ -15,6 +15,7 @@ import com.documenter.vo.PdfPagePreview;
 import com.documenter.vo.VersionVO;
 import com.documenter.vo.XlsxStructureVO;
 import com.documenter.vo.XlsxRangeVO;
+import com.documenter.vo.XlsxFormulaResultsVO;
 
 import java.util.List;
 
@@ -50,6 +51,9 @@ public interface AdminResourceService {
     XlsxStructureVO readXlsxStructure(Long fileId, Integer versionNo);
 
     XlsxRangeVO readXlsxRange(Long fileId, Integer versionNo, String sheetName, String range);
+
+    XlsxFormulaResultsVO calculateXlsxFormulas(Long fileId, Integer versionNo,
+                                              String sheetName, String range);
 
     PageResult<AdminTaskVO> listTasks(Long userId, TaskQueryDTO query);
 

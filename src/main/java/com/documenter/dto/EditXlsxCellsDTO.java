@@ -25,7 +25,7 @@ public class EditXlsxCellsDTO {
     public static class Operation {
 
         @NotNull(message = "操作类型不能为空")
-        @Pattern(regexp = "^(SET_VALUE|SET_FORMULA|CLEAR|SET_RANGE)$", message = "不支持的单元格操作")
+        @Pattern(regexp = "^(SET_VALUE|SET_FORMULA|CLEAR|SET_RANGE|FILL_FORMULA)$", message = "不支持的单元格操作")
         private String type;
 
         @NotNull(message = "工作表名称不能为空")
@@ -35,7 +35,7 @@ public class EditXlsxCellsDTO {
         @Pattern(regexp = "^\\$?[A-Za-z]{1,3}\\$?[1-9][0-9]{0,6}$", message = "单元格地址必须使用 A1 格式")
         private String cell;
 
-        /** SET_RANGE 使用，例如 A1:C3。 */
+        /** SET_RANGE 或 FILL_FORMULA 使用，例如 A1:C3。 */
         @Pattern(regexp = "^\\$?[A-Za-z]{1,3}\\$?[1-9][0-9]{0,6}:\\$?[A-Za-z]{1,3}\\$?[1-9][0-9]{0,6}$",
                 message = "区域必须使用 A1:C3 格式")
         private String range;
@@ -48,7 +48,7 @@ public class EditXlsxCellsDTO {
         @Size(max = 32767, message = "单元格值过长")
         private String value;
 
-        /** SET_FORMULA 使用；可带或不带开头的等号。 */
+        /** SET_FORMULA 或 FILL_FORMULA 使用；填充公式以区域左上角为基准。 */
         @Size(max = 8192, message = "公式过长")
         private String formula;
 

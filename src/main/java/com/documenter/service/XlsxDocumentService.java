@@ -6,6 +6,7 @@ import com.documenter.dto.EditXlsxSheetsDTO;
 import com.documenter.dto.EditXlsxStructureDTO;
 import com.documenter.dto.FormatXlsxCellsDTO;
 import com.documenter.vo.VersionVO;
+import com.documenter.vo.XlsxFormulaResultsVO;
 import com.documenter.vo.XlsxRangeVO;
 import com.documenter.vo.XlsxStructureVO;
 
@@ -16,6 +17,9 @@ public interface XlsxDocumentService {
 
     XlsxRangeVO readRange(Long userId, Long fileId, Integer versionNo,
                           String sheetName, String range);
+
+    XlsxFormulaResultsVO calculateFormulas(Long userId, Long fileId, Integer versionNo,
+                                         String sheetName, String range);
 
     VersionVO editCells(Long userId, Long fileId, Integer sourceVersion, EditXlsxCellsDTO request);
 

@@ -29,6 +29,7 @@ import com.documenter.vo.PdfPagePreview;
 import com.documenter.vo.VersionVO;
 import com.documenter.vo.XlsxStructureVO;
 import com.documenter.vo.XlsxRangeVO;
+import com.documenter.vo.XlsxFormulaResultsVO;
 import jakarta.validation.Valid;
 import org.springframework.core.io.Resource;
 import org.springframework.http.ContentDisposition;
@@ -190,6 +191,16 @@ public class FileController {
                                                   @RequestParam String sheetName,
                                                   @RequestParam String range) {
         return ApiResponse.success(xlsxDocumentService.readRange(
+                SecurityUtil.requireUserId(), fileId, versionNo, sheetName, range));
+    }
+
+    /** 即时计算指定 XLSX 区域内的公式，返回结果或错误，不保存新版本。 */
+    @GetMapping("/{fileId}/versions/{versionNo}/xlsx/formula-results")
+    public ApiResponse<XlsxFormulaResultsVO> calculateXlsxFormulas(@PathVariable Long fileId,
+                                                                  @PathVariable Integer versionNo,
+                                                                  @RequestParam String sheetName,
+                                                                  @RequestParam String range) {
+        return ApiResponse.success(xlsxDocumentService.calculateFormulas(
                 SecurityUtil.requireUserId(), fileId, versionNo, sheetName, range));
     }
 

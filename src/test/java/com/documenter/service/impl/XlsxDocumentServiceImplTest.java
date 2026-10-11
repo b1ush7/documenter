@@ -21,6 +21,8 @@ import org.apache.poi.ss.usermodel.HorizontalAlignment;
 import org.apache.poi.ss.usermodel.VerticalAlignment;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.core.io.ByteArrayResource;
 
@@ -578,6 +580,239 @@ class XlsxDocumentServiceImplTest {
             assertEquals(BorderStyle.THIN, style.getBorderTop());
             assertEquals(style.getIndex(), row.getCell(1).getCellStyle().getIndex());
         }
+    }
+
+    @Test
+    void fillsFormulasWithRelativeMixedAbsoluteAndQuotedSheetReferences() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            var sheet = workbook.createSheet("数据");
+            sheet.createRow(0).createCell(0).setCellValue(2);
+            sheet.getRow(0).createCell(1).setCellValue(3);
+            sheet.createRow(1).createCell(0).setCellValue(5);
+            sheet.getRow(1).createCell(1).setCellValue(7);
+            var style = workbook.createCellStyle();
+            style.setWrapText(true);
+            sheet.getRow(1).createCell(2).setCellStyle(style);
+            var other = workbook.createSheet("年度 数据");
+            other.createRow(1).createCell(1).setCellValue(11);
+            other.getRow(1).createCell(2).setCellValue(13);
+            other.createRow(2).createCell(1).setCellValue(17);
+            other.getRow(2).createCell(2).setCellValue(19);
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        prepareEdit(source);
+        var fill = new EditXlsxCellsDTO.Operation();
+        fill.setType("FILL_FORMULA");
+        fill.setSheetName("数据");
+        fill.setRange("C2:D3");
+        fill.setFormula("=SUM(A1,$A1,A$1,$A$1,'年度 数据'!B2)");
+
+        service.editCells(USER_ID, FILE_ID, SOURCE_VERSION, request(fill));
+
+        try (XSSFWorkbook workbook = new XSSFWorkbook(new ByteArrayInputStream(storedBytes()))) {
+            var sheet = workbook.getSheet("数据");
+            assertEquals("SUM(A1,$A1,A$1,$A$1,'年度 数据'!B2)",
+                    sheet.getRow(1).getCell(2).getCellFormula());
+            assertEquals("SUM(B1,$A1,B$1,$A$1,'年度 数据'!C2)",
+                    sheet.getRow(1).getCell(3).getCellFormula());
+            assertEquals("SUM(A2,$A2,A$1,$A$1,'年度 数据'!B3)",
+                    sheet.getRow(2).getCell(2).getCellFormula());
+            assertEquals("SUM(B2,$A2,B$1,$A$1,'年度 数据'!C3)",
+                    sheet.getRow(2).getCell(3).getCellFormula());
+            assertTrue(sheet.getRow(1).getCell(2).getCellStyle().getWrapText());
+            var evaluator = workbook.getCreationHelper().createFormulaEvaluator();
+            assertEquals(19, evaluator.evaluate(sheet.getRow(1).getCell(2)).getNumberValue());
+            assertEquals(36, evaluator.evaluate(sheet.getRow(2).getCell(3)).getNumberValue());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"不存在!A1", "XFE1", "A1048577", "SUM(", "#REF!"})
+    void rejectsInvalidFormulaSyntaxAndReferences(String formula) throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            workbook.createSheet("数据");
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        when(versionService.downloadVersion(USER_ID, FILE_ID, SOURCE_VERSION))
+                .thenReturn(download(source));
+
+        BusinessException error = assertThrows(BusinessException.class,
+                () -> service.editCells(USER_ID, FILE_ID, SOURCE_VERSION,
+                        request(formula("A1", formula))));
+
+        assertEquals(400, error.getCode());
+        verify(fileStorage, never()).store(any(byte[].class), any());
+    }
+
+    @Test
+    void rejectsFillThatMovesReferenceOutsideWorksheet() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            workbook.createSheet("数据");
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        when(versionService.downloadVersion(USER_ID, FILE_ID, SOURCE_VERSION))
+                .thenReturn(download(source));
+        var fill = new EditXlsxCellsDTO.Operation();
+        fill.setType("FILL_FORMULA");
+        fill.setSheetName("数据");
+        fill.setRange("A1:A2");
+        fill.setFormula("XFD1048576");
+
+        BusinessException error = assertThrows(BusinessException.class,
+                () -> service.editCells(USER_ID, FILE_ID, SOURCE_VERSION, request(fill)));
+
+        assertEquals(400, error.getCode());
+        verify(fileStorage, never()).store(any(byte[].class), any());
+    }
+
+    @Test
+    void calculatesSummaryConditionLookupCrossSheetDateBlankAndErrorsWithoutSaving() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            var sheet = workbook.createSheet("数据");
+            sheet.createRow(0).createCell(0).setCellValue("办公");
+            sheet.getRow(0).createCell(1).setCellValue(12.5);
+            sheet.createRow(1).createCell(0).setCellValue("差旅");
+            sheet.getRow(1).createCell(1).setCellValue(20);
+            sheet.createRow(2).createCell(0).setCellValue("办公");
+            sheet.getRow(2).createCell(1).setCellValue(7.5);
+            var other = workbook.createSheet("年度 数据");
+            other.createRow(0).createCell(0).setCellValue(100);
+            String[] formulas = {"SUM(B1:B3)", "SUMIF(A1:A3,\"办公\",B1:B3)",
+                    "IF(B2>10,\"达标\",\"不足\")", "VLOOKUP(\"差旅\",A1:B3,2,FALSE)",
+                    "'年度 数据'!A1+SUM(B1:B3)", "DATE(2026,10,11)+1", "Z1+1", "1/0",
+                    "CUBEVALUE(\"connection\",\"member\")", "B1>10", "1+\"abc\"",
+                    "VLOOKUP(\"不存在\",A1:B3,2,FALSE)", "#REF!"};
+            for (int index = 0; index < formulas.length; index++) {
+                var row = sheet.getRow(index);
+                if (row == null) {
+                    row = sheet.createRow(index);
+                }
+                row.createCell(3).setCellFormula(formulas[index]);
+            }
+            var dateStyle = workbook.createCellStyle();
+            dateStyle.setDataFormat(workbook.createDataFormat().getFormat("yyyy-mm-dd"));
+            sheet.getRow(5).getCell(3).setCellStyle(dateStyle);
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        when(versionService.downloadVersion(USER_ID, FILE_ID, SOURCE_VERSION))
+                .thenReturn(download(source));
+
+        var result = service.calculateFormulas(USER_ID, FILE_ID, SOURCE_VERSION, "数据", "D1:D13");
+
+        assertEquals(13, result.results().size());
+        assertEquals("40", result.results().get(0).value());
+        assertEquals("20", result.results().get(1).value());
+        assertEquals("达标", result.results().get(2).value());
+        assertEquals("STRING", result.results().get(2).valueType());
+        assertEquals("20", result.results().get(3).value());
+        assertEquals("140", result.results().get(4).value());
+        assertEquals("2026-10-12T00:00:00", result.results().get(5).value());
+        assertEquals("1", result.results().get(6).value());
+        assertEquals("ERROR", result.results().get(7).status());
+        assertEquals("#DIV/0!", result.results().get(7).value());
+        assertEquals("UNSUPPORTED", result.results().get(8).status());
+        assertNull(result.results().get(8).value());
+        assertEquals("true", result.results().get(9).value());
+        assertEquals("BOOLEAN", result.results().get(9).valueType());
+        assertEquals("ERROR", result.results().get(10).status());
+        assertEquals("#VALUE!", result.results().get(10).value());
+        assertEquals("#N/A", result.results().get(11).value());
+        assertEquals("#REF!", result.results().get(12).value());
+        verify(fileStorage, never()).store(any(byte[].class), any());
+        verify(versionWriter, never()).appendVersion(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void rejectsCalculatingUnsafeFormulaInDependencySheet() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            workbook.createSheet("数据").createRow(0).createCell(0).setCellFormula("依赖!A1");
+            workbook.createSheet("依赖").createRow(0).createCell(0)
+                    .setCellFormula("HYPERLINK(\"https://example.com\")");
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        when(versionService.downloadVersion(USER_ID, FILE_ID, SOURCE_VERSION))
+                .thenReturn(download(source));
+
+        BusinessException error = assertThrows(BusinessException.class,
+                () -> service.calculateFormulas(USER_ID, FILE_ID, SOURCE_VERSION, "数据", "A1"));
+
+        assertEquals(400, error.getCode());
+    }
+
+    @Test
+    void limitsFormulaFillAndCalculationBeforeReadingWorkbook() {
+        properties.getXlsx().setMaxEditOperations(1);
+        var fill = new EditXlsxCellsDTO.Operation();
+        fill.setType("FILL_FORMULA");
+        fill.setSheetName("数据");
+        fill.setRange("A1:A2");
+        fill.setFormula("1+1");
+
+        assertEquals(413, assertThrows(BusinessException.class,
+                () -> service.editCells(USER_ID, FILE_ID, SOURCE_VERSION, request(fill))).getCode());
+        assertEquals(413, assertThrows(BusinessException.class,
+                () -> service.calculateFormulas(USER_ID, FILE_ID, SOURCE_VERSION,
+                        "数据", "A1:A2")).getCode());
+        verify(versionService, never()).downloadVersion(any(), any(), any());
+    }
+
+    @Test
+    void replacesExistingFormulaWithTypedValueRatherThanOnlyChangingItsCache() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            workbook.createSheet("数据").createRow(0).createCell(0).setCellFormula("1+1");
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        prepareEdit(source);
+
+        service.editCells(USER_ID, FILE_ID, SOURCE_VERSION,
+                request(value("A1", "STRING", "=普通文本")));
+
+        try (XSSFWorkbook workbook = new XSSFWorkbook(new ByteArrayInputStream(storedBytes()))) {
+            var cell = workbook.getSheet("数据").getRow(0).getCell(0);
+            assertEquals(CellType.STRING, cell.getCellType());
+            assertEquals("=普通文本", cell.getStringCellValue());
+        }
+    }
+
+    @Test
+    void rejects1904DateSystemInsteadOfReturningIncorrectDate() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            workbook.getCTWorkbook().getWorkbookPr().setDate1904(true);
+            var cell = workbook.createSheet("数据").createRow(0).createCell(0);
+            cell.setCellFormula("DATE(2026,10,11)");
+            var style = workbook.createCellStyle();
+            style.setDataFormat(workbook.createDataFormat().getFormat("yyyy-mm-dd"));
+            cell.setCellStyle(style);
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        when(versionService.downloadVersion(USER_ID, FILE_ID, SOURCE_VERSION))
+                .thenReturn(download(source));
+
+        var error = assertThrows(BusinessException.class,
+                () -> service.calculateFormulas(USER_ID, FILE_ID, SOURCE_VERSION, "数据", "A1"));
+        assertEquals(422, error.getCode());
+        assertTrue(error.getMessage().contains("1904"));
     }
 
     private void prepareEdit(byte[] source) {

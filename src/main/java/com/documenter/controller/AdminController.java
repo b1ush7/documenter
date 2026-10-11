@@ -24,6 +24,7 @@ import com.documenter.vo.PdfPagePreview;
 import com.documenter.vo.VersionVO;
 import com.documenter.vo.XlsxStructureVO;
 import com.documenter.vo.XlsxRangeVO;
+import com.documenter.vo.XlsxFormulaResultsVO;
 import jakarta.validation.Valid;
 import org.springframework.core.io.Resource;
 import org.springframework.http.ContentDisposition;
@@ -173,6 +174,15 @@ public class AdminController {
                                                   @RequestParam String sheetName,
                                                   @RequestParam String range) {
         return ApiResponse.success(adminResourceService.readXlsxRange(
+                fileId, versionNo, sheetName, range));
+    }
+
+    @GetMapping("/files/{fileId}/versions/{versionNo}/xlsx/formula-results")
+    public ApiResponse<XlsxFormulaResultsVO> calculateXlsxFormulas(@PathVariable Long fileId,
+                                                                  @PathVariable Integer versionNo,
+                                                                  @RequestParam String sheetName,
+                                                                  @RequestParam String range) {
+        return ApiResponse.success(adminResourceService.calculateXlsxFormulas(
                 fileId, versionNo, sheetName, range));
     }
 
