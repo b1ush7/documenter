@@ -132,7 +132,9 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | PDF | GET | `/file/{fileId}/versions/{versionNo}/pdf/content` | 是 | 提取 PDF 原生文本并检测页面类型 |
 | PDF | GET | `/file/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview` | 是 | 渲染 PDF 指定页 PNG 预览 |
 | XLSX | GET | `/file/{fileId}/versions/{versionNo}/xlsx/structure` | 是 | 读取工作表与单元格结构 |
+| XLSX | GET | `/file/{fileId}/versions/{versionNo}/xlsx/range` | 是 | 读取指定矩形区域 |
 | XLSX | POST | `/file/{fileId}/versions/{versionNo}/xlsx/cell-edits` | 是 | 编辑单元格值或公式并新建版本 |
+| XLSX | POST | `/file/{fileId}/versions/{versionNo}/xlsx/structure-edits` | 是 | 插入或删除行列并新建版本 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/paragraph-text` | 是 | 替换段落文本 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/paragraph-edits` | 是 | 插入或删除段落 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/table-edits` | 是 | 编辑表格 |
@@ -163,6 +165,7 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/pdf/content` | 管理员 | 读取任意用户 PDF 原生文本 |
 | 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview` | 管理员 | 预览任意用户 PDF 页面 |
 | 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/xlsx/structure` | 管理员 | 读取任意用户 XLSX 结构 |
+| 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/xlsx/range` | 管理员 | 读取任意用户 XLSX 区域 |
 | 管理员 | GET | `/admin/tasks` | 管理员 | 跨用户任务分页列表 |
 | 管理员 | GET | `/admin/tasks/{taskId}` | 管理员 | 任意用户任务与步骤详情 |
 | 管理员 | POST | `/admin/tasks/{taskId}/cancel` | 管理员 | 取消任意用户任务 |
@@ -588,6 +591,14 @@ POST /file/10/versions/2/restore?expectVersion=5
 - `mergedRegions` 使用 A1 区域格式；图表以工作表内的 `index` 定位，并返回可读取的标题和图表类型。
 - 单次默认最多返回 100000 个单元格，由 `res.storage.xlsx.max-read-cells` 控制；超出时 `truncated=true`。
 
+读取一个明确的矩形区域：
+
+```http
+GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
+```
+
+返回 `XlsxRange`，其中 `rows` 是固定行列数的二维数组。与整表结构接口只返回实际存在的单元格不同，区域接口会为未创建的位置返回 `type=BLANK`、`value=""`、`style=null` 的占位单元格，便于前端形成稳定网格。区域必须使用 `A1:C20` 格式，包含的单元格数不能超过 `res.storage.xlsx.max-read-cells`。
+
 ### 3.14 编辑 XLSX 单元格
 
 `POST /file/{fileId}/versions/{versionNo}/xlsx/cell-edits`
@@ -623,13 +634,37 @@ POST /file/10/versions/2/restore?expectVersion=5
 | `SET_VALUE` | `sheetName`、`cell`、`valueType`、`value` | `valueType` 支持 `STRING`、`NUMBER`、`BOOLEAN`、`DATE` |
 | `SET_FORMULA` | `sheetName`、`cell`、`formula` | 公式可带或不带开头等号，最长 8192 个字符 |
 | `CLEAR` | `sheetName`、`cell` | 清空内容但保留单元格样式 |
+| `SET_RANGE` | `sheetName`、`range`、`values` | 按二维矩阵批量写入，矩阵尺寸必须与区域完全一致 |
 
 - `instruction` 可选，最长 2000；`operations` 必填，默认最多 500 项，由 `res.storage.xlsx.max-edit-operations` 控制。
 - `cell` 必须是 XLSX 范围内的 A1 地址；同一请求不能重复修改同一目标。合并区域只能修改左上角，数组公式单元格暂不支持修改。
 - `STRING` 即使以 `=` 开头也只写为文本。`DATE` 接受 `yyyy-MM-dd` 或 ISO 本地日期时间；原单元格没有日期格式时自动补充基础日期格式。
 - 新公式不允许外部工作簿引用、URL、DDE 管道，或 `WEBSERVICE`、`HYPERLINK`、`RTD`、`DDE`、`CALL`、`REGISTER.ID` 等外部调用函数。服务端只校验并写入公式，不执行公式；文件在办公软件中打开时重算。
 - 成功后以路径中的 `versionNo` 作为并发期望版本，创建新的 `MANUAL_EDIT` 版本，原版本不变；返回新 [Version](#64-version)。
-- 当前接口不支持区域批量写入、行列插入删除、工作表增删改名、排序筛选、格式编辑或图表编辑。
+`SET_RANGE` 中每个值的结构为 `{"valueType":"STRING","value":"示例"}`。`valueType` 支持 `STRING`、`NUMBER`、`BOOLEAN`、`DATE`、`FORMULA` 和 `BLANK`；`BLANK` 必须不传 `value`。单次请求按实际影响的单元格数计入 500 个默认上限，同一目标不能同时出现在单元格操作和区域操作中。
+
+当前接口仍不支持工作表增删改名、排序筛选、格式编辑或图表编辑。
+
+### 3.15 插入或删除 XLSX 行列
+
+`POST /file/{fileId}/versions/{versionNo}/xlsx/structure-edits`
+
+```json
+{
+  "instruction": "在表头后增加两行，并删除第三列",
+  "operations": [
+    {"type": "INSERT_ROWS", "sheetName": "数据", "start": 2, "count": 2},
+    {"type": "DELETE_COLUMNS", "sheetName": "数据", "start": 3, "count": 1}
+  ]
+}
+```
+
+- `type` 支持 `INSERT_ROWS`、`DELETE_ROWS`、`INSERT_COLUMNS`、`DELETE_COLUMNS`。
+- `start` 从 1 开始：行操作表示 Excel 行号，列操作中 `1` 表示 A 列；单个 `count` 为 1～1000，单次请求中的 `count` 总和默认不能超过 1000，可通过 `res.storage.xlsx.max-structural-units` 调整。多个操作按数组顺序执行，后续操作的位置基于前面操作完成后的工作表。
+- 插入行会继承相邻行的高度、行样式和已有单元格样式；插入列继承相邻列的宽度、隐藏状态和默认样式。未修改的内容和样式随行列移动。
+- Apache POI 会调整其支持的公式引用，工作簿标记为打开时重算。删除被公式引用的行列可能产生 `#REF!`，接口不会在服务端执行公式。
+- 操作不能超出已有数据末尾，也不能切开合并区域；完整删除覆盖的合并区域会一并删除。受保护工作表、待移动区域中的数组公式，以及包含正式 Excel 表对象的工作表暂不支持行列增删。
+- 成功后创建新的 `MANUAL_EDIT` 版本，源版本保持不变。
 
 ## 4. DOCX 生成与编辑
 
@@ -1125,6 +1160,10 @@ PENDING -> RUNNING -> SUCCEEDED
 
 顶层包含 `fileId`、`versionNo`、`totalSheets`、`includedCells`、`truncated` 和 `sheets`。每个工作表包含名称、行范围、合并区域、基础图表信息及单元格。每个单元格包含 A1 地址、零基行列下标、类型、值、公式、公式缓存值类型和基础样式；内部存储路径不会返回。
 
+### 6.13 XlsxRange
+
+包含 `fileId`、`versionNo`、`sheetName`、规范化后的 `range`、零基 `firstRow`、`firstColumn`、`rowCount`、`columnCount` 和二维 `rows`。区域内每个位置都有一个 `XlsxStructure.Cell`，未创建的空白位置 `style` 为 `null`。
+
 ## 7. 管理员
 
 所有 `/admin/**` 接口都必须携带有效 Access Token，并要求当前账号角色为 `ADMIN`。普通用户访问时返回 HTTP `403`。系统不提供匿名管理员注册或初始化接口；首个管理员需要通过受控部署流程或数据库设置。
@@ -1195,6 +1234,7 @@ PENDING -> RUNNING -> SUCCEEDED
 - `GET /admin/files/{fileId}/versions/{versionNo}/pdf/content`：读取指定 PDF 版本的原生文本和页面类型。
 - `GET /admin/files/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview`：渲染指定 PDF 页面的 PNG 预览。
 - `GET /admin/files/{fileId}/versions/{versionNo}/xlsx/structure`：读取指定 XLSX 版本的工作表和单元格结构。
+- `GET /admin/files/{fileId}/versions/{versionNo}/xlsx/range`：读取指定 XLSX 版本中的矩形区域。
 
 这些接口使用文件真实所有者完成版本定位，不依赖客户端传入用户 ID。查看或下载行为会写入审计日志。
 

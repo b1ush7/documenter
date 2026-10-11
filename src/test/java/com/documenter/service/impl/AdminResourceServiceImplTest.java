@@ -22,6 +22,7 @@ import com.documenter.vo.PdfPagePreview;
 import com.documenter.vo.TaskDetailVO;
 import com.documenter.vo.TaskVO;
 import com.documenter.vo.XlsxStructureVO;
+import com.documenter.vo.XlsxRangeVO;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -63,6 +64,23 @@ class AdminResourceServiceImplTest {
         verify(xlsxDocumentService).readStructure(7L, 10L, 1);
         verify(auditService).success(AuditAction.ADMIN_FILE_VIEW, "FILE", 10L,
                 "读取 XLSX 版本 1 的结构");
+    }
+
+    @Test
+    void readsXlsxRangeWithActualOwnerAndWritesAudit() {
+        FileAsset asset = file(10L, 7L);
+        XlsxRangeVO expected = new XlsxRangeVO(
+                10L, 1, "数据", "A1:B2", 0, 0, 2, 2, List.of());
+        when(fileAssetMapper.selectById(10L)).thenReturn(asset);
+        when(xlsxDocumentService.readRange(7L, 10L, 1, "数据", "A1:B2"))
+                .thenReturn(expected);
+
+        var result = service.readXlsxRange(10L, 1, "数据", "A1:B2");
+
+        assertSame(expected, result);
+        verify(xlsxDocumentService).readRange(7L, 10L, 1, "数据", "A1:B2");
+        verify(auditService).success(AuditAction.ADMIN_FILE_VIEW, "FILE", 10L,
+                "读取 XLSX 版本 1 的区域 A1:B2");
     }
 
     @Test

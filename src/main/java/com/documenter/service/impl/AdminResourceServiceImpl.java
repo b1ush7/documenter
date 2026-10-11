@@ -32,6 +32,7 @@ import com.documenter.vo.TaskDetailVO;
 import com.documenter.vo.TaskVO;
 import com.documenter.vo.VersionVO;
 import com.documenter.vo.XlsxStructureVO;
+import com.documenter.vo.XlsxRangeVO;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -222,6 +223,17 @@ public class AdminResourceServiceImpl implements AdminResourceService {
         auditService.success(AuditAction.ADMIN_FILE_VIEW, "FILE", fileId,
                 "读取 XLSX 版本 " + versionNo + " 的结构");
         return structure;
+    }
+
+    @Override
+    public XlsxRangeVO readXlsxRange(Long fileId, Integer versionNo,
+                                     String sheetName, String range) {
+        FileAsset asset = requireFile(fileId);
+        XlsxRangeVO result = xlsxDocumentService.readRange(
+                asset.getUserId(), fileId, versionNo, sheetName, range);
+        auditService.success(AuditAction.ADMIN_FILE_VIEW, "FILE", fileId,
+                "读取 XLSX 版本 " + versionNo + " 的区域 " + range);
+        return result;
     }
 
     @Override

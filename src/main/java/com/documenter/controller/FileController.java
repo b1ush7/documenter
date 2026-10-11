@@ -5,6 +5,7 @@ import com.documenter.dto.FileQueryDTO;
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.EditDocxTableDTO;
 import com.documenter.dto.EditXlsxCellsDTO;
+import com.documenter.dto.EditXlsxStructureDTO;
 import com.documenter.dto.FormatDocxParagraphsDTO;
 import com.documenter.dto.GenerateDocxDTO;
 import com.documenter.dto.InsertDocxImagesDTO;
@@ -24,6 +25,7 @@ import com.documenter.vo.PdfContentVO;
 import com.documenter.vo.PdfPagePreview;
 import com.documenter.vo.VersionVO;
 import com.documenter.vo.XlsxStructureVO;
+import com.documenter.vo.XlsxRangeVO;
 import jakarta.validation.Valid;
 import org.springframework.core.io.Resource;
 import org.springframework.http.ContentDisposition;
@@ -178,12 +180,31 @@ public class FileController {
                 SecurityUtil.requireUserId(), fileId, versionNo));
     }
 
+    /** 读取指定 XLSX 版本中的一个矩形区域，包含区域内未创建的空白位置。 */
+    @GetMapping("/{fileId}/versions/{versionNo}/xlsx/range")
+    public ApiResponse<XlsxRangeVO> readXlsxRange(@PathVariable Long fileId,
+                                                  @PathVariable Integer versionNo,
+                                                  @RequestParam String sheetName,
+                                                  @RequestParam String range) {
+        return ApiResponse.success(xlsxDocumentService.readRange(
+                SecurityUtil.requireUserId(), fileId, versionNo, sheetName, range));
+    }
+
     /** 修改指定 XLSX 版本中的单元格值或公式，并保存为新版本。 */
     @PostMapping("/{fileId}/versions/{versionNo}/xlsx/cell-edits")
     public ApiResponse<VersionVO> editXlsxCells(@PathVariable Long fileId,
                                                 @PathVariable Integer versionNo,
                                                 @Valid @RequestBody EditXlsxCellsDTO request) {
         return ApiResponse.success("已生成新版本", xlsxDocumentService.editCells(
+                SecurityUtil.requireUserId(), fileId, versionNo, request));
+    }
+
+    /** 插入或删除指定 XLSX 版本中的行列，并保存为新版本。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/xlsx/structure-edits")
+    public ApiResponse<VersionVO> editXlsxStructure(@PathVariable Long fileId,
+                                                    @PathVariable Integer versionNo,
+                                                    @Valid @RequestBody EditXlsxStructureDTO request) {
+        return ApiResponse.success("已生成新版本", xlsxDocumentService.editStructure(
                 SecurityUtil.requireUserId(), fileId, versionNo, request));
     }
 

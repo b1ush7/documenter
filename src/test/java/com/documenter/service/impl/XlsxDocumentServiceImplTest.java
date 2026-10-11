@@ -2,6 +2,7 @@ package com.documenter.service.impl;
 
 import com.documenter.configuration.StorageProperties;
 import com.documenter.dto.EditXlsxCellsDTO;
+import com.documenter.dto.EditXlsxStructureDTO;
 import com.documenter.entity.DocumentVersion;
 import com.documenter.entity.FileAsset;
 import com.documenter.enums.ChangeType;
@@ -24,6 +25,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -119,6 +121,30 @@ class XlsxDocumentServiceImplTest {
     }
 
     @Test
+    void readsRectangularRangeIncludingMissingBlankCells() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            var sheet = workbook.createSheet("数据");
+            sheet.createRow(0).createCell(0).setCellValue("左上");
+            sheet.createRow(1).createCell(2).setCellValue("右下");
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        when(versionService.downloadVersion(USER_ID, FILE_ID, SOURCE_VERSION))
+                .thenReturn(download(source));
+
+        var result = service.readRange(USER_ID, FILE_ID, SOURCE_VERSION, "数据", "A1:C2");
+
+        assertEquals(2, result.rowCount());
+        assertEquals(3, result.columnCount());
+        assertEquals("左上", result.rows().get(0).get(0).value());
+        assertEquals("BLANK", result.rows().get(0).get(1).type());
+        assertEquals("B1", result.rows().get(0).get(1).address());
+        assertEquals("右下", result.rows().get(1).get(2).value());
+    }
+
+    @Test
     void editsTypedValuesFormulaAndClearIntoReopenableVersion() throws Exception {
         byte[] source;
         try (XSSFWorkbook workbook = new XSSFWorkbook();
@@ -157,6 +183,167 @@ class XlsxDocumentServiceImplTest {
         verify(versionWriter).appendVersion(eq(FILE_ID), eq(USER_ID),
                 any(VersionWriter.VersionContent.class), eq(ChangeType.MANUAL_EDIT),
                 eq("更新数据"), eq("编辑 6 个 XLSX 单元格"), eq(SOURCE_VERSION));
+    }
+
+    @Test
+    void writesTypedRectangularRangeIntoReopenableVersion() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            workbook.createSheet("数据").createRow(1).createCell(1).setCellValue("待清空");
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        prepareEdit(source);
+        EditXlsxCellsDTO.Operation operation = new EditXlsxCellsDTO.Operation();
+        operation.setType("SET_RANGE");
+        operation.setSheetName("数据");
+        operation.setRange("A1:B2");
+        operation.setValues(List.of(
+                List.of(rangeValue("STRING", "=普通文本"),
+                        rangeValue("FORMULA", "SUM(1,2)")),
+                List.of(rangeValue("DATE", "2026-10-11"),
+                        rangeValue("BLANK", null))));
+        EditXlsxCellsDTO request = request(operation);
+
+        service.editCells(USER_ID, FILE_ID, SOURCE_VERSION, request);
+
+        try (XSSFWorkbook workbook = new XSSFWorkbook(new ByteArrayInputStream(storedBytes()))) {
+            var sheet = workbook.getSheet("数据");
+            assertEquals(CellType.STRING, sheet.getRow(0).getCell(0).getCellType());
+            assertEquals("=普通文本", sheet.getRow(0).getCell(0).getStringCellValue());
+            assertEquals("SUM(1,2)", sheet.getRow(0).getCell(1).getCellFormula());
+            assertTrue(org.apache.poi.ss.usermodel.DateUtil.isCellDateFormatted(
+                    sheet.getRow(1).getCell(0)));
+            assertEquals(CellType.BLANK, sheet.getRow(1).getCell(1).getCellType());
+        }
+        verify(versionWriter).appendVersion(eq(FILE_ID), eq(USER_ID),
+                any(VersionWriter.VersionContent.class), eq(ChangeType.MANUAL_EDIT),
+                eq("更新数据"), eq("编辑 4 个 XLSX 单元格"), eq(SOURCE_VERSION));
+    }
+
+    @Test
+    void insertsRowsAndColumnsAndKeepsMovedFormulaAndStyles() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            var sheet = workbook.createSheet("数据");
+            var first = sheet.createRow(0);
+            first.createCell(0).setCellValue("左");
+            first.createCell(1).setCellValue("右");
+            first.createCell(2).setCellFormula("A1&B1");
+            var style = workbook.createCellStyle();
+            style.setWrapText(true);
+            first.getCell(0).setCellStyle(style);
+            sheet.createRow(1).createCell(0).setCellValue("数据行");
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        prepareEdit(source);
+        EditXlsxStructureDTO request = structureRequest(
+                structureOperation("INSERT_ROWS", 2, 1),
+                structureOperation("INSERT_COLUMNS", 2, 1));
+
+        service.editStructure(USER_ID, FILE_ID, SOURCE_VERSION, request);
+
+        try (XSSFWorkbook workbook = new XSSFWorkbook(new ByteArrayInputStream(storedBytes()))) {
+            var sheet = workbook.getSheet("数据");
+            assertEquals("左", sheet.getRow(0).getCell(0).getStringCellValue());
+            assertNull(sheet.getRow(0).getCell(1));
+            assertEquals("右", sheet.getRow(0).getCell(2).getStringCellValue());
+            assertEquals("A1&C1", sheet.getRow(0).getCell(3).getCellFormula());
+            assertEquals("数据行", sheet.getRow(2).getCell(0).getStringCellValue());
+            assertTrue(sheet.getRow(1).getCell(0).getCellStyle().getWrapText());
+        }
+    }
+
+    @Test
+    void deletesRowsAndColumnsAndMovesRemainingCells() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            var sheet = workbook.createSheet("数据");
+            for (int rowIndex = 0; rowIndex < 3; rowIndex++) {
+                var row = sheet.createRow(rowIndex);
+                row.createCell(0).setCellValue("A" + (rowIndex + 1));
+                row.createCell(1).setCellValue("B" + (rowIndex + 1));
+                row.createCell(2).setCellValue("C" + (rowIndex + 1));
+            }
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        prepareEdit(source);
+        EditXlsxStructureDTO request = structureRequest(
+                structureOperation("DELETE_ROWS", 2, 1),
+                structureOperation("DELETE_COLUMNS", 2, 1));
+
+        service.editStructure(USER_ID, FILE_ID, SOURCE_VERSION, request);
+
+        try (XSSFWorkbook workbook = new XSSFWorkbook(new ByteArrayInputStream(storedBytes()))) {
+            var sheet = workbook.getSheet("数据");
+            assertEquals("A3", sheet.getRow(1).getCell(0).getStringCellValue());
+            assertEquals("C3", sheet.getRow(1).getCell(1).getStringCellValue());
+            assertEquals(2, sheet.getPhysicalNumberOfRows());
+        }
+    }
+
+    @Test
+    void rejectsStructuralEditThatSplitsMergedRegion() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            var sheet = workbook.createSheet("数据");
+            sheet.createRow(0).createCell(0).setCellValue("合并");
+            sheet.createRow(1);
+            sheet.addMergedRegion(new org.apache.poi.ss.util.CellRangeAddress(0, 1, 0, 0));
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        when(versionService.downloadVersion(USER_ID, FILE_ID, SOURCE_VERSION))
+                .thenReturn(download(source));
+
+        BusinessException error = assertThrows(BusinessException.class,
+                () -> service.editStructure(USER_ID, FILE_ID, SOURCE_VERSION,
+                        structureRequest(structureOperation("INSERT_ROWS", 2, 1))));
+
+        assertEquals(400, error.getCode());
+        verify(fileStorage, never()).store(any(byte[].class), any());
+    }
+
+    @Test
+    void shiftsWholeMergedRegionWhenRowsAreInsertedAtItsBoundary() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            var sheet = workbook.createSheet("数据");
+            sheet.createRow(0).createCell(0).setCellValue("表头");
+            sheet.createRow(1).createCell(0).setCellValue("合并内容");
+            sheet.addMergedRegion(new org.apache.poi.ss.util.CellRangeAddress(1, 1, 0, 1));
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        prepareEdit(source);
+
+        service.editStructure(USER_ID, FILE_ID, SOURCE_VERSION,
+                structureRequest(structureOperation("INSERT_ROWS", 2, 1)));
+
+        try (XSSFWorkbook workbook = new XSSFWorkbook(new ByteArrayInputStream(storedBytes()))) {
+            assertEquals("A3:B3", workbook.getSheet("数据").getMergedRegion(0).formatAsString());
+            assertEquals("合并内容", workbook.getSheet("数据").getRow(2)
+                    .getCell(0).getStringCellValue());
+        }
+    }
+
+    @Test
+    void rejectsStructuralRequestOverConfiguredTotal() {
+        properties.getXlsx().setMaxStructuralUnits(1);
+
+        BusinessException error = assertThrows(BusinessException.class,
+                () -> service.editStructure(USER_ID, FILE_ID, SOURCE_VERSION,
+                        structureRequest(structureOperation("INSERT_ROWS", 1, 2))));
+
+        assertEquals(413, error.getCode());
+        verify(versionService, never()).downloadVersion(any(), any(), any());
     }
 
     @Test
@@ -238,6 +425,30 @@ class XlsxDocumentServiceImplTest {
     private static EditXlsxCellsDTO.Operation formula(String cell, String formula) {
         EditXlsxCellsDTO.Operation operation = base("SET_FORMULA", cell);
         operation.setFormula(formula);
+        return operation;
+    }
+
+    private static EditXlsxCellsDTO.RangeValue rangeValue(String type, String value) {
+        EditXlsxCellsDTO.RangeValue rangeValue = new EditXlsxCellsDTO.RangeValue();
+        rangeValue.setValueType(type);
+        rangeValue.setValue(value);
+        return rangeValue;
+    }
+
+    private static EditXlsxStructureDTO structureRequest(
+            EditXlsxStructureDTO.Operation... operations) {
+        EditXlsxStructureDTO request = new EditXlsxStructureDTO();
+        request.setInstruction("调整行列");
+        request.setOperations(List.of(operations));
+        return request;
+    }
+
+    private static EditXlsxStructureDTO.Operation structureOperation(String type, int start, int count) {
+        EditXlsxStructureDTO.Operation operation = new EditXlsxStructureDTO.Operation();
+        operation.setType(type);
+        operation.setSheetName("数据");
+        operation.setStart(start);
+        operation.setCount(count);
         return operation;
     }
 
