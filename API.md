@@ -145,6 +145,15 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | 管理员 | GET | `/admin/users/{userId}` | 管理员 | 用户详情 |
 | 管理员 | PUT | `/admin/users/{userId}/status` | 管理员 | 启用或禁用账号 |
 | 管理员 | PUT | `/admin/users/{userId}/role` | 管理员 | 调整用户角色 |
+| 管理员 | GET | `/admin/files` | 管理员 | 跨用户文件分页列表 |
+| 管理员 | GET | `/admin/files/{fileId}` | 管理员 | 任意用户文件详情 |
+| 管理员 | GET | `/admin/files/{fileId}/download` | 管理员 | 下载任意用户当前文件 |
+| 管理员 | GET | `/admin/files/{fileId}/versions` | 管理员 | 任意用户文件版本列表 |
+| 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}` | 管理员 | 任意用户文件版本详情 |
+| 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/download` | 管理员 | 下载任意用户指定版本 |
+| 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/structure` | 管理员 | 读取任意用户 DOCX 结构 |
+| 管理员 | GET | `/admin/tasks` | 管理员 | 跨用户任务分页列表 |
+| 管理员 | GET | `/admin/tasks/{taskId}` | 管理员 | 任意用户任务与步骤详情 |
 
 ## 2. 用户与认证
 
@@ -937,6 +946,14 @@ PENDING -> RUNNING -> SUCCEEDED
 
 管理员用户响应不会包含密码或密码哈希，字段为：`id`、`username`、`phone`、`role`、`status`、`balance`、`createTime`、`updateTime`、`lastLoginTime`。
 
+### 6.7 AdminFile
+
+字段与 `FileAsset` 基本相同，额外包含 `userId` 和软删除时间 `deleteTime`。不会返回内部 `storageKey`。
+
+### 6.8 AdminTask
+
+字段与 `Task` 相同，额外包含任务所属的 `userId`。管理员任务详情返回 `task: AdminTask` 和 `steps: TaskStep[]`。
+
 ## 7. 管理员
 
 所有 `/admin/**` 接口都必须携带有效 Access Token，并要求当前账号角色为 `ADMIN`。普通用户访问时返回 HTTP `403`。系统不提供匿名管理员注册或初始化接口；首个管理员需要通过受控部署流程或数据库设置。
@@ -985,6 +1002,40 @@ PENDING -> RUNNING -> SUCCEEDED
 
 `role` 只支持 `USER`、`ADMIN`。角色变化后撤销目标用户的全部会话，使其重新登录后获得新权限。管理员不能把自己的角色降为普通用户。变更会写入审计日志。
 
+### 7.5 跨用户文件列表
+
+`GET /admin/files`
+
+查询参数沿用普通文件列表的 `page`、`size`、`keyword`、`status`，并额外支持可选的 `userId`。未传 `userId` 时查询全部用户；未传 `status` 时默认查询 `READY` 文件。返回 `PageResult<AdminFile>`，按创建时间倒序。
+
+### 7.6 文件详情与当前内容下载
+
+- `GET /admin/files/{fileId}`：返回 `AdminFile`。
+- `GET /admin/files/{fileId}/download`：下载文件主记录指向的当前内容。
+
+管理员可访问任意用户文件，但接口始终通过内部文件 ID 定位内容，不接受磁盘路径，也不返回存储标识。查看详情和下载会写入审计日志；已删除文件不能通过当前内容下载接口下载。
+
+### 7.7 文件版本与 DOCX 结构
+
+- `GET /admin/files/{fileId}/versions`：返回版本列表。
+- `GET /admin/files/{fileId}/versions/{versionNo}`：返回指定版本详情。
+- `GET /admin/files/{fileId}/versions/{versionNo}/download`：下载指定版本。
+- `GET /admin/files/{fileId}/versions/{versionNo}/structure`：读取指定 DOCX 版本的段落、表格和图片结构。
+
+这些接口使用文件真实所有者完成版本定位，不依赖客户端传入用户 ID。查看或下载行为会写入审计日志。
+
+### 7.8 跨用户任务列表
+
+`GET /admin/tasks`
+
+查询参数沿用普通任务列表的 `page`、`size`、`status`、`taskType`、`fileId`，并额外支持可选的 `userId`。未传 `userId` 时查询全部用户。返回 `PageResult<AdminTask>`，按创建时间倒序，可用于筛选 `FAILED` 任务。
+
+### 7.9 任务与步骤详情
+
+`GET /admin/tasks/{taskId}`
+
+返回带所属用户的任务信息和执行步骤。错误信息仍使用业务层保存的脱敏内容，不返回模型密钥或异常堆栈；查看行为会写入审计日志。
+
 ## 8. 当前实现边界
 
 - 尚未提供 AI 对话或自然语言文档编辑 HTTP 接口。
@@ -994,3 +1045,4 @@ PENDING -> RUNNING -> SUCCEEDED
 - DOCX 生成样式目前固定，尚不支持用户模板、主题配置和自由页面参数。
 - DOCX 块 ID 不是跨版本永久 ID，每次成功编辑后应重新读取结构。
 - 验证码开发配置使用模拟发送，不能直接视为生产短信能力。
+- 管理员当前可跨用户读取文件、版本、DOCX 结构和任务，但尚未提供跨用户编辑、删除、恢复、取消或重试入口。
