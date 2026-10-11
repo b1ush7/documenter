@@ -4,6 +4,7 @@ import com.documenter.entity.FileAsset;
 import com.documenter.entity.ProcessingTask;
 import com.documenter.enums.AuditAction;
 import com.documenter.exception.BusinessException;
+import com.documenter.mapper.AdminStatisticsMapper;
 import com.documenter.mapper.FileAssetMapper;
 import com.documenter.mapper.ProcessingTaskMapper;
 import com.documenter.service.AuditService;
@@ -11,6 +12,8 @@ import com.documenter.service.DocumentVersionService;
 import com.documenter.service.DocxDocumentService;
 import com.documenter.service.FileService;
 import com.documenter.service.TaskService;
+import com.documenter.vo.AdminOverviewVO;
+import com.documenter.vo.AdminUserUsageVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.TaskDetailVO;
 import com.documenter.vo.TaskVO;
@@ -30,14 +33,53 @@ class AdminResourceServiceImplTest {
 
     private final FileAssetMapper fileAssetMapper = mock(FileAssetMapper.class);
     private final ProcessingTaskMapper taskMapper = mock(ProcessingTaskMapper.class);
+    private final AdminStatisticsMapper statisticsMapper = mock(AdminStatisticsMapper.class);
     private final FileService fileService = mock(FileService.class);
     private final DocumentVersionService versionService = mock(DocumentVersionService.class);
     private final DocxDocumentService docxDocumentService = mock(DocxDocumentService.class);
     private final TaskService taskService = mock(TaskService.class);
     private final AuditService auditService = mock(AuditService.class);
     private final AdminResourceServiceImpl service = new AdminResourceServiceImpl(
-            fileAssetMapper, taskMapper, fileService, versionService,
+            fileAssetMapper, taskMapper, statisticsMapper, fileService, versionService,
             docxDocumentService, taskService, auditService);
+
+    @Test
+    void overviewReturnsAggregatesAndWritesAudit() {
+        AdminOverviewVO expected = new AdminOverviewVO();
+        expected.setTotalUsers(12L);
+        expected.setFailedTasks(3L);
+        when(statisticsMapper.selectOverview()).thenReturn(expected);
+
+        var result = service.overview();
+
+        assertSame(expected, result);
+        verify(auditService).success(AuditAction.ADMIN_STATISTICS_VIEW, "SYSTEM", null,
+                "查看系统使用量概览");
+    }
+
+    @Test
+    void userUsageReturns404WhenUserDoesNotExist() {
+        when(statisticsMapper.selectUserUsage(99L)).thenReturn(null);
+
+        BusinessException error = assertThrows(BusinessException.class,
+                () -> service.userUsage(99L));
+
+        assertEquals(404, error.getCode());
+    }
+
+    @Test
+    void userUsageReturnsAggregatesAndWritesAudit() {
+        AdminUserUsageVO expected = new AdminUserUsageVO();
+        expected.setUserId(7L);
+        expected.setStorageBytes(1024L);
+        when(statisticsMapper.selectUserUsage(7L)).thenReturn(expected);
+
+        var result = service.userUsage(7L);
+
+        assertSame(expected, result);
+        verify(auditService).success(AuditAction.ADMIN_STATISTICS_VIEW, "USER", 7L,
+                "查看用户资源用量");
+    }
 
     @Test
     void fileDetailIncludesOwnerAndWritesAudit() {

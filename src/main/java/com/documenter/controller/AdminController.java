@@ -11,8 +11,10 @@ import com.documenter.service.AdminResourceService;
 import com.documenter.service.AdminUserService;
 import com.documenter.util.SecurityUtil;
 import com.documenter.vo.AdminFileVO;
+import com.documenter.vo.AdminOverviewVO;
 import com.documenter.vo.AdminTaskDetailVO;
 import com.documenter.vo.AdminTaskVO;
+import com.documenter.vo.AdminUserUsageVO;
 import com.documenter.vo.AdminUserVO;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.FileDownload;
@@ -75,6 +77,16 @@ public class AdminController {
                                                     @Valid @RequestBody AdminUpdateUserRoleDTO request) {
         return ApiResponse.success("用户角色已更新", adminUserService.updateRole(
                 SecurityUtil.requireUserId(), userId, request.getRole()));
+    }
+
+    @GetMapping("/statistics/overview")
+    public ApiResponse<AdminOverviewVO> overview() {
+        return ApiResponse.success(adminResourceService.overview());
+    }
+
+    @GetMapping("/users/{userId}/usage")
+    public ApiResponse<AdminUserUsageVO> userUsage(@PathVariable Long userId) {
+        return ApiResponse.success(adminResourceService.userUsage(userId));
     }
 
     @GetMapping("/files")

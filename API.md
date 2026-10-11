@@ -143,8 +143,10 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | 任务 | GET | `/task/by-file/{fileId}` | 是 | 查询文件处理历史 |
 | 管理员 | GET | `/admin/users` | 管理员 | 用户分页列表 |
 | 管理员 | GET | `/admin/users/{userId}` | 管理员 | 用户详情 |
+| 管理员 | GET | `/admin/users/{userId}/usage` | 管理员 | 单用户资源用量与任务统计 |
 | 管理员 | PUT | `/admin/users/{userId}/status` | 管理员 | 启用或禁用账号 |
 | 管理员 | PUT | `/admin/users/{userId}/role` | 管理员 | 调整用户角色 |
+| 管理员 | GET | `/admin/statistics/overview` | 管理员 | 系统使用量与任务状态概览 |
 | 管理员 | GET | `/admin/files` | 管理员 | 跨用户文件分页列表 |
 | 管理员 | GET | `/admin/files/{fileId}` | 管理员 | 任意用户文件详情 |
 | 管理员 | PUT | `/admin/files/{fileId}/name` | 管理员 | 重命名任意用户文件 |
@@ -958,6 +960,24 @@ PENDING -> RUNNING -> SUCCEEDED
 
 字段与 `Task` 相同，额外包含任务所属的 `userId`。管理员任务详情返回 `task: AdminTask` 和 `steps: TaskStep[]`。
 
+### 6.9 AdminOverview
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `totalUsers` | long | 用户总数 |
+| `enabledUsers` / `disabledUsers` | long | 启用、禁用用户数 |
+| `adminUsers` | long | 管理员数量 |
+| `activeFiles` / `deletedFiles` | long | 未删除、已删除文件数 |
+| `storageBytes` | long | 未删除文件占用的存储字节数 |
+| `totalTasks` | long | 任务总数 |
+| `pendingTasks` / `runningTasks` | long | 等待、运行中的任务数 |
+| `succeededTasks` / `failedTasks` / `cancelledTasks` | long | 各终态任务数 |
+| `taskFailureRate` | number | `FAILED / (SUCCEEDED + FAILED)`，无完成样本时为 0 |
+
+### 6.10 AdminUserUsage
+
+包含 `userId`、`username`、`role`、`status`、`balance`，以及与 `AdminOverview` 同含义的文件、存储和任务统计字段。该结构只统计资源元数据，不包含文件正文、内部存储路径或密码哈希。
+
 ## 7. 管理员
 
 所有 `/admin/**` 接口都必须携带有效 Access Token，并要求当前账号角色为 `ADMIN`。普通用户访问时返回 HTTP `403`。系统不提供匿名管理员注册或初始化接口；首个管理员需要通过受控部署流程或数据库设置。
@@ -1048,6 +1068,13 @@ PENDING -> RUNNING -> SUCCEEDED
 - `POST /admin/tasks/{taskId}/retry`：为任意用户的失败或已取消任务创建重试任务。
 
 这些操作先读取资源真实所有者，再复用普通业务服务执行状态和并发检查，客户端不能指定操作所使用的用户 ID。所有操作写入审计日志。
+
+### 7.11 系统与用户用量统计
+
+- `GET /admin/statistics/overview`：返回 `AdminOverview`，用于查看用户数、文件数、存储字节数、各状态任务数和任务失败率。
+- `GET /admin/users/{userId}/usage`：返回 `AdminUserUsage`，统计指定用户的文件、存储和任务使用情况；用户不存在时返回业务码 `404`。
+
+存储量只累计未软删除文件；失败率按 `FAILED / (SUCCEEDED + FAILED)` 计算，取消任务不计入成功或失败样本。两个查询均为只读聚合查询，并记录管理员审计日志。
 
 ## 8. 当前实现边界
 

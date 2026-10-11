@@ -7,6 +7,7 @@ import com.documenter.entity.FileAsset;
 import com.documenter.entity.ProcessingTask;
 import com.documenter.enums.AuditAction;
 import com.documenter.exception.BusinessException;
+import com.documenter.mapper.AdminStatisticsMapper;
 import com.documenter.mapper.FileAssetMapper;
 import com.documenter.mapper.ProcessingTaskMapper;
 import com.documenter.service.AdminResourceService;
@@ -16,8 +17,10 @@ import com.documenter.service.DocxDocumentService;
 import com.documenter.service.FileService;
 import com.documenter.service.TaskService;
 import com.documenter.vo.AdminFileVO;
+import com.documenter.vo.AdminOverviewVO;
 import com.documenter.vo.AdminTaskDetailVO;
 import com.documenter.vo.AdminTaskVO;
+import com.documenter.vo.AdminUserUsageVO;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.PageResult;
@@ -36,6 +39,7 @@ public class AdminResourceServiceImpl implements AdminResourceService {
 
     private final FileAssetMapper fileAssetMapper;
     private final ProcessingTaskMapper taskMapper;
+    private final AdminStatisticsMapper statisticsMapper;
     private final FileService fileService;
     private final DocumentVersionService versionService;
     private final DocxDocumentService docxDocumentService;
@@ -44,6 +48,7 @@ public class AdminResourceServiceImpl implements AdminResourceService {
 
     public AdminResourceServiceImpl(FileAssetMapper fileAssetMapper,
                                     ProcessingTaskMapper taskMapper,
+                                    AdminStatisticsMapper statisticsMapper,
                                     FileService fileService,
                                     DocumentVersionService versionService,
                                     DocxDocumentService docxDocumentService,
@@ -51,11 +56,35 @@ public class AdminResourceServiceImpl implements AdminResourceService {
                                     AuditService auditService) {
         this.fileAssetMapper = fileAssetMapper;
         this.taskMapper = taskMapper;
+        this.statisticsMapper = statisticsMapper;
         this.fileService = fileService;
         this.versionService = versionService;
         this.docxDocumentService = docxDocumentService;
         this.taskService = taskService;
         this.auditService = auditService;
+    }
+
+    @Override
+    public AdminOverviewVO overview() {
+        AdminOverviewVO overview = statisticsMapper.selectOverview();
+        if (overview == null) {
+            throw new BusinessException(500, "读取系统统计数据失败");
+        }
+        auditService.success(AuditAction.ADMIN_STATISTICS_VIEW, "SYSTEM", null, "查看系统使用量概览");
+        return overview;
+    }
+
+    @Override
+    public AdminUserUsageVO userUsage(Long userId) {
+        if (userId == null || userId <= 0) {
+            throw new BusinessException(400, "用户 ID 必须大于 0");
+        }
+        AdminUserUsageVO usage = statisticsMapper.selectUserUsage(userId);
+        if (usage == null) {
+            throw new BusinessException(404, "用户不存在");
+        }
+        auditService.success(AuditAction.ADMIN_STATISTICS_VIEW, "USER", userId, "查看用户资源用量");
+        return usage;
     }
 
     @Override

@@ -5,6 +5,8 @@ import com.documenter.dto.TaskQueryDTO;
 import com.documenter.vo.AdminFileVO;
 import com.documenter.vo.AdminTaskDetailVO;
 import com.documenter.vo.AdminTaskVO;
+import com.documenter.vo.AdminOverviewVO;
+import com.documenter.vo.AdminUserUsageVO;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.PageResult;
@@ -14,6 +16,10 @@ import java.util.List;
 
 /** 管理员跨用户查看文件、版本和任务的能力。 */
 public interface AdminResourceService {
+
+    AdminOverviewVO overview();
+
+    AdminUserUsageVO userUsage(Long userId);
 
     PageResult<AdminFileVO> listFiles(Long userId, FileQueryDTO query);
 
