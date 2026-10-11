@@ -32,10 +32,10 @@
 ### 3.1 账号与验证码
 
 - [x] 实现注册、密码登录、当前用户信息查询，补齐 DTO 参数校验；密码使用 BCrypt 等密码哈希方式保存。
-- [ ] 登录调用 `JwtUtil.createTokenPair`；实现刷新接口调用 `refreshTokenPair`，补齐前端过期刷新与刷新失败重新登录流程。
-- [ ] 确定 Refresh Token 的传递与保存方式，例如 HttpOnly Cookie；若使用 Cookie，需要同步设计 CSRF、防跨站配置及前后端部署方式。
-- [ ] 设计多设备登录、退出当前设备、退出全部设备，以及禁用用户、改密后撤销会话的规则和用户会话索引。
-- [ ] 确定验证码用于注册、验证码登录、找回密码中的哪些场景，以及短信或邮箱渠道；现有用户模型包含手机号，可优先评估短信。
+- [x] 登录调用 `JwtUtil.createTokenPair`；实现刷新接口调用 `refreshTokenPair`，补齐前端过期刷新与刷新失败重新登录流程。（登录与验证码登录均调用 `createTokenPair`；`POST /user/refresh` 走 Redis 原子轮换，旧 Refresh Token 立即失效。前端接入流程见 `docs/auth-and-session.md` 第 1 节）
+- [x] 确定 Refresh Token 的传递与保存方式，例如 HttpOnly Cookie；若使用 Cookie，需要同步设计 CSRF、防跨站配置及前后端部署方式。（已选 JSON + localStorage 方案；Cookie 方案的设计与切换要求记录在 `docs/auth-and-session.md` 第 2 节）
+- [x] 设计多设备登录、退出当前设备、退出全部设备，以及禁用用户、改密后撤销会话的规则和用户会话索引。（会话索引 `login:user_sessions:<userId>` 与撤销规则表见 `docs/auth-and-session.md` 第 3 节；改密、找回密码已实现并撤销全部会话，禁用用户待 P0-6）
+- [x] 确定验证码用于注册、验证码登录、找回密码中的哪些场景，以及短信或邮箱渠道；现有用户模型包含手机号，可优先评估短信。（三个场景均已实现且用途隔离，先做短信渠道并用 Mock 实现，见 `docs/auth-and-session.md` 第 4 节）
 - [x] 接入验证码发送服务：服务端生成验证码，按接收对象和用途保存摘要、有效期与发送记录，验证成功后原子消费。
 - [x] 限制发送频率、日发送量和校验错误次数；处理并发发送、重复使用、服务商失败与验证码过期。
 - [x] 补齐账号启用状态和必要审计字段；统一认证失败的 HTTP 状态和业务错误码，避免前端无法正确识别 Token 失效。

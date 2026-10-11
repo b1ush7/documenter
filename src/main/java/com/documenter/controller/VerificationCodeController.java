@@ -46,6 +46,18 @@ public class VerificationCodeController {
     }
 
     /**
+     * 找回密码用验证码：要求手机号已注册且账号未被禁用。
+     *
+     * <p>与注册、登录的验证码<b>用途隔离</b>：三者的 Redis 键与数据库记录都带 scene，
+     * 因此注册场景的验证码不能用于重置密码，反之亦然。
+     */
+    @PostMapping("/reset-password/code")
+    public ApiResponse<String> sendResetPasswordCode(@Valid @RequestBody SendVerificationCodeDTO dto) {
+        String masked = verificationCodeService.sendCode(dto.getPhone(), VerificationScene.RESET_PASSWORD);
+        return ApiResponse.success("验证码已发送", masked);
+    }
+
+    /**
      * 独立校验验证码，供前端在提交注册前做一次预校验。
      *
      * <p>注意：本接口会真正消费验证码，成功后验证码立即失效。

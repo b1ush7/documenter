@@ -1,9 +1,11 @@
 package com.documenter.controller;
 
 import com.documenter.constant.ApiResponse;
+import com.documenter.dto.ChangePasswordDTO;
 import com.documenter.dto.LoginByCodeDTO;
 import com.documenter.dto.RefreshTokenDTO;
 import com.documenter.dto.RegisterByCodeDTO;
+import com.documenter.dto.ResetPasswordDTO;
 import com.documenter.dto.UserLoginDTO;
 import com.documenter.dto.UserRegisterDTO;
 import com.documenter.filter.JwtAuthenticationFilter;
@@ -26,9 +28,13 @@ import org.springframework.web.bind.annotation.RestController;
  * <p>路径约定：
  * <ul>
  *   <li>{@code POST /user/register} 注册</li>
+ *   <li>{@code POST /user/register/by-code} 验证码注册</li>
  *   <li>{@code POST /user/login} 密码登录，返回双 Token</li>
+ *   <li>{@code POST /user/login/by-code} 验证码登录</li>
  *   <li>{@code POST /user/refresh} 刷新双 Token（原子轮换，旧 Refresh Token 立即失效）</li>
  *   <li>{@code GET  /user/me} 当前用户信息</li>
+ *   <li>{@code POST /user/change-password} 修改密码（需登录 + 原密码，成功后撤销全部会话）</li>
+ *   <li>{@code POST /user/reset-password} 找回密码（手机验证码，成功后撤销全部会话）</li>
  *   <li>{@code POST /user/logout} 退出当前设备（由 Spring Security 的 logout 处理）</li>
  *   <li>{@code POST /user/logout-all} 退出全部其他设备</li>
  * </ul>
@@ -97,5 +103,30 @@ public class UserController {
         String currentSessionId = jwtUtil.verify(accessToken).getClaim("sid").asString();
         long revoked = jwtUtil.revokeAllSessions(String.valueOf(userId), currentSessionId);
         return ApiResponse.success("已退出全部其他设备", revoked);
+    }
+
+    /**
+     * 修改密码（TODO 3.1：改密后撤销会话）。
+     *
+     * <p>需要登录态并校验原密码。成功后该用户的<b>全部</b>会话（含当前会话）都会被撤销，
+     * 所有设备需要重新登录——目的是彻底切断可能已被他人持有的旧会话。
+     * 调用方拿到 200 后应先清理本地 Token，再跳转登录页。
+     */
+    @PostMapping("/change-password")
+    public ApiResponse<Void> changePassword(@Valid @RequestBody ChangePasswordDTO dto) {
+        userService.changePassword(SecurityUtil.requireUserId(), dto.getOldPassword(), dto.getNewPassword());
+        return ApiResponse.success("密码已修改，请重新登录", null);
+    }
+
+    /**
+     * 找回密码（TODO 3.1 验证码场景）。
+     *
+     * <p>无需登录态，也不需要原密码：凭 {@code POST /user/reset-password/code}
+     * 发出的 RESET_PASSWORD 验证码证明手机号归属。成功后同样撤销全部会话。
+     */
+    @PostMapping("/reset-password")
+    public ApiResponse<Void> resetPassword(@Valid @RequestBody ResetPasswordDTO dto) {
+        userService.resetPassword(dto.getPhone(), dto.getCode(), dto.getNewPassword());
+        return ApiResponse.success("密码已重置，请使用新密码登录", null);
     }
 }

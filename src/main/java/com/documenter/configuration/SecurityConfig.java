@@ -39,7 +39,10 @@ public class SecurityConfig {
                         .requestMatchers("/user/register", "/user/register/by-code", "/user/register/code").permitAll()
                         .requestMatchers("/user/login", "/user/login/by-code", "/user/login/code").permitAll()
                         .requestMatchers("/user/verify/code").permitAll()
+                        // 找回密码：用户此时必然没有登录态，必须放行
+                        .requestMatchers("/user/reset-password", "/user/reset-password/code").permitAll()
                         .requestMatchers("/user/refresh").permitAll()
+                        // 修改密码需要登录态（要校验原密码），因此不放进白名单
                         // logout-all 是业务接口，必须显式声明，避免被 logout 相关规则影响
                         .requestMatchers("/user/logout-all").authenticated()
                         .anyRequest().authenticated());
