@@ -30,7 +30,13 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         this.properties = properties;
     }
 
-    /** 免认证路径，必须与 SecurityConfig 的 permitAll 列表保持一致。 */
+    /**
+     * 免认证路径，<b>必须与 SecurityConfig 的 permitAll 列表保持一致</b>。
+     *
+     * <p>目前是两处手工维护，容易漏改。改动认证规则时请同时检查这两个位置：
+     * 只改一处会导致「SecurityConfig 放行但过滤器拦成 401」或反之，
+     * 而且现象是「接口时而可用时而 401」，很难定位。
+     */
     private static final java.util.Set<String> PUBLIC_PATHS = java.util.Set.of(
             "/user/register",
             "/user/register/by-code",
@@ -39,6 +45,8 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             "/user/login/by-code",
             "/user/login/code",
             "/user/verify/code",
+            "/user/reset-password",
+            "/user/reset-password/code",
             "/user/refresh");
 
     @Override

@@ -7,9 +7,11 @@ import com.documenter.dto.RegisterByCodeDTO;
 import com.documenter.dto.UserLoginDTO;
 import com.documenter.dto.UserRegisterDTO;
 import com.documenter.entity.User;
+import com.documenter.enums.AuditAction;
 import com.documenter.enums.VerificationScene;
 import com.documenter.exception.BusinessException;
 import com.documenter.mapper.UserMapper;
+import com.documenter.service.AuditService;
 import com.documenter.service.UserService;
 import com.documenter.service.VerificationCodeService;
 import com.documenter.util.BcryptUtil;
@@ -35,20 +37,27 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
 
     private final JwtUtil jwtUtil;
     private final VerificationCodeService verificationCodeService;
+    private final AuditService auditService;
 
     /**
      * verificationCodeService 用 @Lazy 注入：验证码服务在发送前需要反向查询用户
      * （判断手机号是否已注册），与这里构成循环依赖。延迟到首次调用再解析即可打破环。
      */
-    public UserServiceImpl(JwtUtil jwtUtil, @Lazy VerificationCodeService verificationCodeService) {
+    public UserServiceImpl(JwtUtil jwtUtil,
+                           @Lazy VerificationCodeService verificationCodeService,
+                           AuditService auditService) {
         this.jwtUtil = jwtUtil;
         this.verificationCodeService = verificationCodeService;
+        this.auditService = auditService;
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public UserInfoVO register(UserRegisterDTO dto) {
-        return createUser(dto.getUsername(), normalizePhone(dto.getPhone()), dto.getPassword());
+        UserInfoVO created = createUser(dto.getUsername(), normalizePhone(dto.getPhone()), dto.getPassword());
+        auditService.recordFor(created.getId(), created.getUsername(), AuditAction.USER_REGISTER,
+                "USER", created.getId(), "密码注册", true);
+        return created;
     }
 
     @Override
@@ -57,7 +66,10 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         String phone = dto.getPhone().trim();
         // 先消费验证码：验证失败直接中断，不会创建用户
         verificationCodeService.consumeCode(phone, VerificationScene.REGISTER, dto.getCode());
-        return createUser(dto.getUsername(), phone, dto.getPassword());
+        UserInfoVO created = createUser(dto.getUsername(), phone, dto.getPassword());
+        auditService.recordFor(created.getId(), created.getUsername(), AuditAction.USER_REGISTER,
+                "USER", created.getId(), "验证码注册", true);
+        return created;
     }
 
     @Override
@@ -70,9 +82,14 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         User user = PHONE_PATTERN.matcher(account).matches() ? findByPhone(account) : findByUsername(account);
         // 账号不存在与密码错误返回同一种提示，避免被用来枚举已注册账号
         if (user == null || !BcryptUtil.check(dto.getPassword(), user.getPassword())) {
+            // 失败也记审计：便于发现撞库与暴力破解
+            auditService.loginFailed(account);
             throw new BusinessException(401, "账号或密码错误");
         }
-        return issueTokens(user);
+        TokenPairVO tokens = issueTokens(user);
+        auditService.recordFor(user.getId(), user.getUsername(), AuditAction.USER_LOGIN,
+                "USER", user.getId(), "密码登录", true);
+        return tokens;
     }
 
     @Override
@@ -86,7 +103,10 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
             // 极少数情况：验证码发送后账号被删除
             throw new BusinessException(401, "账号不存在，请重新注册");
         }
-        return issueTokens(user);
+        TokenPairVO tokens = issueTokens(user);
+        auditService.recordFor(user.getId(), user.getUsername(), AuditAction.USER_LOGIN,
+                "USER", user.getId(), "验证码登录", true);
+        return tokens;
     }
 
     @Override
@@ -110,6 +130,61 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
             return null;
         }
         return baseMapper.selectOne(Wrappers.<User>lambdaQuery().eq(User::getPhone, phone.trim()));
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void changePassword(Long userId, String oldPassword, String newPassword) {
+        User user = getById(userId);
+        if (user == null) {
+            throw new BusinessException(401, "用户不存在或已被删除");
+        }
+        if (!BcryptUtil.check(oldPassword, user.getPassword())) {
+            auditService.record(AuditAction.USER_PASSWORD_CHANGED, "USER", userId, "原密码校验失败", false);
+            // 与登录失败同样的理由：不区分「原密码错」和「用户不存在」，避免信息泄露
+            throw new BusinessException(400, "原密码不正确");
+        }
+        applyNewPassword(user, newPassword, "用户主动修改密码");
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void resetPassword(String phone, String code, String newPassword) {
+        String normalizedPhone = phone == null ? null : phone.trim();
+        if (normalizedPhone == null || normalizedPhone.isEmpty()) {
+            throw new BusinessException(400, "手机号不能为空");
+        }
+        // 校验 RESET_PASSWORD 用途的验证码：与注册、登录场景隔离，不可混用
+        verificationCodeService.consumeCode(normalizedPhone, VerificationScene.RESET_PASSWORD, code);
+
+        User user = findByPhone(normalizedPhone);
+        if (user == null) {
+            // 验证码发送时已确认手机号存在，此处属于并发删除等边界情况
+            throw new BusinessException(404, "该手机号尚未注册");
+        }
+        applyNewPassword(user, newPassword, "通过手机验证码重置密码");
+    }
+
+    /**
+     * 写入新密码并撤销该用户的全部会话（TODO 3.1）。
+     *
+     * <p>为什么撤销<b>全部</b>会话而不是保留当前会话：改密的动因通常是
+     * 「怀疑账号已被他人使用」。如果保留当前会话，攻击者手里的旧会话
+     * 仍能存活到 Access Token 过期，改密就没有起到切断访问的作用。
+     * 代价是用户改完密码后需要重新登录一次，这个代价是值得的。
+     */
+    private void applyNewPassword(User user, String newPassword, String reason) {
+        User update = new User();
+        update.setId(user.getId());
+        update.setPassword(BcryptUtil.encode(newPassword));
+        updateById(update);
+
+        // keepSessionId 传 null 表示不保留任何会话
+        long revoked = jwtUtil.revokeAllSessions(String.valueOf(user.getId()), null);
+
+        log.info("密码已更新, userId={}, 撤销会话数={}, 原因={}", user.getId(), revoked, reason);
+        auditService.recordFor(user.getId(), user.getUsername(), AuditAction.USER_PASSWORD_CHANGED,
+                "USER", user.getId(), reason + "，已撤销 " + revoked + " 个会话", true);
     }
 
     /** 注册与验证码注册共用的创建逻辑。 */

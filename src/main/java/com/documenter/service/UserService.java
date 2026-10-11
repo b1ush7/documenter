@@ -51,4 +51,24 @@ public interface UserService extends IService<User> {
      * @return 不存在时返回 null
      */
     User findByPhone(String phone);
+
+    /**
+     * 修改密码（TODO 3.1：改密后撤销会话）。
+     *
+     * <p>必须校验原密码；成功后撤销该用户的<b>全部</b>会话，
+     * 包括当前会话，所有设备都需要重新登录。
+     *
+     * @param userId      当前登录用户
+     * @param oldPassword 原密码
+     * @param newPassword 新密码
+     */
+    void changePassword(Long userId, String oldPassword, String newPassword);
+
+    /**
+     * 找回密码（TODO 3.1 验证码场景）。
+     *
+     * <p>校验 RESET_PASSWORD 用途的验证码，通过后重设密码并撤销全部会话。
+     * 不需要原密码，也不需要登录态。
+     */
+    void resetPassword(String phone, String code, String newPassword);
 }
