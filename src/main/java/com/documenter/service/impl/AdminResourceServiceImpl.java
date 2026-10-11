@@ -22,6 +22,7 @@ import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.PageResult;
 import com.documenter.vo.TaskDetailVO;
+import com.documenter.vo.TaskVO;
 import com.documenter.vo.VersionVO;
 import org.springframework.stereotype.Service;
 
@@ -93,6 +94,21 @@ public class AdminResourceServiceImpl implements AdminResourceService {
         FileAsset asset = requireFile(fileId);
         auditService.success(AuditAction.ADMIN_FILE_VIEW, "FILE", fileId, "查看文件元数据");
         return AdminFileVO.from(asset);
+    }
+
+    @Override
+    public AdminFileVO renameFile(Long fileId, String displayName) {
+        FileAsset asset = requireFile(fileId);
+        fileService.rename(asset.getUserId(), fileId, displayName);
+        auditService.success(AuditAction.ADMIN_FILE_RENAME, "FILE", fileId, "管理员重命名用户文件");
+        return AdminFileVO.from(requireFile(fileId));
+    }
+
+    @Override
+    public void deleteFile(Long fileId) {
+        FileAsset asset = requireFile(fileId);
+        fileService.delete(asset.getUserId(), fileId);
+        auditService.success(AuditAction.ADMIN_FILE_DELETE, "FILE", fileId, "管理员软删除用户文件");
     }
 
     @Override
@@ -174,6 +190,27 @@ public class AdminResourceServiceImpl implements AdminResourceService {
         TaskDetailVO detail = taskService.detail(task.getUserId(), taskId);
         auditService.success(AuditAction.ADMIN_TASK_VIEW, "TASK", taskId, "查看任务与执行步骤");
         return AdminTaskDetailVO.of(AdminTaskVO.from(task), detail.getSteps());
+    }
+
+    @Override
+    public AdminTaskVO cancelTask(Long taskId) {
+        ProcessingTask task = requireTask(taskId);
+        taskService.cancel(task.getUserId(), taskId);
+        auditService.success(AuditAction.ADMIN_TASK_CANCEL, "TASK", taskId, "管理员取消用户任务");
+        return AdminTaskVO.from(requireTask(taskId));
+    }
+
+    @Override
+    public AdminTaskVO retryTask(Long taskId) {
+        ProcessingTask task = requireTask(taskId);
+        TaskVO retried = taskService.retry(task.getUserId(), taskId);
+        ProcessingTask created = taskService.findById(retried.getId());
+        if (created == null) {
+            throw new BusinessException(500, "重试任务已创建但无法读取");
+        }
+        auditService.success(AuditAction.ADMIN_TASK_RETRY, "TASK", taskId,
+                "管理员重试用户任务，新任务 ID=" + created.getId());
+        return AdminTaskVO.from(created);
     }
 
     private FileAsset requireFile(Long fileId) {

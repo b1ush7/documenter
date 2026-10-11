@@ -5,6 +5,7 @@ import com.documenter.dto.AdminUpdateUserRoleDTO;
 import com.documenter.dto.AdminUpdateUserStatusDTO;
 import com.documenter.dto.AdminUserQueryDTO;
 import com.documenter.dto.FileQueryDTO;
+import com.documenter.dto.RenameFileDTO;
 import com.documenter.dto.TaskQueryDTO;
 import com.documenter.service.AdminResourceService;
 import com.documenter.service.AdminUserService;
@@ -25,8 +26,10 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.ModelAttribute;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -86,6 +89,19 @@ public class AdminController {
         return ApiResponse.success(adminResourceService.fileDetail(fileId));
     }
 
+    @PutMapping("/files/{fileId}/name")
+    public ApiResponse<AdminFileVO> renameFile(@PathVariable Long fileId,
+                                               @Valid @RequestBody RenameFileDTO request) {
+        return ApiResponse.success("重命名成功",
+                adminResourceService.renameFile(fileId, request.getDisplayName()));
+    }
+
+    @DeleteMapping("/files/{fileId}")
+    public ApiResponse<Void> deleteFile(@PathVariable Long fileId) {
+        adminResourceService.deleteFile(fileId);
+        return ApiResponse.success("删除成功", null);
+    }
+
     @GetMapping("/files/{fileId}/download")
     public ResponseEntity<Resource> downloadFile(@PathVariable Long fileId) {
         return toResponse(adminResourceService.downloadFile(fileId));
@@ -124,6 +140,16 @@ public class AdminController {
     @GetMapping("/tasks/{taskId}")
     public ApiResponse<AdminTaskDetailVO> taskDetail(@PathVariable Long taskId) {
         return ApiResponse.success(adminResourceService.taskDetail(taskId));
+    }
+
+    @PostMapping("/tasks/{taskId}/cancel")
+    public ApiResponse<AdminTaskVO> cancelTask(@PathVariable Long taskId) {
+        return ApiResponse.success("取消请求已处理", adminResourceService.cancelTask(taskId));
+    }
+
+    @PostMapping("/tasks/{taskId}/retry")
+    public ApiResponse<AdminTaskVO> retryTask(@PathVariable Long taskId) {
+        return ApiResponse.success("重试任务已创建", adminResourceService.retryTask(taskId));
     }
 
     private static ResponseEntity<Resource> toResponse(FileDownload download) {

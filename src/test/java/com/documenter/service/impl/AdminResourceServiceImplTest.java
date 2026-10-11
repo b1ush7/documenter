@@ -67,6 +67,32 @@ class AdminResourceServiceImplTest {
     }
 
     @Test
+    void renameDelegatesWithActualOwnerAndWritesAudit() {
+        FileAsset original = file(10L, 7L);
+        FileAsset renamed = file(10L, 7L);
+        renamed.setDisplayName("renamed.pdf");
+        when(fileAssetMapper.selectById(10L)).thenReturn(original, renamed);
+
+        var result = service.renameFile(10L, "renamed.pdf");
+
+        assertEquals("renamed.pdf", result.getDisplayName());
+        verify(fileService).rename(7L, 10L, "renamed.pdf");
+        verify(auditService).success(AuditAction.ADMIN_FILE_RENAME, "FILE", 10L,
+                "管理员重命名用户文件");
+    }
+
+    @Test
+    void deleteDelegatesWithActualOwnerAndWritesAudit() {
+        when(fileAssetMapper.selectById(10L)).thenReturn(file(10L, 7L));
+
+        service.deleteFile(10L);
+
+        verify(fileService).delete(7L, 10L);
+        verify(auditService).success(AuditAction.ADMIN_FILE_DELETE, "FILE", 10L,
+                "管理员软删除用户文件");
+    }
+
+    @Test
     void taskDetailDelegatesWithActualOwnerAndWritesAudit() {
         ProcessingTask task = task(20L, 8L);
         TaskDetailVO detail = TaskDetailVO.of(TaskVO.from(task), List.of());
@@ -81,6 +107,40 @@ class AdminResourceServiceImplTest {
         verify(taskService).detail(8L, 20L);
         verify(auditService).success(AuditAction.ADMIN_TASK_VIEW, "TASK", 20L,
                 "查看任务与执行步骤");
+    }
+
+    @Test
+    void cancelTaskDelegatesWithActualOwnerAndReturnsUpdatedState() {
+        ProcessingTask running = task(20L, 8L);
+        running.setStatus("RUNNING");
+        ProcessingTask cancelled = task(20L, 8L);
+        cancelled.setStatus("CANCELLED");
+        when(taskMapper.selectById(20L)).thenReturn(running, cancelled);
+
+        var result = service.cancelTask(20L);
+
+        assertEquals("CANCELLED", result.getStatus());
+        verify(taskService).cancel(8L, 20L);
+        verify(auditService).success(AuditAction.ADMIN_TASK_CANCEL, "TASK", 20L,
+                "管理员取消用户任务");
+    }
+
+    @Test
+    void retryTaskReturnsNewTaskAndWritesRelationToAudit() {
+        ProcessingTask failed = task(20L, 8L);
+        ProcessingTask created = task(21L, 8L);
+        created.setStatus("PENDING");
+        TaskVO retried = TaskVO.from(created);
+        when(taskMapper.selectById(20L)).thenReturn(failed);
+        when(taskService.retry(8L, 20L)).thenReturn(retried);
+        when(taskService.findById(21L)).thenReturn(created);
+
+        var result = service.retryTask(20L);
+
+        assertEquals(21L, result.getId());
+        assertEquals(8L, result.getUserId());
+        verify(auditService).success(AuditAction.ADMIN_TASK_RETRY, "TASK", 20L,
+                "管理员重试用户任务，新任务 ID=21");
     }
 
     @Test

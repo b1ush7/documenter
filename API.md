@@ -147,6 +147,8 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | 管理员 | PUT | `/admin/users/{userId}/role` | 管理员 | 调整用户角色 |
 | 管理员 | GET | `/admin/files` | 管理员 | 跨用户文件分页列表 |
 | 管理员 | GET | `/admin/files/{fileId}` | 管理员 | 任意用户文件详情 |
+| 管理员 | PUT | `/admin/files/{fileId}/name` | 管理员 | 重命名任意用户文件 |
+| 管理员 | DELETE | `/admin/files/{fileId}` | 管理员 | 软删除任意用户文件 |
 | 管理员 | GET | `/admin/files/{fileId}/download` | 管理员 | 下载任意用户当前文件 |
 | 管理员 | GET | `/admin/files/{fileId}/versions` | 管理员 | 任意用户文件版本列表 |
 | 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}` | 管理员 | 任意用户文件版本详情 |
@@ -154,6 +156,8 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/structure` | 管理员 | 读取任意用户 DOCX 结构 |
 | 管理员 | GET | `/admin/tasks` | 管理员 | 跨用户任务分页列表 |
 | 管理员 | GET | `/admin/tasks/{taskId}` | 管理员 | 任意用户任务与步骤详情 |
+| 管理员 | POST | `/admin/tasks/{taskId}/cancel` | 管理员 | 取消任意用户任务 |
+| 管理员 | POST | `/admin/tasks/{taskId}/retry` | 管理员 | 重试任意用户任务 |
 
 ## 2. 用户与认证
 
@@ -1036,6 +1040,15 @@ PENDING -> RUNNING -> SUCCEEDED
 
 返回带所属用户的任务信息和执行步骤。错误信息仍使用业务层保存的脱敏内容，不返回模型密钥或异常堆栈；查看行为会写入审计日志。
 
+### 7.10 管理文件和任务
+
+- `PUT /admin/files/{fileId}/name`：请求体与普通重命名接口相同，重命名任意用户文件。
+- `DELETE /admin/files/{fileId}`：软删除任意用户文件，重复删除保持幂等。
+- `POST /admin/tasks/{taskId}/cancel`：取消任意用户的待处理或运行中任务。
+- `POST /admin/tasks/{taskId}/retry`：为任意用户的失败或已取消任务创建重试任务。
+
+这些操作先读取资源真实所有者，再复用普通业务服务执行状态和并发检查，客户端不能指定操作所使用的用户 ID。所有操作写入审计日志。
+
 ## 8. 当前实现边界
 
 - 尚未提供 AI 对话或自然语言文档编辑 HTTP 接口。
@@ -1045,4 +1058,4 @@ PENDING -> RUNNING -> SUCCEEDED
 - DOCX 生成样式目前固定，尚不支持用户模板、主题配置和自由页面参数。
 - DOCX 块 ID 不是跨版本永久 ID，每次成功编辑后应重新读取结构。
 - 验证码开发配置使用模拟发送，不能直接视为生产短信能力。
-- 管理员当前可跨用户读取文件、版本、DOCX 结构和任务，但尚未提供跨用户编辑、删除、恢复、取消或重试入口。
+- 管理员可跨用户读取、下载、重命名或软删除文件，并查看、取消或重试任务；尚未提供跨用户 DOCX 内容编辑和版本恢复入口，以免在当前版本模型中错误记录实际操作者。

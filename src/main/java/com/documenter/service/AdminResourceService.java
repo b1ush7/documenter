@@ -19,6 +19,10 @@ public interface AdminResourceService {
 
     AdminFileVO fileDetail(Long fileId);
 
+    AdminFileVO renameFile(Long fileId, String displayName);
+
+    void deleteFile(Long fileId);
+
     FileDownload downloadFile(Long fileId);
 
     List<VersionVO> listVersions(Long fileId);
@@ -32,4 +36,8 @@ public interface AdminResourceService {
     PageResult<AdminTaskVO> listTasks(Long userId, TaskQueryDTO query);
 
     AdminTaskDetailVO taskDetail(Long taskId);
+
+    AdminTaskVO cancelTask(Long taskId);
+
+    AdminTaskVO retryTask(Long taskId);
 }
