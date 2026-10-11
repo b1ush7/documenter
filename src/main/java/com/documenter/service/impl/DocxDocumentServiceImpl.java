@@ -81,7 +81,7 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         validateGeneration(request);
         byte[] content;
         try (XWPFDocument document = new XWPFDocument();
-             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            ByteArrayOutputStream output = new ByteArrayOutputStream()) {
             configureA4Page(document);
             if (request.getTitle() != null && !request.getTitle().isBlank()) {
                 addTextParagraph(document, request.getTitle(), "Title", 22, true,

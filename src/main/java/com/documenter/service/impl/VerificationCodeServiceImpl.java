@@ -171,13 +171,11 @@ public class VerificationCodeServiceImpl implements VerificationCodeService {
     public void consumeCode(String identifier, VerificationScene scene, String code) {
         String phone = normalize(identifier);
         String normalizedCode = code == null ? "" : code.trim();
-
-        Long result = redisTemplate.execute(CONSUME_SCRIPT,
-                List.of(codeKey(phone, scene)),
-                sha256(normalizedCode),
-                Integer.toString(properties.getMaxAttempts()));
-
-        long value = result == null ? 0L : result;
+	    
+	    long value = redisTemplate.execute(CONSUME_SCRIPT,
+	            List.of(codeKey(phone, scene)),
+	            sha256(normalizedCode),
+	            Integer.toString(properties.getMaxAttempts()));
         if (value == 1L) {
             auditService.recordConsumed(phone, scene);
             return;
