@@ -48,10 +48,18 @@ res:
     local:
       root: ${STORAGE_LOCAL_ROOT:./data/storage}
       temp: ${STORAGE_LOCAL_TEMP:./data/tmp}
+      temp-cleanup-enabled: ${STORAGE_TEMP_CLEANUP_ENABLED:true}
+      temp-retention: ${STORAGE_TEMP_RETENTION:24h}
+      temp-cleanup-interval: ${STORAGE_TEMP_CLEANUP_INTERVAL:1h}
     upload:
       max-size-bytes: 52428800
       # 同一用户每日上传次数上限（Redis 原子计数）
       hourly-limit: 60
+      max-pdf-pages: ${STORAGE_MAX_PDF_PAGES:200}
+      max-image-pixels: ${STORAGE_MAX_IMAGE_PIXELS:40000000}
+      max-archive-entries: ${STORAGE_MAX_ARCHIVE_ENTRIES:10000}
+      max-archive-expanded-size-bytes: ${STORAGE_MAX_ARCHIVE_EXPANDED_BYTES:209715200}
+      max-archive-compression-ratio: ${STORAGE_MAX_ARCHIVE_COMPRESSION_RATIO:200}
   # 处理任务（TODO 3.4）
   task:
     # 有界队列 + CallerRuns 拒绝策略：队列满时由提交线程执行，形成背压而不是丢任务

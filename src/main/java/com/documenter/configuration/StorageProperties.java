@@ -32,6 +32,15 @@ public class StorageProperties {
 
         /** 转换/临时文件根目录，与正式目录隔离（TODO 3.3 要求隔离临时目录）。 */
         private String temp = "./data/tmp";
+
+        /** 是否定期清理转换流程遗留的临时文件。 */
+        private boolean tempCleanupEnabled = true;
+
+        /** 临时文件保留时间。 */
+        private Duration tempRetention = Duration.ofHours(24);
+
+        /** 临时目录清理任务的执行间隔。 */
+        private Duration tempCleanupInterval = Duration.ofHours(1);
     }
 
     @Getter
@@ -40,10 +49,25 @@ public class StorageProperties {
         /** 单文件最大字节数，默认 50MB，与 spring.servlet.multipart 的上限保持一致。 */
         private long maxSizeBytes = 50L * 1024 * 1024;
 
-        /** 同一用户 1 小时内的最大上传次数，防止刷存储。 */
+        /** 同一用户单个自然日内的最大上传次数，防止刷存储。 */
         private int hourlyLimit = 60;
 
-        /** 上传限流窗口。 */
+        /** 预留的上传限流窗口；当前实现按自然日计数。 */
         private Duration rateLimitWindow = Duration.ofHours(1);
+
+        /** 单个 PDF 允许的最大页数。 */
+        private int maxPdfPages = 200;
+
+        /** 单张图片允许的最大总像素数（宽 × 高）。 */
+        private long maxImagePixels = 40_000_000L;
+
+        /** DOCX/XLSX ZIP 容器允许的最大条目数。 */
+        private int maxArchiveEntries = 10_000;
+
+        /** DOCX/XLSX 解压后的最大总字节数。 */
+        private long maxArchiveExpandedSizeBytes = 200L * 1024 * 1024;
+
+        /** DOCX/XLSX 解压总大小与上传文件大小的最大比值。 */
+        private int maxArchiveCompressionRatio = 200;
     }
 }

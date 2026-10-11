@@ -19,6 +19,8 @@
 - `POST /user/login`
 - `POST /user/login/by-code`
 - `POST /user/login/code`
+- `POST /user/reset-password`
+- `POST /user/reset-password/code`
 - `POST /user/verify/code`
 - `POST /user/refresh`
 
@@ -67,9 +69,9 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | `403` | 账号禁用或权限不足 |
 | `404` | 文件、版本或任务不存在；无权访问他人资源时也按不存在处理 |
 | `409` | 版本冲突或当前状态不允许操作 |
-| `413` | 文件超过大小限制 |
+| `413` | 文件大小、页数、像素或解压规模超过限制 |
 | `415` | 文件类型不支持 |
-| `422` | DOCX 内容损坏或结构暂不支持编辑 |
+| `422` | PDF、图片、Office 压缩包或 DOCX 内容损坏，或结构暂不支持处理 |
 | `429` | 发送、上传或重试次数达到限制 |
 | `500` | 服务端内部错误 |
 | `502` | 验证码发送失败 |
@@ -108,10 +110,13 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | 用户 | POST | `/user/login/by-code` | 否 | 手机验证码登录 |
 | 用户 | POST | `/user/refresh` | 否 | 刷新双 Token |
 | 用户 | GET | `/user/me` | 是 | 获取当前用户 |
+| 用户 | POST | `/user/change-password` | 是 | 修改密码并撤销全部会话 |
+| 用户 | POST | `/user/reset-password` | 否 | 使用手机验证码重置密码 |
 | 用户 | POST | `/user/logout` | 是 | 退出当前设备 |
 | 用户 | POST | `/user/logout-all` | 是 | 退出其他设备 |
 | 验证码 | POST | `/user/register/code` | 否 | 发送注册验证码 |
 | 验证码 | POST | `/user/login/code` | 否 | 发送登录验证码 |
+| 验证码 | POST | `/user/reset-password/code` | 否 | 发送找回密码验证码 |
 | 验证码 | POST | `/user/verify/code` | 否 | 消费并校验注册验证码 |
 | 文件 | POST | `/file/upload` | 是 | 上传文件 |
 | 文件 | GET | `/file/list` | 是 | 文件分页列表 |
@@ -237,7 +242,33 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 
 手机号必须为中国大陆 11 位手机号，验证码为 4～8 位数字。验证码成功使用后立即失效。成功时 `data` 为 [TokenPair](#62-tokenpair)。
 
-### 2.7 独立校验注册验证码
+### 2.7 发送找回密码验证码
+
+`POST /user/reset-password/code`
+
+请求体与发送注册验证码相同。手机号必须已经注册，且账号未被禁用。该验证码固定属于 `RESET_PASSWORD` 场景，不能用于注册或验证码登录。
+
+### 2.8 找回并重置密码
+
+`POST /user/reset-password`
+
+```json
+{
+  "phone": "13800138000",
+  "code": "123456",
+  "newPassword": "newPassword123"
+}
+```
+
+| 字段 | 必填 | 约束 |
+| --- | --- | --- |
+| `phone` | 是 | 中国大陆 11 位手机号 |
+| `code` | 是 | 4～8 位数字，且必须属于找回密码场景 |
+| `newPassword` | 是 | 8～64 位 |
+
+成功后验证码立即失效，并撤销该用户的全部登录会话。用户需要使用新密码重新登录。
+
+### 2.9 独立校验注册验证码
 
 `POST /user/verify/code`
 
@@ -260,7 +291,7 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 
 注意：此接口校验的是注册场景验证码，而且会真正消费验证码。调用成功后，同一验证码不能再提交给 `/user/register/by-code`。
 
-### 2.8 刷新 Token
+### 2.10 刷新 Token
 
 `POST /user/refresh`
 
@@ -272,13 +303,26 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 
 不要求携带仍有效的 Access Token。成功时返回一对新 Token，旧 Refresh Token 立即失效。
 
-### 2.9 当前用户
+### 2.11 当前用户
 
 `GET /user/me`
 
 成功时 `data` 为 [UserInfo](#61-userinfo)。
 
-### 2.10 退出当前设备
+### 2.12 修改密码
+
+`POST /user/change-password`
+
+```json
+{
+  "oldPassword": "password123",
+  "newPassword": "newPassword123"
+}
+```
+
+`oldPassword` 必填；`newPassword` 必填且长度为 8～64 位。成功后撤销包括当前设备在内的全部登录会话，调用方应清理本地 Token 并跳转登录页。
+
+### 2.13 退出当前设备
 
 `POST /user/logout`
 
@@ -294,7 +338,7 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 }
 ```
 
-### 2.11 退出其他设备
+### 2.14 退出其他设备
 
 `POST /user/logout-all`
 
@@ -324,7 +368,21 @@ curl -X POST "http://localhost:8080/file/upload" \
 - GIF
 - BMP
 
-服务端不信任客户端提供的扩展名和 Content-Type。默认单文件最大 50 MB，同一用户按自然日最多上传 60 次。上传成功后建立版本 1，`data` 为 [FileAsset](#63-fileasset)。
+服务端不信任客户端提供的扩展名和 Content-Type。ZIP 类型会扫描完整条目列表，因此关键 OOXML 条目位于文件后部时仍能正确识别。
+
+默认上传限制：
+
+| 项目 | 默认值 | 配置项 |
+| --- | --- | --- |
+| 单文件大小 | 50 MB | `res.storage.upload.max-size-bytes` |
+| 同一用户上传次数 | 每自然日 60 次 | `res.storage.upload.hourly-limit`（字段名为历史遗留，当前实现按自然日计数） |
+| PDF 页数 | 200 页 | `res.storage.upload.max-pdf-pages` |
+| 图片总像素 | 4000 万像素 | `res.storage.upload.max-image-pixels` |
+| DOCX/XLSX ZIP 条目 | 10000 个 | `res.storage.upload.max-archive-entries` |
+| DOCX/XLSX 解压总大小 | 200 MB | `res.storage.upload.max-archive-expanded-size-bytes` |
+| DOCX/XLSX 压缩比 | 200 倍 | `res.storage.upload.max-archive-compression-ratio` |
+
+PDF 只读取页数，图片只读取宽高元数据，DOCX/XLSX 采用流式扫描且不会解压到磁盘。上传成功后建立版本 1，`data` 为 [FileAsset](#63-fileasset)。隔离临时目录默认保留文件 24 小时，每小时执行一次清理。
 
 ### 3.2 文件列表
 

@@ -1,7 +1,9 @@
 package com.documenter.util;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.SequenceInputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.zip.ZipEntry;
@@ -13,12 +15,17 @@ import java.util.zip.ZipInputStream;
  * <p>为什么不能信任客户端声明的 Content-Type 或扩展名：两者都由客户端完全控制，
  * 把 .exe 改名成 .docx 再声明成 Office 文档即可绕过。因此这里只看字节内容。
  *
- * <p>首批支持 DOCX、XLSX、PDF、PNG、JPEG（TODO 第 2 节建议的首批格式）。
+ * <p>当前支持 DOCX、XLSX、PDF、PNG、JPEG、GIF、BMP。
  */
 public final class FileTypeDetector {
 
-    /** 读取的最大字节数：ZIP 的中央目录结尾记录位于文件末尾，取 1MB 足够覆盖。 */
+    /** 兼容旧调用方的头部读取上限；流式识别不会受此大小限制。 */
     public static final int PEEK_SIZE = 1024 * 1024;
+
+    private static final int MAGIC_LENGTH = 8;
+    /** 类型识别阶段的硬性保险丝；业务配置中的限制会在随后执行更严格的检查。 */
+    private static final int MAX_DETECTION_ENTRIES = 10_000;
+    private static final long MAX_DETECTION_EXPANDED_BYTES = 256L * 1024 * 1024;
 
     private static final byte[] ZIP_MAGIC = {0x50, 0x4B, 0x03, 0x04};
     private static final byte[] ZIP_EMPTY_MAGIC = {0x50, 0x4B, 0x05, 0x06};
@@ -67,14 +74,23 @@ public final class FileTypeDetector {
             return unsupported("检测到旧版 Office 二进制格式（.doc/.xls/.ppt），当前仅支持 .docx/.xlsx，请先另存为新格式");
         }
         if (startsWith(head, ZIP_MAGIC) || startsWith(head, ZIP_EMPTY_MAGIC)) {
-            return detectOoxml(head);
+            return detectOoxml(new ByteArrayInputStream(head));
         }
-        return unsupported("无法识别的文件类型，仅支持 DOCX、XLSX、PDF、PNG、JPEG");
+        return unsupported("无法识别的文件类型，仅支持 DOCX、XLSX、PDF、PNG、JPEG、GIF、BMP");
     }
 
-    /** 从输入流读取头部并识别。调用方负责关闭流。 */
+    /**
+     * 从输入流识别真实类型。调用方负责关闭流。
+     *
+     * <p>ZIP 类型会继续流式扫描完整条目列表，不能只看前 1MB：带有较大媒体文件的
+     * 合法 DOCX/XLSX 可能把关键条目放在更靠后的位置。
+     */
     public static DetectedType detect(InputStream inputStream) throws IOException {
-        return detect(inputStream.readNBytes(PEEK_SIZE));
+        byte[] prefix = inputStream.readNBytes(MAGIC_LENGTH);
+        if (startsWith(prefix, ZIP_MAGIC) || startsWith(prefix, ZIP_EMPTY_MAGIC)) {
+            return detectOoxml(new SequenceInputStream(new ByteArrayInputStream(prefix), inputStream));
+        }
+        return detect(prefix);
     }
 
     /**
@@ -83,31 +99,34 @@ public final class FileTypeDetector {
      * <p>两者都是 ZIP 容器，差别在内部条目：DOCX 有 {@code word/document.xml}，
      * XLSX 有 {@code xl/workbook.xml}。因此必须扫描条目名，只看魔数无法区分。
      */
-    private static DetectedType detectOoxml(byte[] content) {
-        boolean hasWord = false;
-        boolean hasExcel = false;
-        try (ZipInputStream zip = new ZipInputStream(new java.io.ByteArrayInputStream(content))) {
+    private static DetectedType detectOoxml(InputStream content) {
+        try (ZipInputStream zip = new ZipInputStream(content)) {
+            byte[] buffer = new byte[8192];
+            int entries = 0;
+            long expandedBytes = 0;
             ZipEntry entry;
             while ((entry = zip.getNextEntry()) != null) {
+                entries++;
+                if (entries > MAX_DETECTION_ENTRIES) {
+                    return unsupported("压缩包条目过多，无法安全识别为 Office 文档");
+                }
                 String name = entry.getName().toLowerCase(Locale.ROOT);
                 if (name.equals("word/document.xml")) {
-                    hasWord = true;
+                    return supported("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx");
                 } else if (name.equals("xl/workbook.xml")) {
-                    hasExcel = true;
+                    return supported("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx");
                 }
-                // 两个都找到就没必要继续扫了
-                if (hasWord && hasExcel) {
-                    break;
+                int read;
+                while ((read = zip.read(buffer)) != -1) {
+                    expandedBytes += read;
+                    if (expandedBytes > MAX_DETECTION_EXPANDED_BYTES) {
+                        return unsupported("压缩包解压规模过大，无法安全识别为 Office 文档");
+                    }
                 }
+                zip.closeEntry();
             }
         } catch (IOException e) {
             return unsupported("压缩包结构损坏，无法识别为有效的 Office 文档");
-        }
-        if (hasWord) {
-            return supported("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx");
-        }
-        if (hasExcel) {
-            return supported("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx");
         }
         return unsupported("该压缩包不是有效的 DOCX 或 XLSX 文档");
     }

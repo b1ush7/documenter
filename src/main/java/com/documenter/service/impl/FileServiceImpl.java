@@ -2,6 +2,7 @@ package com.documenter.service.impl;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.documenter.component.InitialVersionWriter;
+import com.documenter.component.UploadContentInspector;
 import com.documenter.component.UploadRateLimiter;
 import com.documenter.configuration.StorageProperties;
 import com.documenter.dto.FileQueryDTO;
@@ -49,15 +50,18 @@ public class FileServiceImpl implements FileService {
     private final FileStorage fileStorage;
     private final StorageProperties properties;
     private final UploadRateLimiter uploadRateLimiter;
+    private final UploadContentInspector uploadContentInspector;
     private final InitialVersionWriter initialVersionWriter;
 
     public FileServiceImpl(FileAssetMapper fileAssetMapper, FileStorage fileStorage,
                            StorageProperties properties, UploadRateLimiter uploadRateLimiter,
+                           UploadContentInspector uploadContentInspector,
                            InitialVersionWriter initialVersionWriter) {
         this.fileAssetMapper = fileAssetMapper;
         this.fileStorage = fileStorage;
         this.properties = properties;
         this.uploadRateLimiter = uploadRateLimiter;
+        this.uploadContentInspector = uploadContentInspector;
         this.initialVersionWriter = initialVersionWriter;
     }
 
@@ -74,24 +78,23 @@ public class FileServiceImpl implements FileService {
 
         uploadRateLimiter.acquire(userId);
 
-        // 先读头部做真实类型识别：只看内容，不信任客户端声明的 Content-Type 与扩展名
-        byte[] head;
+        // 按完整内容做真实类型识别：只看内容，不信任客户端声明的 Content-Type 与扩展名。
+        // ZIP 类型会扫描完整条目列表，避免关键 OOXML 条目位于 1MB 之后时被误判。
+        FileTypeDetector.DetectedType detected;
         try (InputStream probe = new BufferedInputStream(file.getInputStream())) {
-            head = probe.readNBytes(FileTypeDetector.PEEK_SIZE);
+            detected = FileTypeDetector.detect(probe);
         } catch (IOException e) {
             throw new BusinessException(400, "读取上传文件失败，请重试");
         }
-        if (head.length == 0) {
-            throw new BusinessException(400, "上传文件内容为空");
-        }
-
-        FileTypeDetector.DetectedType detected = FileTypeDetector.detect(head);
         if (!detected.supported()) {
-            log.info("拒绝不支持的上传类型, userId={}, 声明文件名={}, 实际头部={}",
+            log.info("拒绝不支持的上传类型, userId={}, 声明文件名={}, 原因={}",
                     userId, FileTypeDetector.sanitizeDisplayName(file.getOriginalFilename()),
-                    FileTypeDetector.describe(head));
+                    detected.message());
             throw new BusinessException(415, detected.message());
         }
+
+        // 在写入正式存储前完成结构与资源规模检查。
+        uploadContentInspector.inspect(file, detected);
 
         String originalName = FileTypeDetector.sanitizeDisplayName(file.getOriginalFilename());
         String storageKey = null;
