@@ -1,7 +1,10 @@
 package com.documenter.service;
 
 import com.documenter.dto.EditXlsxCellsDTO;
+import com.documenter.dto.EditXlsxDataDTO;
+import com.documenter.dto.EditXlsxSheetsDTO;
 import com.documenter.dto.EditXlsxStructureDTO;
+import com.documenter.dto.FormatXlsxCellsDTO;
 import com.documenter.vo.VersionVO;
 import com.documenter.vo.XlsxRangeVO;
 import com.documenter.vo.XlsxStructureVO;
@@ -18,4 +21,13 @@ public interface XlsxDocumentService {
 
     VersionVO editStructure(Long userId, Long fileId, Integer sourceVersion,
                             EditXlsxStructureDTO request);
+
+    VersionVO editSheets(Long userId, Long fileId, Integer sourceVersion,
+                         EditXlsxSheetsDTO request);
+
+    VersionVO editData(Long userId, Long fileId, Integer sourceVersion,
+                       EditXlsxDataDTO request);
+
+    VersionVO formatCells(Long userId, Long fileId, Integer sourceVersion,
+                          FormatXlsxCellsDTO request);
 }

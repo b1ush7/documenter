@@ -104,5 +104,8 @@ public class StorageProperties {
 
         /** 单次行列结构编辑允许插入或删除的行列总数。 */
         private int maxStructuralUnits = 1000;
+
+        /** 单个排序区域允许包含的最大单元格数量。 */
+        private int maxSortableCells = 10_000;
     }
 }

@@ -5,7 +5,10 @@ import com.documenter.dto.FileQueryDTO;
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.EditDocxTableDTO;
 import com.documenter.dto.EditXlsxCellsDTO;
+import com.documenter.dto.EditXlsxDataDTO;
+import com.documenter.dto.EditXlsxSheetsDTO;
 import com.documenter.dto.EditXlsxStructureDTO;
+import com.documenter.dto.FormatXlsxCellsDTO;
 import com.documenter.dto.FormatDocxParagraphsDTO;
 import com.documenter.dto.GenerateDocxDTO;
 import com.documenter.dto.InsertDocxImagesDTO;
@@ -205,6 +208,33 @@ public class FileController {
                                                     @PathVariable Integer versionNo,
                                                     @Valid @RequestBody EditXlsxStructureDTO request) {
         return ApiResponse.success("已生成新版本", xlsxDocumentService.editStructure(
+                SecurityUtil.requireUserId(), fileId, versionNo, request));
+    }
+
+    /** 新增、重命名或删除工作表，并保存为新版本。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/xlsx/sheet-edits")
+    public ApiResponse<VersionVO> editXlsxSheets(@PathVariable Long fileId,
+                                                 @PathVariable Integer versionNo,
+                                                 @Valid @RequestBody EditXlsxSheetsDTO request) {
+        return ApiResponse.success("已生成新版本", xlsxDocumentService.editSheets(
+                SecurityUtil.requireUserId(), fileId, versionNo, request));
+    }
+
+    /** 对安全的纯值区域排序，或设置、清除工作表自动筛选，并保存为新版本。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/xlsx/data-edits")
+    public ApiResponse<VersionVO> editXlsxData(@PathVariable Long fileId,
+                                               @PathVariable Integer versionNo,
+                                               @Valid @RequestBody EditXlsxDataDTO request) {
+        return ApiResponse.success("已生成新版本", xlsxDocumentService.editData(
+                SecurityUtil.requireUserId(), fileId, versionNo, request));
+    }
+
+    /** 设置单元格或矩形区域的基础格式，并保存为新版本。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/xlsx/formats")
+    public ApiResponse<VersionVO> formatXlsxCells(@PathVariable Long fileId,
+                                                  @PathVariable Integer versionNo,
+                                                  @Valid @RequestBody FormatXlsxCellsDTO request) {
+        return ApiResponse.success("已生成新版本", xlsxDocumentService.formatCells(
                 SecurityUtil.requireUserId(), fileId, versionNo, request));
     }
 

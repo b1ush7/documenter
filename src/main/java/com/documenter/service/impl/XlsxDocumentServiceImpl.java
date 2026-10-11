@@ -2,7 +2,10 @@ package com.documenter.service.impl;
 
 import com.documenter.configuration.StorageProperties;
 import com.documenter.dto.EditXlsxCellsDTO;
+import com.documenter.dto.EditXlsxDataDTO;
+import com.documenter.dto.EditXlsxSheetsDTO;
 import com.documenter.dto.EditXlsxStructureDTO;
+import com.documenter.dto.FormatXlsxCellsDTO;
 import com.documenter.entity.DocumentVersion;
 import com.documenter.enums.ChangeType;
 import com.documenter.exception.BusinessException;
@@ -22,15 +25,24 @@ import org.apache.poi.ss.usermodel.Cell;
 import org.apache.poi.ss.usermodel.CellStyle;
 import org.apache.poi.ss.usermodel.CellType;
 import org.apache.poi.ss.usermodel.DateUtil;
+import org.apache.poi.ss.usermodel.BorderStyle;
+import org.apache.poi.ss.usermodel.FillPatternType;
 import org.apache.poi.ss.usermodel.Font;
 import org.apache.poi.ss.usermodel.FormulaError;
+import org.apache.poi.ss.usermodel.HorizontalAlignment;
 import org.apache.poi.ss.usermodel.Row;
+import org.apache.poi.ss.usermodel.VerticalAlignment;
 import org.apache.poi.ss.util.CellAddress;
 import org.apache.poi.ss.util.CellRangeAddress;
 import org.apache.poi.ss.util.CellReference;
 import org.apache.poi.ss.util.NumberToTextConverter;
+import org.apache.poi.ss.util.WorkbookUtil;
+import org.apache.poi.xssf.usermodel.DefaultIndexedColorMap;
 import org.apache.poi.xssf.usermodel.XSSFChart;
+import org.apache.poi.xssf.usermodel.XSSFCellStyle;
+import org.apache.poi.xssf.usermodel.XSSFColor;
 import org.apache.poi.xssf.usermodel.XSSFDrawing;
+import org.apache.poi.xssf.usermodel.XSSFFont;
 import org.apache.poi.xssf.usermodel.XSSFSheet;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.springframework.stereotype.Service;
@@ -44,9 +56,12 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.function.Consumer;
@@ -167,6 +182,46 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
         return editAndSave(userId, fileId, sourceVersion, request.getInstruction(),
                 "执行 " + request.getOperations().size() + " 个 XLSX 行列编辑操作",
                 workbook -> applyStructureOperations(workbook, request.getOperations()));
+    }
+
+    @Override
+    public VersionVO editSheets(Long userId, Long fileId, Integer sourceVersion,
+                                EditXlsxSheetsDTO request) {
+        return editAndSave(userId, fileId, sourceVersion, request.getInstruction(),
+                "执行 " + request.getOperations().size() + " 个 XLSX 工作表操作",
+                workbook -> applySheetOperations(workbook, request.getOperations()));
+    }
+
+    @Override
+    public VersionVO editData(Long userId, Long fileId, Integer sourceVersion,
+                              EditXlsxDataDTO request) {
+        return editAndSave(userId, fileId, sourceVersion, request.getInstruction(),
+                "执行 " + request.getOperations().size() + " 个 XLSX 数据操作",
+                workbook -> applyDataOperations(workbook, request.getOperations(),
+                        properties.getXlsx().getMaxSortableCells()));
+    }
+
+    @Override
+    public VersionVO formatCells(Long userId, Long fileId, Integer sourceVersion,
+                                 FormatXlsxCellsDTO request) {
+        long affectedCells = countFormattedCells(request.getOperations());
+        if (affectedCells > properties.getXlsx().getMaxEditOperations()) {
+            throw new BusinessException(413, "单次格式化单元格数量超过处理限制");
+        }
+        return editAndSave(userId, fileId, sourceVersion, request.getInstruction(),
+                "格式化 " + affectedCells + " 个 XLSX 单元格",
+                workbook -> applyFormatOperations(workbook, request.getOperations()));
+    }
+
+    private static long countFormattedCells(List<FormatXlsxCellsDTO.Operation> operations) {
+        long count = 0;
+        for (FormatXlsxCellsDTO.Operation operation : operations) {
+            if (operation == null || operation.getRange() == null) {
+                throw new BusinessException(400, "XLSX 格式操作字段不完整");
+            }
+            count += area(parseArea(operation.getRange()));
+        }
+        return count;
     }
 
     private XlsxStructureVO readWorkbook(Long fileId, Integer versionNo, XSSFWorkbook workbook) {
@@ -554,6 +609,418 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
         }
     }
 
+    private static void applySheetOperations(XSSFWorkbook workbook,
+                                             List<EditXlsxSheetsDTO.Operation> operations) {
+        for (EditXlsxSheetsDTO.Operation operation : operations) {
+            if (operation == null || operation.getType() == null
+                    || operation.getSheetName() == null) {
+                throw new BusinessException(400, "工作表操作字段不完整");
+            }
+            switch (operation.getType()) {
+                case "CREATE" -> createSheet(workbook, operation);
+                case "RENAME" -> renameSheet(workbook, operation);
+                case "DELETE" -> deleteSheet(workbook, operation);
+                default -> throw new BusinessException(400, "不支持的工作表操作");
+            }
+        }
+    }
+
+    private static void createSheet(XSSFWorkbook workbook, EditXlsxSheetsDTO.Operation operation) {
+        if (operation.getNewName() != null) {
+            throw new BusinessException(400, "CREATE 不适用 newName 字段");
+        }
+        validateSheetName(operation.getSheetName());
+        if (workbook.getSheet(operation.getSheetName()) != null) {
+            throw new BusinessException(400, "工作表名称已存在：" + operation.getSheetName());
+        }
+        int position = operation.getPosition() == null
+                ? workbook.getNumberOfSheets() + 1 : operation.getPosition();
+        if (position < 1 || position > workbook.getNumberOfSheets() + 1) {
+            throw new BusinessException(400, "新工作表位置超出范围");
+        }
+        workbook.createSheet(operation.getSheetName());
+        if (position <= workbook.getNumberOfSheets()) {
+            workbook.setSheetOrder(operation.getSheetName(), position - 1);
+        }
+    }
+
+    private static void renameSheet(XSSFWorkbook workbook, EditXlsxSheetsDTO.Operation operation) {
+        if (operation.getNewName() == null || operation.getPosition() != null) {
+            throw new BusinessException(400, "RENAME 必须且只能额外提供 newName");
+        }
+        int index = workbook.getSheetIndex(operation.getSheetName());
+        if (index < 0) {
+            throw new BusinessException(404, "工作表不存在：" + operation.getSheetName());
+        }
+        validateSheetName(operation.getNewName());
+        int duplicate = workbook.getSheetIndex(operation.getNewName());
+        if (duplicate >= 0 && duplicate != index) {
+            throw new BusinessException(400, "工作表名称已存在：" + operation.getNewName());
+        }
+        workbook.setSheetName(index, operation.getNewName());
+    }
+
+    private static void deleteSheet(XSSFWorkbook workbook, EditXlsxSheetsDTO.Operation operation) {
+        if (operation.getNewName() != null || operation.getPosition() != null) {
+            throw new BusinessException(400, "DELETE 包含不适用的字段");
+        }
+        if (workbook.getNumberOfSheets() == 1) {
+            throw new BusinessException(400, "XLSX 至少需要保留一个工作表");
+        }
+        int index = workbook.getSheetIndex(operation.getSheetName());
+        if (index < 0) {
+            throw new BusinessException(404, "工作表不存在：" + operation.getSheetName());
+        }
+        workbook.removeSheetAt(index);
+    }
+
+    private static void validateSheetName(String name) {
+        try {
+            WorkbookUtil.validateSheetName(name);
+        } catch (IllegalArgumentException e) {
+            throw new BusinessException(400, "工作表名称无效：" + name);
+        }
+    }
+
+    private static void applyDataOperations(XSSFWorkbook workbook,
+                                            List<EditXlsxDataDTO.Operation> operations,
+                                            int maxSortableCells) {
+        for (EditXlsxDataDTO.Operation operation : operations) {
+            if (operation == null || operation.getType() == null
+                    || operation.getSheetName() == null) {
+                throw new BusinessException(400, "XLSX 数据操作字段不完整");
+            }
+            XSSFSheet sheet = workbook.getSheet(operation.getSheetName());
+            if (sheet == null) {
+                throw new BusinessException(404, "工作表不存在：" + operation.getSheetName());
+            }
+            requireWritableSheet(sheet);
+            if (!sheet.getTables().isEmpty()) {
+                throw new BusinessException(422, "暂不支持在包含 Excel 表对象的工作表中排序或设置筛选");
+            }
+            switch (operation.getType()) {
+                case "SORT_RANGE" -> sortRange(sheet, operation, maxSortableCells);
+                case "SET_AUTO_FILTER" -> setAutoFilter(sheet, operation);
+                case "CLEAR_AUTO_FILTER" -> clearAutoFilter(sheet, operation);
+                default -> throw new BusinessException(400, "不支持的 XLSX 数据操作");
+            }
+        }
+    }
+
+    private static void sortRange(XSSFSheet sheet, EditXlsxDataDTO.Operation operation,
+                                  int maxSortableCells) {
+        if (operation.getRange() == null || operation.getKeyColumn() == null
+                || operation.getDirection() == null || operation.getHasHeader() == null) {
+            throw new BusinessException(400, "SORT_RANGE 必须提供 range、keyColumn、direction 和 hasHeader");
+        }
+        CellRangeAddress range = parseRange(operation.getRange());
+        if (area(range) > maxSortableCells) {
+            throw new BusinessException(413, "排序区域单元格数量超过处理限制");
+        }
+        int keyColumn;
+        try {
+            keyColumn = CellReference.convertColStringToIndex(
+                    operation.getKeyColumn().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            throw new BusinessException(400, "排序列无效：" + operation.getKeyColumn());
+        }
+        if (keyColumn < range.getFirstColumn() || keyColumn > range.getLastColumn()) {
+            throw new BusinessException(400, "排序列必须位于排序区域内");
+        }
+        requireNoMergedIntersection(sheet, range, "排序区域不能与合并区域相交：");
+        int firstDataRow = range.getFirstRow() + (operation.getHasHeader() ? 1 : 0);
+        if (firstDataRow > range.getLastRow()) {
+            return;
+        }
+
+        List<SortRow> rows = new ArrayList<>();
+        for (int rowIndex = firstDataRow; rowIndex <= range.getLastRow(); rowIndex++) {
+            List<CellSnapshot> cells = new ArrayList<>();
+            for (int column = range.getFirstColumn(); column <= range.getLastColumn(); column++) {
+                Row row = sheet.getRow(rowIndex);
+                Cell cell = row == null ? null : row.getCell(column);
+                cells.add(snapshotSortableCell(cell));
+            }
+            rows.add(new SortRow(rowIndex, cells,
+                    cells.get(keyColumn - range.getFirstColumn())));
+        }
+        Comparator<SortRow> comparator = (left, right) -> compareSortValues(
+                left.key(), right.key(), "DESC".equals(operation.getDirection()));
+        comparator = comparator.thenComparingInt(SortRow::originalRow);
+        rows.sort(comparator);
+
+        for (int offset = 0; offset < rows.size(); offset++) {
+            int targetRowIndex = firstDataRow + offset;
+            SortRow source = rows.get(offset);
+            for (int columnOffset = 0; columnOffset < source.cells().size(); columnOffset++) {
+                applySnapshot(sheet, targetRowIndex, range.getFirstColumn() + columnOffset,
+                        source.cells().get(columnOffset));
+            }
+        }
+    }
+
+    private static CellSnapshot snapshotSortableCell(Cell cell) {
+        if (cell == null) {
+            return CellSnapshot.missing();
+        }
+        if (cell.getCellType() == CellType.FORMULA || cell.isPartOfArrayFormulaGroup()) {
+            throw new BusinessException(422, "排序区域不能包含公式：" + cell.getAddress().formatAsString());
+        }
+        if (cell.getCellComment() != null || cell.getHyperlink() != null) {
+            throw new BusinessException(422,
+                    "排序区域不能包含批注或超链接：" + cell.getAddress().formatAsString());
+        }
+        return switch (cell.getCellType()) {
+            case STRING -> new CellSnapshot(true, CellType.STRING,
+                    cell.getRichStringCellValue().getString(), 0, false, (byte) 0,
+                    cell.getCellStyle());
+            case NUMERIC -> new CellSnapshot(true, CellType.NUMERIC, null,
+                    cell.getNumericCellValue(), false, (byte) 0, cell.getCellStyle());
+            case BOOLEAN -> new CellSnapshot(true, CellType.BOOLEAN, null,
+                    0, cell.getBooleanCellValue(), (byte) 0, cell.getCellStyle());
+            case ERROR -> new CellSnapshot(true, CellType.ERROR, null,
+                    0, false, cell.getErrorCellValue(), cell.getCellStyle());
+            case BLANK, _NONE -> new CellSnapshot(true, CellType.BLANK, null,
+                    0, false, (byte) 0, cell.getCellStyle());
+            case FORMULA -> throw new BusinessException(422,
+                    "排序区域不能包含公式：" + cell.getAddress().formatAsString());
+        };
+    }
+
+    private static int compareSortValues(CellSnapshot left, CellSnapshot right, boolean descending) {
+        boolean leftBlank = left.isBlank();
+        boolean rightBlank = right.isBlank();
+        if (leftBlank || rightBlank) {
+            return leftBlank == rightBlank ? 0 : (leftBlank ? 1 : -1);
+        }
+        int category = Integer.compare(sortCategory(left.type()), sortCategory(right.type()));
+        int result;
+        if (category != 0) {
+            result = category;
+        } else {
+            result = switch (left.type()) {
+                case NUMERIC -> Double.compare(left.numericValue(), right.numericValue());
+                case STRING -> left.stringValue().compareToIgnoreCase(right.stringValue());
+                case BOOLEAN -> Boolean.compare(left.booleanValue(), right.booleanValue());
+                case ERROR -> Byte.compare(left.errorValue(), right.errorValue());
+                default -> 0;
+            };
+        }
+        return descending ? -result : result;
+    }
+
+    private static int sortCategory(CellType type) {
+        return switch (type) {
+            case NUMERIC -> 0;
+            case STRING -> 1;
+            case BOOLEAN -> 2;
+            case ERROR -> 3;
+            default -> 4;
+        };
+    }
+
+    private static void applySnapshot(XSSFSheet sheet, int rowIndex, int columnIndex,
+                                      CellSnapshot snapshot) {
+        Row row = sheet.getRow(rowIndex);
+        Cell cell = row == null ? null : row.getCell(columnIndex);
+        if (!snapshot.exists()) {
+            if (cell != null) {
+                row.removeCell(cell);
+            }
+            return;
+        }
+        if (row == null) {
+            row = sheet.createRow(rowIndex);
+        }
+        if (cell == null) {
+            cell = row.createCell(columnIndex);
+        }
+        cell.setBlank();
+        cell.setCellStyle(snapshot.style());
+        switch (snapshot.type()) {
+            case STRING -> cell.setCellValue(snapshot.stringValue());
+            case NUMERIC -> cell.setCellValue(snapshot.numericValue());
+            case BOOLEAN -> cell.setCellValue(snapshot.booleanValue());
+            case ERROR -> cell.setCellErrorValue(snapshot.errorValue());
+            case BLANK, _NONE -> cell.setBlank();
+            case FORMULA -> throw new IllegalStateException("formula snapshot is not supported");
+        }
+    }
+
+    private static void setAutoFilter(XSSFSheet sheet, EditXlsxDataDTO.Operation operation) {
+        if (operation.getRange() == null || operation.getKeyColumn() != null
+                || operation.getDirection() != null || operation.getHasHeader() != null) {
+            throw new BusinessException(400, "SET_AUTO_FILTER 必须且只能提供 range");
+        }
+        sheet.setAutoFilter(parseRange(operation.getRange()));
+    }
+
+    private static void clearAutoFilter(XSSFSheet sheet, EditXlsxDataDTO.Operation operation) {
+        if (operation.getRange() != null || operation.getKeyColumn() != null
+                || operation.getDirection() != null || operation.getHasHeader() != null) {
+            throw new BusinessException(400, "CLEAR_AUTO_FILTER 不适用其他数据字段");
+        }
+        if (sheet.getCTWorksheet().isSetAutoFilter()) {
+            sheet.getCTWorksheet().unsetAutoFilter();
+        }
+    }
+
+    private static void applyFormatOperations(XSSFWorkbook workbook,
+                                              List<FormatXlsxCellsDTO.Operation> operations) {
+        Map<FormatCacheKey, XSSFCellStyle> styles = new HashMap<>();
+        for (FormatXlsxCellsDTO.Operation operation : operations) {
+            if (operation == null || operation.getSheetName() == null
+                    || operation.getRange() == null) {
+                throw new BusinessException(400, "XLSX 格式操作字段不完整");
+            }
+            requireFormatFields(operation);
+            XSSFSheet sheet = workbook.getSheet(operation.getSheetName());
+            if (sheet == null) {
+                throw new BusinessException(404, "工作表不存在：" + operation.getSheetName());
+            }
+            requireWritableSheet(sheet);
+            CellRangeAddress range = parseArea(operation.getRange());
+            requireFullyCoveredMergedRegions(sheet, range);
+            FormatSpec spec = FormatSpec.from(operation);
+            for (int rowIndex = range.getFirstRow(); rowIndex <= range.getLastRow(); rowIndex++) {
+                Row row = sheet.getRow(rowIndex);
+                if (row == null) {
+                    row = sheet.createRow(rowIndex);
+                }
+                for (int column = range.getFirstColumn(); column <= range.getLastColumn(); column++) {
+                    Cell cell = row.getCell(column);
+                    if (cell == null) {
+                        cell = row.createCell(column, CellType.BLANK);
+                    }
+                    XSSFCellStyle baseStyle = (XSSFCellStyle) cell.getCellStyle();
+                    FormatCacheKey key = new FormatCacheKey(baseStyle.getIndex(), spec);
+                    XSSFCellStyle style = styles.computeIfAbsent(key,
+                            ignored -> buildStyle(workbook, baseStyle, spec));
+                    cell.setCellStyle(style);
+                }
+            }
+        }
+    }
+
+    private static void requireFormatFields(FormatXlsxCellsDTO.Operation operation) {
+        if (operation.getFontName() == null && operation.getFontSize() == null
+                && operation.getBold() == null && operation.getItalic() == null
+                && operation.getFontColor() == null && operation.getHorizontalAlignment() == null
+                && operation.getVerticalAlignment() == null && operation.getWrapText() == null
+                && operation.getFillColor() == null && operation.getNumberFormat() == null
+                && operation.getBorderStyle() == null) {
+            throw new BusinessException(400, "格式操作至少需要提供一个格式字段");
+        }
+    }
+
+    private static XSSFCellStyle buildStyle(XSSFWorkbook workbook, XSSFCellStyle base,
+                                            FormatSpec spec) {
+        XSSFCellStyle style = workbook.createCellStyle();
+        style.cloneStyleFrom(base);
+        if (spec.hasFontChange()) {
+            XSSFFont source = workbook.getFontAt(base.getFontIndex());
+            XSSFFont font = workbook.createFont();
+            font.getCTFont().set(source.getCTFont());
+            if (spec.fontName() != null) {
+                font.setFontName(spec.fontName());
+            }
+            if (spec.fontSize() != null) {
+                font.setFontHeight(spec.fontSize());
+            }
+            if (spec.bold() != null) {
+                font.setBold(spec.bold());
+            }
+            if (spec.italic() != null) {
+                font.setItalic(spec.italic());
+            }
+            if (spec.fontColor() != null) {
+                font.setColor(toColor(spec.fontColor()));
+            }
+            style.setFont(font);
+        }
+        if (spec.horizontalAlignment() != null) {
+            style.setAlignment(HorizontalAlignment.valueOf(spec.horizontalAlignment()));
+        }
+        if (spec.verticalAlignment() != null) {
+            style.setVerticalAlignment(VerticalAlignment.valueOf(spec.verticalAlignment()));
+        }
+        if (spec.wrapText() != null) {
+            style.setWrapText(spec.wrapText());
+        }
+        if (spec.fillColor() != null) {
+            style.setFillForegroundColor(toColor(spec.fillColor()));
+            style.setFillPattern(FillPatternType.SOLID_FOREGROUND);
+        }
+        if (spec.numberFormat() != null) {
+            style.setDataFormat(workbook.createDataFormat().getFormat(spec.numberFormat()));
+        }
+        if (spec.borderStyle() != null) {
+            BorderStyle border = BorderStyle.valueOf(spec.borderStyle());
+            style.setBorderTop(border);
+            style.setBorderRight(border);
+            style.setBorderBottom(border);
+            style.setBorderLeft(border);
+        }
+        return style;
+    }
+
+    private static XSSFColor toColor(String hex) {
+        String value = hex.startsWith("#") ? hex.substring(1) : hex;
+        byte[] rgb = new byte[] {
+                (byte) Integer.parseInt(value.substring(0, 2), 16),
+                (byte) Integer.parseInt(value.substring(2, 4), 16),
+                (byte) Integer.parseInt(value.substring(4, 6), 16)
+        };
+        return new XSSFColor(rgb, new DefaultIndexedColorMap());
+    }
+
+    private static CellRangeAddress parseArea(String rawRange) {
+        if (rawRange != null && !rawRange.contains(":")) {
+            CellAddress address = parseAddress(rawRange);
+            return new CellRangeAddress(address.getRow(), address.getRow(),
+                    address.getColumn(), address.getColumn());
+        }
+        return parseRange(rawRange);
+    }
+
+    private static long area(CellRangeAddress range) {
+        return (long) (range.getLastRow() - range.getFirstRow() + 1)
+                * (range.getLastColumn() - range.getFirstColumn() + 1);
+    }
+
+    private static void requireNoMergedIntersection(XSSFSheet sheet, CellRangeAddress requested,
+                                                    String message) {
+        for (CellRangeAddress merged : sheet.getMergedRegions()) {
+            if (intersects(requested, merged)) {
+                throw new BusinessException(400, message + merged.formatAsString());
+            }
+        }
+    }
+
+    private static void requireFullyCoveredMergedRegions(XSSFSheet sheet,
+                                                         CellRangeAddress requested) {
+        for (CellRangeAddress merged : sheet.getMergedRegions()) {
+            if (intersects(requested, merged) && !contains(requested, merged)) {
+                throw new BusinessException(400,
+                        "格式区域不能只覆盖合并区域的一部分：" + merged.formatAsString());
+            }
+        }
+    }
+
+    private static boolean intersects(CellRangeAddress first, CellRangeAddress second) {
+        return first.getFirstRow() <= second.getLastRow()
+                && first.getLastRow() >= second.getFirstRow()
+                && first.getFirstColumn() <= second.getLastColumn()
+                && first.getLastColumn() >= second.getFirstColumn();
+    }
+
+    private static boolean contains(CellRangeAddress outer, CellRangeAddress inner) {
+        return outer.getFirstRow() <= inner.getFirstRow()
+                && outer.getLastRow() >= inner.getLastRow()
+                && outer.getFirstColumn() <= inner.getFirstColumn()
+                && outer.getLastColumn() >= inner.getLastColumn();
+    }
+
     private static void applyStructureOperations(XSSFWorkbook workbook,
                                                  List<EditXlsxStructureDTO.Operation> operations) {
         for (EditXlsxStructureDTO.Operation operation : operations) {
@@ -877,6 +1344,50 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
         }
         String extension = version.asset().getExtension();
         return extension != null && "xlsx".equals(extension.toLowerCase(Locale.ROOT));
+    }
+
+    private record CellSnapshot(boolean exists, CellType type, String stringValue,
+                                double numericValue, boolean booleanValue, byte errorValue,
+                                CellStyle style) {
+        private static CellSnapshot missing() {
+            return new CellSnapshot(false, CellType.BLANK, null,
+                    0, false, (byte) 0, null);
+        }
+
+        private boolean isBlank() {
+            return !exists || type == CellType.BLANK || type == CellType._NONE;
+        }
+    }
+
+    private record SortRow(int originalRow, List<CellSnapshot> cells, CellSnapshot key) {
+    }
+
+    private record FormatSpec(String fontName, Double fontSize, Boolean bold, Boolean italic,
+                              String fontColor, String horizontalAlignment,
+                              String verticalAlignment, Boolean wrapText, String fillColor,
+                              String numberFormat, String borderStyle) {
+        private static FormatSpec from(FormatXlsxCellsDTO.Operation operation) {
+            return new FormatSpec(operation.getFontName(), operation.getFontSize(),
+                    operation.getBold(), operation.getItalic(), normalizeColor(operation.getFontColor()),
+                    operation.getHorizontalAlignment(), operation.getVerticalAlignment(),
+                    operation.getWrapText(), normalizeColor(operation.getFillColor()),
+                    operation.getNumberFormat(), operation.getBorderStyle());
+        }
+
+        private static String normalizeColor(String color) {
+            if (color == null) {
+                return null;
+            }
+            return (color.startsWith("#") ? color.substring(1) : color).toUpperCase(Locale.ROOT);
+        }
+
+        private boolean hasFontChange() {
+            return fontName != null || fontSize != null || bold != null
+                    || italic != null || fontColor != null;
+        }
+    }
+
+    private record FormatCacheKey(short baseStyleIndex, FormatSpec spec) {
     }
 
     private record ColumnFormat(int width, boolean hidden, CellStyle style) {

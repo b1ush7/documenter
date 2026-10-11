@@ -2,7 +2,10 @@ package com.documenter.service.impl;
 
 import com.documenter.configuration.StorageProperties;
 import com.documenter.dto.EditXlsxCellsDTO;
+import com.documenter.dto.EditXlsxDataDTO;
+import com.documenter.dto.EditXlsxSheetsDTO;
 import com.documenter.dto.EditXlsxStructureDTO;
+import com.documenter.dto.FormatXlsxCellsDTO;
 import com.documenter.entity.DocumentVersion;
 import com.documenter.entity.FileAsset;
 import com.documenter.enums.ChangeType;
@@ -12,7 +15,10 @@ import com.documenter.service.FileStorage;
 import com.documenter.service.VersionWriter;
 import com.documenter.vo.FileDownload;
 import org.apache.poi.ss.usermodel.CellType;
+import org.apache.poi.ss.usermodel.BorderStyle;
+import org.apache.poi.ss.usermodel.FillPatternType;
 import org.apache.poi.ss.usermodel.HorizontalAlignment;
+import org.apache.poi.ss.usermodel.VerticalAlignment;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -387,6 +393,193 @@ class XlsxDocumentServiceImplTest {
         verify(fileStorage, never()).store(any(byte[].class), any());
     }
 
+    @Test
+    void createsRenamesAndDeletesSheetsInRequestOrder() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            workbook.createSheet("数据");
+            workbook.createSheet("待删除");
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        prepareEdit(source);
+        EditXlsxSheetsDTO request = sheetRequest(
+                sheetOperation("CREATE", "中间", null, 2),
+                sheetOperation("RENAME", "数据", "原始数据", null),
+                sheetOperation("DELETE", "待删除", null, null));
+
+        service.editSheets(USER_ID, FILE_ID, SOURCE_VERSION, request);
+
+        try (XSSFWorkbook workbook = new XSSFWorkbook(new ByteArrayInputStream(storedBytes()))) {
+            assertEquals(2, workbook.getNumberOfSheets());
+            assertEquals("原始数据", workbook.getSheetName(0));
+            assertEquals("中间", workbook.getSheetName(1));
+            assertNull(workbook.getSheet("待删除"));
+        }
+    }
+
+    @Test
+    void rejectsDeletingLastWorksheet() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            workbook.createSheet("数据");
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        when(versionService.downloadVersion(USER_ID, FILE_ID, SOURCE_VERSION))
+                .thenReturn(download(source));
+
+        BusinessException error = assertThrows(BusinessException.class,
+                () -> service.editSheets(USER_ID, FILE_ID, SOURCE_VERSION,
+                        sheetRequest(sheetOperation("DELETE", "数据", null, null))));
+
+        assertEquals(400, error.getCode());
+        verify(fileStorage, never()).store(any(byte[].class), any());
+    }
+
+    @Test
+    void sortsValueRangeStablyAndMovesStylesWithRows() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            var sheet = workbook.createSheet("数据");
+            var header = sheet.createRow(0);
+            header.createCell(0).setCellValue("名称");
+            header.createCell(1).setCellValue("分数");
+            var row2 = sheet.createRow(1);
+            row2.createCell(0).setCellValue("高");
+            row2.createCell(1).setCellValue(30);
+            var row3 = sheet.createRow(2);
+            row3.createCell(0).setCellValue("低");
+            row3.createCell(1).setCellValue(10);
+            var marked = workbook.createCellStyle();
+            marked.setWrapText(true);
+            row3.getCell(0).setCellStyle(marked);
+            sheet.createRow(3).createCell(0).setCellValue("空值");
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        prepareEdit(source);
+
+        service.editData(USER_ID, FILE_ID, SOURCE_VERSION,
+                dataRequest(sortOperation("A1:B4", "B", "ASC", true)));
+
+        try (XSSFWorkbook workbook = new XSSFWorkbook(new ByteArrayInputStream(storedBytes()))) {
+            var sheet = workbook.getSheet("数据");
+            assertEquals("名称", sheet.getRow(0).getCell(0).getStringCellValue());
+            assertEquals("低", sheet.getRow(1).getCell(0).getStringCellValue());
+            assertEquals(10, sheet.getRow(1).getCell(1).getNumericCellValue());
+            assertTrue(sheet.getRow(1).getCell(0).getCellStyle().getWrapText());
+            assertEquals("高", sheet.getRow(2).getCell(0).getStringCellValue());
+            assertEquals("空值", sheet.getRow(3).getCell(0).getStringCellValue());
+        }
+    }
+
+    @Test
+    void rejectsSortingRangeContainingFormula() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            var sheet = workbook.createSheet("数据");
+            sheet.createRow(0).createCell(0).setCellValue("值");
+            sheet.createRow(1).createCell(0).setCellFormula("1+1");
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        when(versionService.downloadVersion(USER_ID, FILE_ID, SOURCE_VERSION))
+                .thenReturn(download(source));
+
+        BusinessException error = assertThrows(BusinessException.class,
+                () -> service.editData(USER_ID, FILE_ID, SOURCE_VERSION,
+                        dataRequest(sortOperation("A1:A2", "A", "ASC", true))));
+
+        assertEquals(422, error.getCode());
+        verify(fileStorage, never()).store(any(byte[].class), any());
+    }
+
+    @Test
+    void setsAndClearsAutoFilter() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            var sheet = workbook.createSheet("数据");
+            sheet.createRow(0).createCell(0).setCellValue("名称");
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        prepareEdit(source);
+        service.editData(USER_ID, FILE_ID, SOURCE_VERSION,
+                dataRequest(filterOperation("SET_AUTO_FILTER", "A1:B5")));
+        byte[] filtered = storedBytes();
+        try (XSSFWorkbook workbook = new XSSFWorkbook(new ByteArrayInputStream(filtered))) {
+            assertTrue(workbook.getSheet("数据").getCTWorksheet().isSetAutoFilter());
+            assertEquals("A1:B5", workbook.getSheet("数据").getCTWorksheet()
+                    .getAutoFilter().getRef());
+        }
+
+        org.mockito.Mockito.reset(fileStorage, versionWriter, versionService);
+        prepareEdit(filtered);
+        service.editData(USER_ID, FILE_ID, SOURCE_VERSION,
+                dataRequest(filterOperation("CLEAR_AUTO_FILTER", null)));
+        try (XSSFWorkbook workbook = new XSSFWorkbook(new ByteArrayInputStream(storedBytes()))) {
+            assertFalse(workbook.getSheet("数据").getCTWorksheet().isSetAutoFilter());
+        }
+    }
+
+    @Test
+    void formatsRangeWithoutChangingValues() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            var row = workbook.createSheet("数据").createRow(0);
+            row.createCell(0).setCellValue(12.5);
+            row.createCell(1).setCellValue("文本");
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        prepareEdit(source);
+        FormatXlsxCellsDTO.Operation operation = new FormatXlsxCellsDTO.Operation();
+        operation.setSheetName("数据");
+        operation.setRange("A1:B1");
+        operation.setFontName("Arial");
+        operation.setFontSize(14.0);
+        operation.setBold(true);
+        operation.setItalic(true);
+        operation.setFontColor("#112233");
+        operation.setHorizontalAlignment("CENTER");
+        operation.setVerticalAlignment("TOP");
+        operation.setWrapText(true);
+        operation.setFillColor("FFEEDD");
+        operation.setNumberFormat("0.00");
+        operation.setBorderStyle("THIN");
+        FormatXlsxCellsDTO request = new FormatXlsxCellsDTO();
+        request.setInstruction("设置格式");
+        request.setOperations(List.of(operation));
+
+        service.formatCells(USER_ID, FILE_ID, SOURCE_VERSION, request);
+
+        try (XSSFWorkbook workbook = new XSSFWorkbook(new ByteArrayInputStream(storedBytes()))) {
+            var row = workbook.getSheet("数据").getRow(0);
+            assertEquals(12.5, row.getCell(0).getNumericCellValue());
+            assertEquals("文本", row.getCell(1).getStringCellValue());
+            var style = row.getCell(0).getCellStyle();
+            var font = workbook.getFontAt(style.getFontIndex());
+            assertEquals("Arial", font.getFontName());
+            assertEquals(14.0, font.getFontHeightInPoints());
+            assertTrue(font.getBold());
+            assertTrue(font.getItalic());
+            assertEquals(HorizontalAlignment.CENTER, style.getAlignment());
+            assertEquals(VerticalAlignment.TOP, style.getVerticalAlignment());
+            assertTrue(style.getWrapText());
+            assertEquals(FillPatternType.SOLID_FOREGROUND, style.getFillPattern());
+            assertEquals("0.00", style.getDataFormatString());
+            assertEquals(BorderStyle.THIN, style.getBorderTop());
+            assertEquals(style.getIndex(), row.getCell(1).getCellStyle().getIndex());
+        }
+    }
+
     private void prepareEdit(byte[] source) {
         when(versionService.downloadVersion(USER_ID, FILE_ID, SOURCE_VERSION))
                 .thenReturn(download(source));
@@ -449,6 +642,50 @@ class XlsxDocumentServiceImplTest {
         operation.setSheetName("数据");
         operation.setStart(start);
         operation.setCount(count);
+        return operation;
+    }
+
+    private static EditXlsxSheetsDTO sheetRequest(EditXlsxSheetsDTO.Operation... operations) {
+        EditXlsxSheetsDTO request = new EditXlsxSheetsDTO();
+        request.setInstruction("调整工作表");
+        request.setOperations(List.of(operations));
+        return request;
+    }
+
+    private static EditXlsxSheetsDTO.Operation sheetOperation(String type, String sheetName,
+                                                               String newName, Integer position) {
+        EditXlsxSheetsDTO.Operation operation = new EditXlsxSheetsDTO.Operation();
+        operation.setType(type);
+        operation.setSheetName(sheetName);
+        operation.setNewName(newName);
+        operation.setPosition(position);
+        return operation;
+    }
+
+    private static EditXlsxDataDTO dataRequest(EditXlsxDataDTO.Operation... operations) {
+        EditXlsxDataDTO request = new EditXlsxDataDTO();
+        request.setInstruction("调整数据");
+        request.setOperations(List.of(operations));
+        return request;
+    }
+
+    private static EditXlsxDataDTO.Operation sortOperation(String range, String keyColumn,
+                                                           String direction, boolean hasHeader) {
+        EditXlsxDataDTO.Operation operation = new EditXlsxDataDTO.Operation();
+        operation.setType("SORT_RANGE");
+        operation.setSheetName("数据");
+        operation.setRange(range);
+        operation.setKeyColumn(keyColumn);
+        operation.setDirection(direction);
+        operation.setHasHeader(hasHeader);
+        return operation;
+    }
+
+    private static EditXlsxDataDTO.Operation filterOperation(String type, String range) {
+        EditXlsxDataDTO.Operation operation = new EditXlsxDataDTO.Operation();
+        operation.setType(type);
+        operation.setSheetName("数据");
+        operation.setRange(range);
         return operation;
     }
 

@@ -135,6 +135,9 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | XLSX | GET | `/file/{fileId}/versions/{versionNo}/xlsx/range` | 是 | 读取指定矩形区域 |
 | XLSX | POST | `/file/{fileId}/versions/{versionNo}/xlsx/cell-edits` | 是 | 编辑单元格值或公式并新建版本 |
 | XLSX | POST | `/file/{fileId}/versions/{versionNo}/xlsx/structure-edits` | 是 | 插入或删除行列并新建版本 |
+| XLSX | POST | `/file/{fileId}/versions/{versionNo}/xlsx/sheet-edits` | 是 | 新增、重命名或删除工作表并新建版本 |
+| XLSX | POST | `/file/{fileId}/versions/{versionNo}/xlsx/data-edits` | 是 | 排序区域或设置、清除自动筛选并新建版本 |
+| XLSX | POST | `/file/{fileId}/versions/{versionNo}/xlsx/formats` | 是 | 设置单元格区域基础格式并新建版本 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/paragraph-text` | 是 | 替换段落文本 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/paragraph-edits` | 是 | 插入或删除段落 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/table-edits` | 是 | 编辑表格 |
@@ -643,7 +646,7 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 - 成功后以路径中的 `versionNo` 作为并发期望版本，创建新的 `MANUAL_EDIT` 版本，原版本不变；返回新 [Version](#64-version)。
 `SET_RANGE` 中每个值的结构为 `{"valueType":"STRING","value":"示例"}`。`valueType` 支持 `STRING`、`NUMBER`、`BOOLEAN`、`DATE`、`FORMULA` 和 `BLANK`；`BLANK` 必须不传 `value`。单次请求按实际影响的单元格数计入 500 个默认上限，同一目标不能同时出现在单元格操作和区域操作中。
 
-当前接口仍不支持工作表增删改名、排序筛选、格式编辑或图表编辑。
+当前接口仍不支持图表编辑。
 
 ### 3.15 插入或删除 XLSX 行列
 
@@ -664,6 +667,95 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 - 插入行会继承相邻行的高度、行样式和已有单元格样式；插入列继承相邻列的宽度、隐藏状态和默认样式。未修改的内容和样式随行列移动。
 - Apache POI 会调整其支持的公式引用，工作簿标记为打开时重算。删除被公式引用的行列可能产生 `#REF!`，接口不会在服务端执行公式。
 - 操作不能超出已有数据末尾，也不能切开合并区域；完整删除覆盖的合并区域会一并删除。受保护工作表、待移动区域中的数组公式，以及包含正式 Excel 表对象的工作表暂不支持行列增删。
+- 成功后创建新的 `MANUAL_EDIT` 版本，源版本保持不变。
+
+### 3.16 新增、重命名或删除 XLSX 工作表
+
+`POST /file/{fileId}/versions/{versionNo}/xlsx/sheet-edits`
+
+```json
+{
+  "instruction": "整理工作表",
+  "operations": [
+    {"type": "CREATE", "sheetName": "汇总", "position": 1},
+    {"type": "RENAME", "sheetName": "Sheet1", "newName": "原始数据"},
+    {"type": "DELETE", "sheetName": "临时数据"}
+  ]
+}
+```
+
+- `CREATE` 使用 `sheetName` 作为新名称；`position` 可选且从 1 开始，不传时追加到末尾。
+- `RENAME` 必须提供现有 `sheetName` 和 `newName`；`DELETE` 只提供现有 `sheetName`。工作表名称必须符合 Excel 规则且不能重复。
+- 多个操作按数组顺序执行，后续操作看到前面操作产生的结果。工作簿至少保留一个工作表；删除仍被公式引用的工作表可能使公式出现 `#REF!`。
+- 单次最多 50 个操作。成功后创建新的 `MANUAL_EDIT` 版本，源版本保持不变。
+
+### 3.17 XLSX 区域排序与自动筛选
+
+`POST /file/{fileId}/versions/{versionNo}/xlsx/data-edits`
+
+```json
+{
+  "instruction": "按金额从高到低排列并启用筛选",
+  "operations": [
+    {
+      "type": "SORT_RANGE",
+      "sheetName": "数据",
+      "range": "A1:D100",
+      "keyColumn": "D",
+      "direction": "DESC",
+      "hasHeader": true
+    },
+    {
+      "type": "SET_AUTO_FILTER",
+      "sheetName": "数据",
+      "range": "A1:D100"
+    }
+  ]
+}
+```
+
+| 操作 | 必须字段 | 说明 |
+| --- | --- | --- |
+| `SORT_RANGE` | `sheetName`、`range`、`keyColumn`、`direction`、`hasHeader` | 按区域内的绝对列排序；`direction` 为 `ASC` 或 `DESC` |
+| `SET_AUTO_FILTER` | `sheetName`、`range` | 设置 Excel 自动筛选下拉区域，不在服务端执行筛选条件 |
+| `CLEAR_AUTO_FILTER` | `sheetName` | 清除该工作表已有的自动筛选定义 |
+
+- 排序会整体移动区域内每一行的值和单元格样式，保持相同键值的原始顺序，空白键始终排在末尾；`hasHeader=true` 时首行不参与排序。
+- 为避免破坏复杂工作簿，排序区域不得与合并区域相交，也不能含公式、数组公式、批注或超链接；包含正式 Excel 表对象或受保护的工作表不支持这些数据操作。
+- 单个排序区域默认最多 10000 个单元格，由 `res.storage.xlsx.max-sortable-cells` 控制；单次最多 20 个数据操作。
+- 成功后创建新的 `MANUAL_EDIT` 版本，源版本保持不变。
+
+### 3.18 设置 XLSX 基础格式
+
+`POST /file/{fileId}/versions/{versionNo}/xlsx/formats`
+
+```json
+{
+  "instruction": "设置表头格式",
+  "operations": [
+    {
+      "sheetName": "数据",
+      "range": "A1:D1",
+      "fontName": "微软雅黑",
+      "fontSize": 12,
+      "bold": true,
+      "fontColor": "#FFFFFF",
+      "horizontalAlignment": "CENTER",
+      "verticalAlignment": "CENTER",
+      "wrapText": true,
+      "fillColor": "4472C4",
+      "numberFormat": "General",
+      "borderStyle": "THIN"
+    }
+  ]
+}
+```
+
+- `range` 支持单个地址 `A1` 或矩形区域 `A1:D10`。每个操作至少提供一个格式字段；未提供的格式沿用单元格原样，单元格值不变。
+- 支持字体名称、字号（1～409）、粗体、斜体、字体 RGB 色，水平/垂直对齐、自动换行、填充 RGB 色、数字格式，以及四边相同的基础边框。
+- `horizontalAlignment` 支持 `GENERAL`、`LEFT`、`CENTER`、`RIGHT`、`FILL`、`JUSTIFY`、`CENTER_SELECTION`、`DISTRIBUTED`；`verticalAlignment` 支持 `TOP`、`CENTER`、`BOTTOM`、`JUSTIFY`、`DISTRIBUTED`。
+- `borderStyle` 支持 `NONE`、`THIN`、`MEDIUM`、`DASHED`、`DOTTED`、`THICK`、`DOUBLE`。颜色接受带或不带 `#` 的 6 位 RGB。
+- 单次最多 100 个格式操作，实际影响单元格总数默认不能超过 500；格式区域不能只覆盖合并区域的一部分，受保护工作表不支持格式编辑。
 - 成功后创建新的 `MANUAL_EDIT` 版本，源版本保持不变。
 
 ## 4. DOCX 生成与编辑

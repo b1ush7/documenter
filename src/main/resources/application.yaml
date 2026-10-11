@@ -69,6 +69,7 @@ res:
       max-read-cells: ${XLSX_MAX_READ_CELLS:100000}
       max-edit-operations: ${XLSX_MAX_EDIT_OPERATIONS:500}
       max-structural-units: ${XLSX_MAX_STRUCTURAL_UNITS:1000}
+        max-sortable-cells: ${XLSX_MAX_SORTABLE_CELLS:10000}
   # 处理任务（TODO 3.4）
   task:
     # 有界队列 + CallerRuns 拒绝策略：队列满时由提交线程执行，形成背压而不是丢任务
