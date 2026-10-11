@@ -12,11 +12,13 @@ import com.documenter.dto.RenameFileDTO;
 import com.documenter.service.DocumentVersionService;
 import com.documenter.service.DocxDocumentService;
 import com.documenter.service.FileService;
+import com.documenter.service.PdfDocumentService;
 import com.documenter.util.SecurityUtil;
 import com.documenter.vo.FileAssetVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.PageResult;
+import com.documenter.vo.PdfContentVO;
 import com.documenter.vo.VersionVO;
 import jakarta.validation.Valid;
 import org.springframework.core.io.Resource;
@@ -52,12 +54,15 @@ public class FileController {
     private final FileService fileService;
     private final DocumentVersionService versionService;
     private final DocxDocumentService docxDocumentService;
+    private final PdfDocumentService pdfDocumentService;
 
     public FileController(FileService fileService, DocumentVersionService versionService,
-                          DocxDocumentService docxDocumentService) {
+                          DocxDocumentService docxDocumentService,
+                          PdfDocumentService pdfDocumentService) {
         this.fileService = fileService;
         this.versionService = versionService;
         this.docxDocumentService = docxDocumentService;
+        this.pdfDocumentService = pdfDocumentService;
     }
 
     // ---------------------------------------------------------------- 文件
@@ -137,6 +142,14 @@ public class FileController {
     public ApiResponse<DocxStructureVO> readDocxStructure(@PathVariable Long fileId,
                                                           @PathVariable Integer versionNo) {
         return ApiResponse.success(docxDocumentService.readStructure(
+                SecurityUtil.requireUserId(), fileId, versionNo));
+    }
+
+    /** 提取 PDF 原生文本并标记需要 OCR 的扫描页，不执行 OCR。 */
+    @GetMapping("/{fileId}/versions/{versionNo}/pdf/content")
+    public ApiResponse<PdfContentVO> readPdfContent(@PathVariable Long fileId,
+                                                    @PathVariable Integer versionNo) {
+        return ApiResponse.success(pdfDocumentService.readContent(
                 SecurityUtil.requireUserId(), fileId, versionNo));
     }
 

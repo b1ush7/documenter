@@ -19,6 +19,7 @@ import com.documenter.vo.AdminUserVO;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.PageResult;
+import com.documenter.vo.PdfContentVO;
 import com.documenter.vo.VersionVO;
 import jakarta.validation.Valid;
 import org.springframework.core.io.Resource;
@@ -140,6 +141,12 @@ public class AdminController {
     public ApiResponse<DocxStructureVO> readDocxStructure(@PathVariable Long fileId,
                                                           @PathVariable Integer versionNo) {
         return ApiResponse.success(adminResourceService.readDocxStructure(fileId, versionNo));
+    }
+
+    @GetMapping("/files/{fileId}/versions/{versionNo}/pdf/content")
+    public ApiResponse<PdfContentVO> readPdfContent(@PathVariable Long fileId,
+                                                    @PathVariable Integer versionNo) {
+        return ApiResponse.success(adminResourceService.readPdfContent(fileId, versionNo));
     }
 
     @GetMapping("/tasks")

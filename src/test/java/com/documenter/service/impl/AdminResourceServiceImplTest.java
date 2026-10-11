@@ -11,10 +11,12 @@ import com.documenter.service.AuditService;
 import com.documenter.service.DocumentVersionService;
 import com.documenter.service.DocxDocumentService;
 import com.documenter.service.FileService;
+import com.documenter.service.PdfDocumentService;
 import com.documenter.service.TaskService;
 import com.documenter.vo.AdminOverviewVO;
 import com.documenter.vo.AdminUserUsageVO;
 import com.documenter.vo.FileDownload;
+import com.documenter.vo.PdfContentVO;
 import com.documenter.vo.TaskDetailVO;
 import com.documenter.vo.TaskVO;
 import org.junit.jupiter.api.Test;
@@ -37,11 +39,12 @@ class AdminResourceServiceImplTest {
     private final FileService fileService = mock(FileService.class);
     private final DocumentVersionService versionService = mock(DocumentVersionService.class);
     private final DocxDocumentService docxDocumentService = mock(DocxDocumentService.class);
+    private final PdfDocumentService pdfDocumentService = mock(PdfDocumentService.class);
     private final TaskService taskService = mock(TaskService.class);
     private final AuditService auditService = mock(AuditService.class);
     private final AdminResourceServiceImpl service = new AdminResourceServiceImpl(
             fileAssetMapper, taskMapper, statisticsMapper, fileService, versionService,
-            docxDocumentService, taskService, auditService);
+            docxDocumentService, pdfDocumentService, taskService, auditService);
 
     @Test
     void overviewReturnsAggregatesAndWritesAudit() {
@@ -149,6 +152,21 @@ class AdminResourceServiceImplTest {
         verify(taskService).detail(8L, 20L);
         verify(auditService).success(AuditAction.ADMIN_TASK_VIEW, "TASK", 20L,
                 "查看任务与执行步骤");
+    }
+
+    @Test
+    void pdfContentDelegatesWithActualOwnerAndWritesAudit() {
+        FileAsset asset = file(10L, 7L);
+        PdfContentVO expected = new PdfContentVO(10L, 1, "TEXT", 1,
+                1, 0, 0, 0, 4, false, List.of());
+        when(fileAssetMapper.selectById(10L)).thenReturn(asset);
+        when(pdfDocumentService.readContent(7L, 10L, 1)).thenReturn(expected);
+
+        var result = service.readPdfContent(10L, 1);
+
+        assertSame(expected, result);
+        verify(auditService).success(AuditAction.ADMIN_FILE_VIEW, "FILE", 10L,
+                "读取 PDF 版本 1 的原生文本");
     }
 
     @Test

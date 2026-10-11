@@ -129,6 +129,7 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | 版本 | GET | `/file/{fileId}/versions/{versionNo}` | 是 | 版本详情 |
 | 版本 | GET | `/file/{fileId}/versions/{versionNo}/download` | 是 | 下载指定版本 |
 | DOCX | GET | `/file/{fileId}/versions/{versionNo}/structure` | 是 | 读取 DOCX 结构 |
+| PDF | GET | `/file/{fileId}/versions/{versionNo}/pdf/content` | 是 | 提取 PDF 原生文本并检测页面类型 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/paragraph-text` | 是 | 替换段落文本 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/paragraph-edits` | 是 | 插入或删除段落 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/table-edits` | 是 | 编辑表格 |
@@ -156,6 +157,7 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}` | 管理员 | 任意用户文件版本详情 |
 | 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/download` | 管理员 | 下载任意用户指定版本 |
 | 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/structure` | 管理员 | 读取任意用户 DOCX 结构 |
+| 管理员 | GET | `/admin/files/{fileId}/versions/{versionNo}/pdf/content` | 管理员 | 读取任意用户 PDF 原生文本 |
 | 管理员 | GET | `/admin/tasks` | 管理员 | 跨用户任务分页列表 |
 | 管理员 | GET | `/admin/tasks/{taskId}` | 管理员 | 任意用户任务与步骤详情 |
 | 管理员 | POST | `/admin/tasks/{taskId}/cancel` | 管理员 | 取消任意用户任务 |
@@ -491,6 +493,19 @@ POST /file/10/versions/2/restore?expectVersion=5
 ```
 
 恢复不会覆盖或删除历史，而是复制目标版本内容，创建一个新的 `RESTORE` 版本。成功时 `data` 为新 [Version](#64-version)。若 `expectVersion` 与当前版本不一致，返回业务码 `409`。
+
+### 3.11 提取 PDF 原生文本与页面类型
+
+`GET /file/{fileId}/versions/{versionNo}/pdf/content`
+
+服务端读取一个明确 PDF 版本，返回 `PdfContent`。页面类型为：
+
+- `TEXT`：存在原生文字且未检测到内嵌图片；
+- `SCANNED`：没有原生文字但存在内嵌图片，需要后续 OCR；
+- `MIXED`：同一页同时存在原生文字和内嵌图片；
+- `EMPTY`：没有检测到原生文字或内嵌图片。
+
+这是基于 PDF 内容对象的启发式分类，不执行 OCR，也不保证能识别只使用矢量路径绘制的文字或扫描内容。默认每页最多返回 100,000 个 Unicode 字符，整份文档最多返回 2,000,000 个；超出时通过 `textTruncated` 明确标记，限制可由部署环境变量调整。
 
 ## 4. DOCX 生成与编辑
 
@@ -978,6 +993,10 @@ PENDING -> RUNNING -> SUCCEEDED
 
 包含 `userId`、`username`、`role`、`status`、`balance`，以及与 `AdminOverview` 同含义的文件、存储和任务统计字段。该结构只统计资源元数据，不包含文件正文、内部存储路径或密码哈希。
 
+### 6.11 PdfContent
+
+顶层字段包括 `fileId`、`versionNo`、`documentType`、`totalPages`、各页面类型数量、实际返回的 `extractedTextChars`、`textTruncated` 和 `pages`。每个页面包含 `pageNo`、`type`、`text`、截断前的 `textCharCount`、`imageCount` 和 `textTruncated`。
+
 ## 7. 管理员
 
 所有 `/admin/**` 接口都必须携带有效 Access Token，并要求当前账号角色为 `ADMIN`。普通用户访问时返回 HTTP `403`。系统不提供匿名管理员注册或初始化接口；首个管理员需要通过受控部署流程或数据库设置。
@@ -1039,12 +1058,13 @@ PENDING -> RUNNING -> SUCCEEDED
 
 管理员可访问任意用户文件，但接口始终通过内部文件 ID 定位内容，不接受磁盘路径，也不返回存储标识。查看详情和下载会写入审计日志；已删除文件不能通过当前内容下载接口下载。
 
-### 7.7 文件版本与 DOCX 结构
+### 7.7 文件版本与文档结构
 
 - `GET /admin/files/{fileId}/versions`：返回版本列表。
 - `GET /admin/files/{fileId}/versions/{versionNo}`：返回指定版本详情。
 - `GET /admin/files/{fileId}/versions/{versionNo}/download`：下载指定版本。
 - `GET /admin/files/{fileId}/versions/{versionNo}/structure`：读取指定 DOCX 版本的段落、表格和图片结构。
+- `GET /admin/files/{fileId}/versions/{versionNo}/pdf/content`：读取指定 PDF 版本的原生文本和页面类型。
 
 这些接口使用文件真实所有者完成版本定位，不依赖客户端传入用户 ID。查看或下载行为会写入审计日志。
 
@@ -1086,3 +1106,4 @@ PENDING -> RUNNING -> SUCCEEDED
 - DOCX 块 ID 不是跨版本永久 ID，每次成功编辑后应重新读取结构。
 - 验证码开发配置使用模拟发送，不能直接视为生产短信能力。
 - 管理员可跨用户读取、下载、重命名或软删除文件，并查看、取消或重试任务；尚未提供跨用户 DOCX 内容编辑和版本恢复入口，以免在当前版本模型中错误记录实际操作者。
+- PDF 页面分类是本地启发式检测；扫描页尚未接入 OCR，矢量图形中的文字也不会作为原生文本返回。

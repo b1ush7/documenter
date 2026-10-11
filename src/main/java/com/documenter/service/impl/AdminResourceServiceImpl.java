@@ -15,6 +15,7 @@ import com.documenter.service.AuditService;
 import com.documenter.service.DocumentVersionService;
 import com.documenter.service.DocxDocumentService;
 import com.documenter.service.FileService;
+import com.documenter.service.PdfDocumentService;
 import com.documenter.service.TaskService;
 import com.documenter.vo.AdminFileVO;
 import com.documenter.vo.AdminOverviewVO;
@@ -24,6 +25,7 @@ import com.documenter.vo.AdminUserUsageVO;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.PageResult;
+import com.documenter.vo.PdfContentVO;
 import com.documenter.vo.TaskDetailVO;
 import com.documenter.vo.TaskVO;
 import com.documenter.vo.VersionVO;
@@ -43,6 +45,7 @@ public class AdminResourceServiceImpl implements AdminResourceService {
     private final FileService fileService;
     private final DocumentVersionService versionService;
     private final DocxDocumentService docxDocumentService;
+    private final PdfDocumentService pdfDocumentService;
     private final TaskService taskService;
     private final AuditService auditService;
 
@@ -52,6 +55,7 @@ public class AdminResourceServiceImpl implements AdminResourceService {
                                     FileService fileService,
                                     DocumentVersionService versionService,
                                     DocxDocumentService docxDocumentService,
+                                    PdfDocumentService pdfDocumentService,
                                     TaskService taskService,
                                     AuditService auditService) {
         this.fileAssetMapper = fileAssetMapper;
@@ -60,6 +64,7 @@ public class AdminResourceServiceImpl implements AdminResourceService {
         this.fileService = fileService;
         this.versionService = versionService;
         this.docxDocumentService = docxDocumentService;
+        this.pdfDocumentService = pdfDocumentService;
         this.taskService = taskService;
         this.auditService = auditService;
     }
@@ -181,6 +186,15 @@ public class AdminResourceServiceImpl implements AdminResourceService {
         auditService.success(AuditAction.ADMIN_FILE_VIEW, "FILE", fileId,
                 "读取 DOCX 版本 " + versionNo + " 的结构");
         return structure;
+    }
+
+    @Override
+    public PdfContentVO readPdfContent(Long fileId, Integer versionNo) {
+        FileAsset asset = requireFile(fileId);
+        PdfContentVO content = pdfDocumentService.readContent(asset.getUserId(), fileId, versionNo);
+        auditService.success(AuditAction.ADMIN_FILE_VIEW, "FILE", fileId,
+                "读取 PDF 版本 " + versionNo + " 的原生文本");
+        return content;
     }
 
     @Override

@@ -10,6 +10,7 @@ import com.documenter.vo.AdminUserUsageVO;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.PageResult;
+import com.documenter.vo.PdfContentVO;
 import com.documenter.vo.VersionVO;
 
 import java.util.List;
@@ -38,6 +39,8 @@ public interface AdminResourceService {
     FileDownload downloadVersion(Long fileId, Integer versionNo);
 
     DocxStructureVO readDocxStructure(Long fileId, Integer versionNo);
+
+    PdfContentVO readPdfContent(Long fileId, Integer versionNo);
 
     PageResult<AdminTaskVO> listTasks(Long userId, TaskQueryDTO query);
 

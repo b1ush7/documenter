@@ -24,6 +24,9 @@ public class StorageProperties {
     /** 上传限制。 */
     private Upload upload = new Upload();
 
+    /** PDF 原生文本提取限制。 */
+    private Pdf pdf = new Pdf();
+
     @Getter
     @Setter
     public static class Local {
@@ -69,5 +72,15 @@ public class StorageProperties {
 
         /** DOCX/XLSX 解压总大小与上传文件大小的最大比值。 */
         private int maxArchiveCompressionRatio = 200;
+    }
+
+    @Getter
+    @Setter
+    public static class Pdf {
+        /** 单页最多返回的 Unicode 字符数，超出时截断并显式标记。 */
+        private int maxExtractedCharsPerPage = 100_000;
+
+        /** 单个 PDF 接口响应最多返回的 Unicode 字符数。 */
+        private int maxExtractedCharsTotal = 2_000_000;
     }
 }
