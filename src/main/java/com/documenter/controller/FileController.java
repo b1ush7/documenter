@@ -5,6 +5,7 @@ import com.documenter.dto.FileQueryDTO;
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.EditDocxTableDTO;
 import com.documenter.dto.EditXlsxCellsDTO;
+import com.documenter.dto.EditImageDTO;
 import com.documenter.dto.EditXlsxDataDTO;
 import com.documenter.dto.EditXlsxSheetsDTO;
 import com.documenter.dto.EditXlsxStructureDTO;
@@ -19,6 +20,7 @@ import com.documenter.service.DocxDocumentService;
 import com.documenter.service.FileService;
 import com.documenter.service.PdfDocumentService;
 import com.documenter.service.XlsxDocumentService;
+import com.documenter.service.ImageDocumentService;
 import com.documenter.util.SecurityUtil;
 import com.documenter.vo.FileAssetVO;
 import com.documenter.vo.FileDownload;
@@ -66,16 +68,19 @@ public class FileController {
     private final DocxDocumentService docxDocumentService;
     private final PdfDocumentService pdfDocumentService;
     private final XlsxDocumentService xlsxDocumentService;
+    private final ImageDocumentService imageDocumentService;
 
     public FileController(FileService fileService, DocumentVersionService versionService,
                           DocxDocumentService docxDocumentService,
                           PdfDocumentService pdfDocumentService,
-                          XlsxDocumentService xlsxDocumentService) {
+                          XlsxDocumentService xlsxDocumentService,
+                          ImageDocumentService imageDocumentService) {
         this.fileService = fileService;
         this.versionService = versionService;
         this.docxDocumentService = docxDocumentService;
         this.pdfDocumentService = pdfDocumentService;
         this.xlsxDocumentService = xlsxDocumentService;
+        this.imageDocumentService = imageDocumentService;
     }
 
     // ---------------------------------------------------------------- 文件
@@ -246,6 +251,15 @@ public class FileController {
                                                   @PathVariable Integer versionNo,
                                                   @Valid @RequestBody FormatXlsxCellsDTO request) {
         return ApiResponse.success("已生成新版本", xlsxDocumentService.formatCells(
+                SecurityUtil.requireUserId(), fileId, versionNo, request));
+    }
+
+    /** 编辑 PNG/JPEG 像素或转换格式，保存为带独立格式信息的新版本。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/image-edits")
+    public ApiResponse<VersionVO> editImage(@PathVariable Long fileId,
+                                           @PathVariable Integer versionNo,
+                                           @Valid @RequestBody EditImageDTO request) {
+        return ApiResponse.success("已生成新版本", imageDocumentService.edit(
                 SecurityUtil.requireUserId(), fileId, versionNo, request));
     }
 

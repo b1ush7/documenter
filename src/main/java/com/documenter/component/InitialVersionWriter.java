@@ -55,6 +55,8 @@ public class InitialVersionWriter {
         // 原始上传没有来源版本
         version.setParentVersion(null);
         version.setStorageKey(asset.getStorageKey());
+        version.setContentType(asset.getContentType());
+        version.setExtension(asset.getExtension());
         version.setSizeBytes(asset.getSizeBytes());
         version.setSha256(asset.getSha256());
         version.setInstruction(instruction);

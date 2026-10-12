@@ -15,6 +15,7 @@ import com.documenter.vo.FileDownload;
 import com.documenter.vo.VersionVO;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.BeanUtils;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.io.InputStream;
@@ -81,10 +82,18 @@ public class DocumentVersionServiceImpl implements DocumentVersionService, Versi
                     asset.getId(), version.getVersionNo(), version.getStorageKey());
             throw new BusinessException(500, "该版本的内容已丢失，请联系管理员");
         }
-        InputStream input = fileStorage.read(version.getStorageKey());
+        FileAsset snapshot = new FileAsset();
+        BeanUtils.copyProperties(asset, snapshot);
+        snapshot.setStorageKey(version.getStorageKey());
+        snapshot.setSizeBytes(version.getSizeBytes());
+        snapshot.setSha256(version.getSha256());
+        snapshot.setContentType(version.getContentType());
+        snapshot.setExtension(version.getExtension());
         // 下载名带上版本号，避免用户下载多个版本后无法区分
-        String fileName = withVersionSuffix(asset.getDisplayName(), version.getVersionNo());
-        return FileDownload.of(asset, input, version.getSizeBytes(), fileName);
+        String fileName = withVersionSuffix(FileDownload.withExtension(asset.getDisplayName(),
+                version.getExtension()), version.getVersionNo());
+        InputStream input = fileStorage.read(version.getStorageKey());
+        return FileDownload.of(snapshot, input, version.getSizeBytes(), fileName);
     }
 
     // ------------------------------------------------------------------ 追加
@@ -107,6 +116,13 @@ public class DocumentVersionServiceImpl implements DocumentVersionService, Versi
         }
         if (!STATUS_READY.equals(asset.getStatus())) {
             throw new BusinessException(400, "文件已删除，无法新增版本");
+        }
+        String contentType = content.contentType() == null ? asset.getContentType() : content.contentType();
+        String extension = content.extension() == null ? asset.getExtension() : content.extension();
+        if ((content.contentType() == null) != (content.extension() == null)
+                || contentType == null || contentType.isBlank() || contentType.length() > 128
+                || extension == null || !extension.matches("[a-z0-9]{1,16}")) {
+            throw new BusinessException(400, "版本格式信息无效");
         }
 
         // 原子分配版本号：期望版本不符时影响行数为 0，说明期间已有其他任务改了版本
@@ -131,12 +147,28 @@ public class DocumentVersionServiceImpl implements DocumentVersionService, Versi
         // parentVersion 表达版本链：一个版本的来源是它被创建时的当前版本
         version.setParentVersion(expectVersion != null ? expectVersion : newVersionNo - 1);
         version.setStorageKey(content.storageKey());
+        version.setContentType(contentType);
+        version.setExtension(extension);
         version.setSizeBytes(content.sizeBytes());
         version.setSha256(content.sha256());
         version.setInstruction(instruction);
         version.setResultSummary(summary);
         version.setChangeType(changeType.name());
         versionMapper.insert(version);
+
+        FileAsset update = new FileAsset();
+        update.setId(fileId);
+        update.setStorageKey(content.storageKey());
+        update.setSizeBytes(content.sizeBytes());
+        update.setSha256(content.sha256());
+        update.setContentType(contentType);
+        update.setExtension(extension);
+        if (!extension.equals(asset.getExtension())) {
+            update.setDisplayName(FileDownload.withExtension(asset.getDisplayName(), extension));
+        }
+        if (fileAssetMapper.updateById(update) != 1) {
+            throw new BusinessException(500, "同步当前版本内容失败");
+        }
 
         log.info("新增文档版本, fileId={}, versionNo={}, changeType={}, parentVersion={}",
                 fileId, newVersionNo, changeType, version.getParentVersion());
@@ -154,7 +186,8 @@ public class DocumentVersionServiceImpl implements DocumentVersionService, Versi
         // 恢复不修改历史，而是把目标版本的内容复制成一个新版本，
         // 这样「恢复」本身也能被再次撤销，历史链条保持完整
         DocumentVersion restored = appendVersion(asset.getId(), userId,
-                new VersionContent(source.getStorageKey(), source.getSizeBytes(), source.getSha256()),
+                new VersionContent(source.getStorageKey(), source.getSizeBytes(), source.getSha256(),
+                        source.getContentType(), source.getExtension()),
                 ChangeType.RESTORE,
                 "恢复至版本 " + versionNo,
                 "由版本 " + versionNo + " 恢复",

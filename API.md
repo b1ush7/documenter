@@ -5,7 +5,7 @@
 - 默认服务地址：`http://localhost:8080`
 - 默认数据格式：`application/json; charset=UTF-8`
 - 时间格式：ISO-8601 本地时间，例如 `2026-10-11T14:30:00`
-- 文档生成日期：2026-10-11
+- 最近更新日期：2026-10-12
 
 ## 1. 通用约定
 
@@ -123,11 +123,12 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | 文件 | GET | `/file/{fileId}` | 是 | 文件详情 |
 | 文件 | PUT | `/file/{fileId}/name` | 是 | 文件重命名 |
 | 文件 | DELETE | `/file/{fileId}` | 是 | 软删除文件 |
-| 文件 | GET | `/file/{fileId}/download` | 是 | 下载文件记录对应内容 |
+| 文件 | GET | `/file/{fileId}/download` | 是 | 下载当前最新版本内容 |
 | DOCX | POST | `/file/docx/generate` | 是 | 按结构生成 DOCX |
 | 版本 | GET | `/file/{fileId}/versions` | 是 | 版本列表 |
 | 版本 | GET | `/file/{fileId}/versions/{versionNo}` | 是 | 版本详情 |
 | 版本 | GET | `/file/{fileId}/versions/{versionNo}/download` | 是 | 下载指定版本 |
+| 图片 | POST | `/file/{fileId}/versions/{versionNo}/image-edits` | 是 | 本地编辑 PNG/JPEG 并新建版本 |
 | DOCX | GET | `/file/{fileId}/versions/{versionNo}/structure` | 是 | 读取 DOCX 结构 |
 | PDF | GET | `/file/{fileId}/versions/{versionNo}/pdf/content` | 是 | 提取 PDF 原生文本并检测页面类型 |
 | PDF | GET | `/file/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview` | 是 | 渲染 PDF 指定页 PNG 预览 |
@@ -469,7 +470,7 @@ Content-Type: <文件实际 MIME 类型>
 Content-Length: <字节数>
 ```
 
-当前实现从文件主记录保存的内容位置下载。需要稳定获取某个明确版本时，应使用 `/file/{fileId}/versions/{versionNo}/download`。
+文件主记录在新增或恢复版本时同步为最新版本，下载的内容、类型、长度和扩展名对应当前最新版本。需要稳定获取某个明确版本时，应使用 `/file/{fileId}/versions/{versionNo}/download`。即使展示名经过重命名，下载名的后缀仍使用实际格式。
 
 ### 3.7 版本列表
 
@@ -487,7 +488,7 @@ Content-Length: <字节数>
 
 `GET /file/{fileId}/versions/{versionNo}/download`
 
-直接返回二进制文件。下载文件名自动带版本后缀，例如 `report.docx` 的版本 2 下载为 `report-v2.docx`。
+直接返回二进制文件，使用指定版本独立保存的 MIME 类型、扩展名和大小，不沿用当前版本格式。下载文件名自动带版本后缀，例如 `report.docx` 的版本 2 下载为 `report-v2.docx`；当前图片已转为 JPEG 时，历史 PNG 仍下载为 `photo-v1.png`。
 
 ### 3.10 恢复历史版本
 
@@ -505,7 +506,7 @@ Content-Length: <字节数>
 POST /file/10/versions/2/restore?expectVersion=5
 ```
 
-恢复不会覆盖或删除历史，而是复制目标版本内容，创建一个新的 `RESTORE` 版本。成功时 `data` 为新 [Version](#64-version)。若 `expectVersion` 与当前版本不一致，返回业务码 `409`。
+恢复不会覆盖或删除历史，而是复用目标版本的内容和格式，创建一个新的 `RESTORE` 版本，并同步当前文件的内容、类型和扩展名。例如从 JPEG 恢复历史 PNG 后，当前下载也恢复为 PNG。成功时 `data` 为新 [Version](#64-version)。若 `expectVersion` 与当前版本不一致，返回业务码 `409`。
 
 ### 3.11 提取 PDF 原生文本与页面类型
 
@@ -826,6 +827,48 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 - 默认计算区域最多 500 个位置，整个工作簿最多 500 个公式、100000 个已创建单元格，分别沿用 `res.storage.xlsx.max-edit-operations` 和 `max-read-cells`；超出限制返回业务码 `413`。这些限制控制数量，不保证任意复杂公式的固定执行耗时。
 - 工作簿或命名公式含外部引用、高风险函数时返回业务码 `400`；当前计算引擎不支持 1904 日期系统，返回业务码 `422` 并提示在办公软件中重算。
 - 本接口仍是只读计算。单元格编辑可通过 `recalculateFormulas=true` 将计算结果写回新版本缓存，其他 XLSX 编辑接口仍只标记为打开时重算；实际办公软件兼容性验收尚未完成。
+
+### 3.20 本地编辑 PNG/JPEG 图片
+
+`POST /file/{fileId}/versions/{versionNo}/image-edits`
+
+只操作当前用户拥有的明确图片版本，使用本地 Java2D/ImageIO，不调用图片模型或云服务。请求示例：
+
+```json
+{
+  "instruction": "裁剪后缩放、顺时针旋转，转为 JPEG",
+  "operations": [
+    {"type": "CROP", "x": 10, "y": 20, "width": 600, "height": 400},
+    {"type": "RESIZE", "width": 300, "height": 200},
+    {"type": "ROTATE", "degrees": 90}
+  ],
+  "outputFormat": "JPEG",
+  "jpegQuality": 0.85
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `instruction` | 可选，最长 2000 字符，仅记录操作说明，不会解析为 AI 指令 |
+| `operations` | 最多 20 个操作，默认空数组，不能为 `null`；按顺序执行 |
+| `outputFormat` | 可选，`PNG` 或 `JPEG`，不填沿用源版本格式 |
+| `jpegQuality` | 可选，0.1～1，仅允许 JPEG 输出，默认 0.9；数值越低通常体积越小，但不保证比源文件小 |
+
+操作字段必须与操作类型相符，不接受其他类型的字段：
+
+- `CROP`：必填 `x`、`y`、`width`、`height`。坐标从左上角 `(0,0)` 开始，以像素计；起点不得为负，宽高必须大于 0，范围不能超出当前图片。
+- `RESIZE`：必填正整数 `width`、`height`，按这两个尺寸缩放，使用双线性插值；不会自动保持宽高比，调用方应自行计算等比尺寸。
+- `ROTATE`：只填 `degrees`，支持顺时针 `90`、`180`、`270` 度。90/270 度会交换宽高。
+
+每个操作的坐标与尺寸以此前操作完成后的图片为准。至少提供一个操作、`outputFormat` 或 `jpegQuality`；仅转换格式或调整 JPEG 质量时可省略 `operations`。
+
+- 源版本仅支持 PNG/JPEG，解码前校验实际格式和尺寸。源图片与每个中间结果默认最多 4000 万像素（`res.storage.upload.max-image-pixels`），源文件及编码后输出默认最多 50 MiB（`max-size-bytes`）；超限返回 `413`。
+- PNG 输出保留透明通道；JPEG 不支持透明，透明区域合成到白色背景。转换为 JPEG 后再转回 PNG 不会恢复丢失的透明度或有损细节。
+- 输出重新编码，不保留 EXIF、ICC、DPI 等元数据，也不按 EXIF 自动纠正方向；坐标基于实际解码像素。尚不支持任意角度旋转、亮度调整、文字添加或模型编辑。
+- 成功时返回新 [Version](#64-version)，包含 `contentType`、`extension`；跨格式为 `CONVERT`，同格式为 `MANUAL_EDIT`。历史版本保留原内容和原格式，当前文件同步到新版本。
+- `versionNo` 同时为源版本和乐观锁期望值；不是最新版本时返回 `409`，不会覆盖最新内容，并清理已经生成的未入库产物。无权访问按 `404` 处理，字段或裁剪范围无效返回 `400`，损坏或格式不符返回 `422`。
+
+已有数据库需要执行 Flyway `V2__version_content_types.sql`：为历史版本回填格式，并把当前文件内容指针同步到最新版本。该迁移随应用启动执行，真实 MariaDB 环境迁移验收仍需完成。
 
 ## 4. DOCX 生成与编辑
 
@@ -1222,10 +1265,10 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 | `id` | long | 文件 ID |
 | `originalName` | string | 初始文件名 |
 | `displayName` | string | 当前展示名 |
-| `contentType` | string | 服务端识别的 MIME 类型 |
-| `extension` | string | 规范化扩展名，不带点 |
-| `sizeBytes` | long | 文件主记录内容大小 |
-| `sha256` | string | 文件主记录内容摘要 |
+| `contentType` | string | 当前最新版本的 MIME 类型 |
+| `extension` | string | 当前最新版本的规范化扩展名，不带点 |
+| `sizeBytes` | long | 当前最新版本内容大小 |
+| `sha256` | string | 当前最新版本内容摘要 |
 | `source` | string | `UPLOAD` 或 `GENERATED` |
 | `status` | string | `READY`、`DELETED` 或 `QUARANTINED` |
 | `latestVersion` | integer | 当前最新版本号 |
@@ -1242,6 +1285,8 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 | `fileId` | long | 所属文件 ID |
 | `versionNo` | integer | 版本号，从 1 开始 |
 | `parentVersion` | integer/null | 来源版本号 |
+| `contentType` | string | 该版本独立保存的 MIME 类型 |
+| `extension` | string | 该版本独立保存的规范化扩展名，不带点 |
 | `sizeBytes` | long | 该版本字节数 |
 | `sha256` | string | 该版本 SHA-256 |
 | `instruction` | string/null | 创建该版本时的操作说明 |

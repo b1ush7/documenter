@@ -31,6 +31,9 @@ public class DocumentVersion implements Serializable {
     /** 来源版本号；原始版本为 null。 */
     private Integer parentVersion;
     private String storageKey;
+    /** 此版本的真实格式，独立于文件当前版本。 */
+    private String contentType;
+    private String extension;
     private Long sizeBytes;
     private String sha256;
     /** 产生该版本的自然语言指令；上传版本为 null。 */
