@@ -16,6 +16,9 @@ public class EditXlsxCellsDTO {
     @Size(max = 2000, message = "编辑说明过长")
     private String instruction;
 
+    /** 完成编辑后重算整个工作簿并写回公式缓存；默认 false。 */
+    private boolean recalculateFormulas;
+
     @Valid
     @NotEmpty(message = "至少需要一个单元格编辑操作")
     @Size(max = 500, message = "单次最多执行 500 个单元格编辑操作")

@@ -815,6 +815,181 @@ class XlsxDocumentServiceImplTest {
         assertTrue(error.getMessage().contains("1904"));
     }
 
+    @Test
+    void savesRecalculatedCachesForExistingDependenciesAndNewFilledFormulas() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            var sheet = workbook.createSheet("数据");
+            var row = sheet.createRow(0);
+            row.createCell(0).setCellValue(3);
+            row.createCell(1).setCellFormula("A1*2");
+            row.createCell(2).setCellFormula("B1+1");
+            row.createCell(3).setCellFormula("IF(A1>5,\"达标\",\"不足\")");
+            row.createCell(4).setCellFormula("A1>5");
+            row.createCell(5).setCellFormula("1/0");
+            row.createCell(6).setCellFormula("DATE(2026,10,12)");
+            var dateStyle = workbook.createCellStyle();
+            dateStyle.setDataFormat(workbook.createDataFormat().getFormat("yyyy-mm-dd"));
+            row.getCell(6).setCellStyle(dateStyle);
+            workbook.createSheet("汇总").createRow(0).createCell(0).setCellFormula("数据!C1+1");
+            workbook.getCreationHelper().createFormulaEvaluator().evaluateAll();
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        prepareEdit(source);
+        var fill = new EditXlsxCellsDTO.Operation();
+        fill.setType("FILL_FORMULA");
+        fill.setSheetName("数据");
+        fill.setRange("B2:B3");
+        fill.setFormula("$A$1*ROW()");
+        var request = request(value("A1", "NUMBER", "10"), fill);
+        request.setRecalculateFormulas(true);
+
+        service.editCells(USER_ID, FILE_ID, SOURCE_VERSION, request);
+
+        byte[] edited = storedBytes();
+        // 不创建计算器，直接读取导出文件的缓存，证明结果确实已落盘。
+        try (XSSFWorkbook workbook = new XSSFWorkbook(new ByteArrayInputStream(edited))) {
+            var sheet = workbook.getSheet("数据");
+            var row = sheet.getRow(0);
+            assertEquals(CellType.FORMULA, row.getCell(1).getCellType());
+            assertEquals("A1*2", row.getCell(1).getCellFormula());
+            assertEquals(CellType.NUMERIC, row.getCell(1).getCachedFormulaResultType());
+            assertEquals(20, row.getCell(1).getNumericCellValue());
+            assertEquals(21, row.getCell(2).getNumericCellValue());
+            assertEquals(CellType.STRING, row.getCell(3).getCachedFormulaResultType());
+            assertEquals("达标", row.getCell(3).getStringCellValue());
+            assertEquals(CellType.BOOLEAN, row.getCell(4).getCachedFormulaResultType());
+            assertTrue(row.getCell(4).getBooleanCellValue());
+            assertEquals(CellType.ERROR, row.getCell(5).getCachedFormulaResultType());
+            assertEquals(org.apache.poi.ss.usermodel.FormulaError.DIV0.getCode(),
+                    row.getCell(5).getErrorCellValue());
+            assertEquals(LocalDate.of(2026, 10, 12),
+                    row.getCell(6).getLocalDateTimeCellValue().toLocalDate());
+            assertEquals("yyyy-mm-dd", row.getCell(6).getCellStyle().getDataFormatString());
+            assertEquals(22, workbook.getSheet("汇总").getRow(0).getCell(0).getNumericCellValue());
+            assertEquals(20, sheet.getRow(1).getCell(1).getNumericCellValue());
+            assertEquals(30, sheet.getRow(2).getCell(1).getNumericCellValue());
+            assertTrue(workbook.getForceFormulaRecalculation());
+        }
+        try (XSSFWorkbook original = new XSSFWorkbook(new ByteArrayInputStream(source))) {
+            assertEquals(6, original.getSheet("数据").getRow(0).getCell(1).getNumericCellValue());
+        }
+        verify(versionWriter).appendVersion(eq(FILE_ID), eq(USER_ID),
+                any(VersionWriter.VersionContent.class), eq(ChangeType.MANUAL_EDIT),
+                eq("更新数据"), eq("编辑 3 个 XLSX 单元格，已重算公式缓存"), eq(SOURCE_VERSION));
+    }
+
+    @Test
+    void unsupportedCacheCalculationDoesNotSavePartialEdits() throws Exception {
+        byte[] source = unsupportedFormulaWorkbook();
+        when(versionService.downloadVersion(USER_ID, FILE_ID, SOURCE_VERSION))
+                .thenReturn(download(source));
+        var request = request(value("B1", "NUMBER", "10"));
+        request.setRecalculateFormulas(true);
+
+        var error = assertThrows(BusinessException.class,
+                () -> service.editCells(USER_ID, FILE_ID, SOURCE_VERSION, request));
+
+        assertEquals(422, error.getCode());
+        assertTrue(error.getMessage().contains("数据!A1"));
+        assertTrue(error.getMessage().contains("未保存"));
+        verify(fileStorage, never()).store(any(byte[].class), any());
+        verify(versionWriter, never()).appendVersion(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void defaultEditingStillAllowsUnsupportedFormulasWithoutRecalculating() throws Exception {
+        prepareEdit(unsupportedFormulaWorkbook());
+
+        service.editCells(USER_ID, FILE_ID, SOURCE_VERSION, request(value("B1", "NUMBER", "10")));
+
+        try (XSSFWorkbook workbook = new XSSFWorkbook(new ByteArrayInputStream(storedBytes()))) {
+            var row = workbook.getSheet("数据").getRow(0);
+            assertEquals("CUBEVALUE(\"connection\",\"member\")", row.getCell(0).getCellFormula());
+            assertEquals(999, row.getCell(0).getNumericCellValue());
+            assertEquals(10, row.getCell(1).getNumericCellValue());
+            assertTrue(workbook.getForceFormulaRecalculation());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"1904", "FORMULAS", "CELLS", "UNSAFE"})
+    void rejectsUncalculableWorkbookBeforeSavingCaches(String limitation) throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            var sheet = workbook.createSheet("数据");
+            sheet.createRow(0).createCell(0).setCellFormula("1+1");
+            switch (limitation) {
+                case "1904" -> workbook.getCTWorkbook().getWorkbookPr().setDate1904(true);
+                case "FORMULAS" -> {
+                    sheet.getRow(0).createCell(2).setCellFormula("A1+1");
+                    properties.getXlsx().setMaxEditOperations(1);
+                }
+                case "CELLS" -> properties.getXlsx().setMaxReadCells(1);
+                case "UNSAFE" -> sheet.getRow(0).getCell(0)
+                        .setCellFormula("HYPERLINK(\"https://example.com\")");
+                default -> throw new IllegalArgumentException(limitation);
+            }
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        when(versionService.downloadVersion(USER_ID, FILE_ID, SOURCE_VERSION))
+                .thenReturn(download(source));
+        var request = request(value("B1", "NUMBER", "10"));
+        request.setRecalculateFormulas(true);
+
+        var error = assertThrows(BusinessException.class,
+                () -> service.editCells(USER_ID, FILE_ID, SOURCE_VERSION, request));
+
+        int expectedCode = switch (limitation) {
+            case "1904" -> 422;
+            case "UNSAFE" -> 400;
+            default -> 413;
+        };
+        assertEquals(expectedCode, error.getCode());
+        verify(fileStorage, never()).store(any(byte[].class), any());
+        verify(versionWriter, never()).appendVersion(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void cleansUpRecalculatedOutputWhenVersionConflicts() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            workbook.createSheet("数据").createRow(0).createCell(0).setCellFormula("1+1");
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        prepareEdit(source);
+        when(versionWriter.appendVersion(eq(FILE_ID), eq(USER_ID),
+                any(VersionWriter.VersionContent.class), eq(ChangeType.MANUAL_EDIT),
+                any(), any(), eq(SOURCE_VERSION)))
+                .thenThrow(new BusinessException(409, "版本冲突"));
+        when(fileStorage.delete("versions/v2.xlsx")).thenReturn(true);
+        var request = request(value("B1", "NUMBER", "10"));
+        request.setRecalculateFormulas(true);
+
+        var error = assertThrows(BusinessException.class,
+                () -> service.editCells(USER_ID, FILE_ID, SOURCE_VERSION, request));
+
+        assertEquals(409, error.getCode());
+        verify(fileStorage).delete("versions/v2.xlsx");
+    }
+
+    private static byte[] unsupportedFormulaWorkbook() throws Exception {
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            var cell = workbook.createSheet("数据").createRow(0).createCell(0);
+            cell.setCellFormula("CUBEVALUE(\"connection\",\"member\")");
+            cell.setCellValue(999);
+            workbook.write(output);
+            return output.toByteArray();
+        }
+    }
+
     private void prepareEdit(byte[] source) {
         when(versionService.downloadVersion(USER_ID, FILE_ID, SOURCE_VERSION))
                 .thenReturn(download(source));

@@ -285,8 +285,40 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
             throw new BusinessException(413, "单次单元格编辑数量超过处理限制");
         }
         return editAndSave(userId, fileId, sourceVersion, request.getInstruction(),
-                "编辑 " + affectedCells + " 个 XLSX 单元格",
-                workbook -> applyOperations(workbook, request.getOperations()));
+                "编辑 " + affectedCells + " 个 XLSX 单元格"
+                        + (request.isRecalculateFormulas() ? "，已重算公式缓存" : ""),
+                workbook -> {
+                    applyOperations(workbook, request.getOperations());
+                    if (request.isRecalculateFormulas()) {
+                        recalculateFormulaCaches(workbook);
+                    }
+                });
+    }
+
+    private void recalculateFormulaCaches(XSSFWorkbook workbook) {
+        requireCalculableWorkbook(workbook);
+        FormulaEvaluator evaluator = workbook.getCreationHelper().createFormulaEvaluator();
+        for (int sheetIndex = 0; sheetIndex < workbook.getNumberOfSheets(); sheetIndex++) {
+            XSSFSheet sheet = workbook.getSheetAt(sheetIndex);
+            for (Row row : sheet) {
+                for (Cell cell : row) {
+                    if (cell.getCellType() != CellType.FORMULA) {
+                        continue;
+                    }
+                    String target = sheet.getSheetName() + "!" + cell.getAddress().formatAsString();
+                    try {
+                        // 保留公式，同时将数字、文本、布尔或 Excel 错误结果保存进单元格缓存。
+                        evaluator.evaluateFormulaCell(cell);
+                    } catch (NotImplementedException e) {
+                        throw new BusinessException(422, "公式缓存重算不支持此公式或其依赖：" + target
+                                + "；本次编辑未保存，可关闭 recalculateFormulas 后在办公软件中重算");
+                    } catch (RuntimeException e) {
+                        throw new BusinessException(422, "公式缓存重算失败：" + target
+                                + "；本次编辑未保存，可关闭 recalculateFormulas 后在办公软件中重算");
+                    }
+                }
+            }
+        }
     }
 
     @Override
