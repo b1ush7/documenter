@@ -17,8 +17,7 @@ import lombok.Data;
  *
  * <p>单步还是两步：这里采用单步（验证码 + 新密码一起提交）。
  * 两步式需要额外引入短期重置凭证及其存储与失效逻辑，
- * 属于过度设计——前端若想提前确认验证码有效，
- * 已有 {@code POST /user/verify/code} 可用。
+ * 当前不提供 RESET_PASSWORD 场景的独立预校验，前端应一次提交验证码和新密码。
  */
 @Data
 public class ResetPasswordDTO {

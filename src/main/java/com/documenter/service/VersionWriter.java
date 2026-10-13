@@ -33,7 +33,14 @@ public interface VersionWriter {
      * @param storageKey 存储标识
      * @param sizeBytes  字节数
      * @param sha256     内容摘要
+     * @param contentType 该版本 MIME 类型；与 extension 同时为 null 时沿用当前格式
+     * @param extension  该版本规范化扩展名，不带点
      */
-    record VersionContent(String storageKey, long sizeBytes, String sha256) {
+    record VersionContent(String storageKey, long sizeBytes, String sha256,
+                          String contentType, String extension) {
+        /** 同格式编辑沿用文件当前格式，兼容现有 DOCX/XLSX 调用。 */
+        public VersionContent(String storageKey, long sizeBytes, String sha256) {
+            this(storageKey, sizeBytes, sha256, null, null);
+        }
     }
 }

@@ -48,10 +48,34 @@ res:
     local:
       root: ${STORAGE_LOCAL_ROOT:./data/storage}
       temp: ${STORAGE_LOCAL_TEMP:./data/tmp}
+      temp-cleanup-enabled: ${STORAGE_TEMP_CLEANUP_ENABLED:true}
+      temp-retention: ${STORAGE_TEMP_RETENTION:24h}
+      temp-cleanup-interval: ${STORAGE_TEMP_CLEANUP_INTERVAL:1h}
     upload:
       max-size-bytes: 52428800
       # 同一用户每日上传次数上限（Redis 原子计数）
       hourly-limit: 60
+      max-pdf-pages: ${STORAGE_MAX_PDF_PAGES:200}
+      max-image-pixels: ${STORAGE_MAX_IMAGE_PIXELS:40000000}
+      max-archive-entries: ${STORAGE_MAX_ARCHIVE_ENTRIES:10000}
+      max-archive-expanded-size-bytes: ${STORAGE_MAX_ARCHIVE_EXPANDED_BYTES:209715200}
+      max-archive-compression-ratio: ${STORAGE_MAX_ARCHIVE_COMPRESSION_RATIO:200}
+    pdf:
+      max-extracted-chars-per-page: ${PDF_MAX_EXTRACTED_CHARS_PER_PAGE:100000}
+      max-extracted-chars-total: ${PDF_MAX_EXTRACTED_CHARS_TOTAL:2000000}
+      preview-dpi: ${PDF_PREVIEW_DPI:144}
+      max-preview-dpi: ${PDF_MAX_PREVIEW_DPI:200}
+    xlsx:
+      max-read-cells: ${XLSX_MAX_READ_CELLS:100000}
+      max-edit-operations: ${XLSX_MAX_EDIT_OPERATIONS:500}
+      max-structural-units: ${XLSX_MAX_STRUCTURAL_UNITS:1000}
+      max-sortable-cells: ${XLSX_MAX_SORTABLE_CELLS:10000}
+  # 模型配置的密钥加密（TODO 3.2：模型密钥不得返回前端）
+  model-config:
+    # 用于加密数据库中的模型 API Key（AES-256-GCM）。
+    # 必须通过环境变量 MODEL_CONFIG_SECRET 配置一个至少 32 字节的随机串；
+    # 留空时应用仍可启动，但保存模型密钥会明确报错，避免「以为加密了其实没加密」。
+    secret: ${MODEL_CONFIG_SECRET:}
   # 处理任务（TODO 3.4）
   task:
     # 有界队列 + CallerRuns 拒绝策略：队列满时由提交线程执行，形成背压而不是丢任务

@@ -172,11 +172,14 @@ public class VerificationCodeServiceImpl implements VerificationCodeService {
         String phone = normalize(identifier);
         String normalizedCode = code == null ? "" : code.trim();
 
+        // 必须容忍脚本返回 null：Redis 在某些异常/降级路径下会让 execute 返回 null，
+        // 直接拆箱会抛 NullPointerException（而不是走「验证码不存在」的友好分支），
+        // 既污染日志也让调用方拿到 500 而非可理解的业务错误。
+        // 这里按「验证码不存在」处理：拿不到校验结果时绝不能放行。
         Long result = redisTemplate.execute(CONSUME_SCRIPT,
                 List.of(codeKey(phone, scene)),
                 sha256(normalizedCode),
                 Integer.toString(properties.getMaxAttempts()));
-
         long value = result == null ? 0L : result;
         if (value == 1L) {
             auditService.recordConsumed(phone, scene);

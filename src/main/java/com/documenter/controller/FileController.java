@@ -4,6 +4,12 @@ import com.documenter.constant.ApiResponse;
 import com.documenter.dto.FileQueryDTO;
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.EditDocxTableDTO;
+import com.documenter.dto.EditXlsxCellsDTO;
+import com.documenter.dto.EditImageDTO;
+import com.documenter.dto.EditXlsxDataDTO;
+import com.documenter.dto.EditXlsxSheetsDTO;
+import com.documenter.dto.EditXlsxStructureDTO;
+import com.documenter.dto.FormatXlsxCellsDTO;
 import com.documenter.dto.FormatDocxParagraphsDTO;
 import com.documenter.dto.GenerateDocxDTO;
 import com.documenter.dto.InsertDocxImagesDTO;
@@ -12,12 +18,20 @@ import com.documenter.dto.RenameFileDTO;
 import com.documenter.service.DocumentVersionService;
 import com.documenter.service.DocxDocumentService;
 import com.documenter.service.FileService;
+import com.documenter.service.PdfDocumentService;
+import com.documenter.service.XlsxDocumentService;
+import com.documenter.service.ImageDocumentService;
 import com.documenter.util.SecurityUtil;
 import com.documenter.vo.FileAssetVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.PageResult;
+import com.documenter.vo.PdfContentVO;
+import com.documenter.vo.PdfPagePreview;
 import com.documenter.vo.VersionVO;
+import com.documenter.vo.XlsxStructureVO;
+import com.documenter.vo.XlsxRangeVO;
+import com.documenter.vo.XlsxFormulaResultsVO;
 import jakarta.validation.Valid;
 import org.springframework.core.io.Resource;
 import org.springframework.http.ContentDisposition;
@@ -52,12 +66,21 @@ public class FileController {
     private final FileService fileService;
     private final DocumentVersionService versionService;
     private final DocxDocumentService docxDocumentService;
+    private final PdfDocumentService pdfDocumentService;
+    private final XlsxDocumentService xlsxDocumentService;
+    private final ImageDocumentService imageDocumentService;
 
     public FileController(FileService fileService, DocumentVersionService versionService,
-                          DocxDocumentService docxDocumentService) {
+                          DocxDocumentService docxDocumentService,
+                          PdfDocumentService pdfDocumentService,
+                          XlsxDocumentService xlsxDocumentService,
+                          ImageDocumentService imageDocumentService) {
         this.fileService = fileService;
         this.versionService = versionService;
         this.docxDocumentService = docxDocumentService;
+        this.pdfDocumentService = pdfDocumentService;
+        this.xlsxDocumentService = xlsxDocumentService;
+        this.imageDocumentService = imageDocumentService;
     }
 
     // ---------------------------------------------------------------- 文件
@@ -140,6 +163,106 @@ public class FileController {
                 SecurityUtil.requireUserId(), fileId, versionNo));
     }
 
+    /** 提取 PDF 原生文本并标记需要 OCR 的扫描页，不执行 OCR。 */
+    @GetMapping("/{fileId}/versions/{versionNo}/pdf/content")
+    public ApiResponse<PdfContentVO> readPdfContent(@PathVariable Long fileId,
+                                                    @PathVariable Integer versionNo) {
+        return ApiResponse.success(pdfDocumentService.readContent(
+                SecurityUtil.requireUserId(), fileId, versionNo));
+    }
+
+    /** 将一个明确 PDF 版本的指定页渲染为 PNG。 */
+    @GetMapping("/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview")
+    public ResponseEntity<byte[]> previewPdfPage(@PathVariable Long fileId,
+                                                 @PathVariable Integer versionNo,
+                                                 @PathVariable Integer pageNo,
+                                                 @RequestParam(required = false) Integer dpi) {
+        return toPreview(pdfDocumentService.renderPage(
+                SecurityUtil.requireUserId(), fileId, versionNo, pageNo, dpi));
+    }
+
+    /** 读取指定 XLSX 版本的工作表、单元格、样式、公式、合并区域与图表结构。 */
+    @GetMapping("/{fileId}/versions/{versionNo}/xlsx/structure")
+    public ApiResponse<XlsxStructureVO> readXlsxStructure(@PathVariable Long fileId,
+                                                           @PathVariable Integer versionNo) {
+        return ApiResponse.success(xlsxDocumentService.readStructure(
+                SecurityUtil.requireUserId(), fileId, versionNo));
+    }
+
+    /** 读取指定 XLSX 版本中的一个矩形区域，包含区域内未创建的空白位置。 */
+    @GetMapping("/{fileId}/versions/{versionNo}/xlsx/range")
+    public ApiResponse<XlsxRangeVO> readXlsxRange(@PathVariable Long fileId,
+                                                  @PathVariable Integer versionNo,
+                                                  @RequestParam String sheetName,
+                                                  @RequestParam String range) {
+        return ApiResponse.success(xlsxDocumentService.readRange(
+                SecurityUtil.requireUserId(), fileId, versionNo, sheetName, range));
+    }
+
+    /** 即时计算指定 XLSX 区域内的公式，返回结果或错误，不保存新版本。 */
+    @GetMapping("/{fileId}/versions/{versionNo}/xlsx/formula-results")
+    public ApiResponse<XlsxFormulaResultsVO> calculateXlsxFormulas(@PathVariable Long fileId,
+                                                                  @PathVariable Integer versionNo,
+                                                                  @RequestParam String sheetName,
+                                                                  @RequestParam String range) {
+        return ApiResponse.success(xlsxDocumentService.calculateFormulas(
+                SecurityUtil.requireUserId(), fileId, versionNo, sheetName, range));
+    }
+
+    /** 修改指定 XLSX 版本中的单元格值或公式，并保存为新版本。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/xlsx/cell-edits")
+    public ApiResponse<VersionVO> editXlsxCells(@PathVariable Long fileId,
+                                                @PathVariable Integer versionNo,
+                                                @Valid @RequestBody EditXlsxCellsDTO request) {
+        return ApiResponse.success("已生成新版本", xlsxDocumentService.editCells(
+                SecurityUtil.requireUserId(), fileId, versionNo, request));
+    }
+
+    /** 插入或删除指定 XLSX 版本中的行列，并保存为新版本。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/xlsx/structure-edits")
+    public ApiResponse<VersionVO> editXlsxStructure(@PathVariable Long fileId,
+                                                    @PathVariable Integer versionNo,
+                                                    @Valid @RequestBody EditXlsxStructureDTO request) {
+        return ApiResponse.success("已生成新版本", xlsxDocumentService.editStructure(
+                SecurityUtil.requireUserId(), fileId, versionNo, request));
+    }
+
+    /** 新增、重命名或删除工作表，并保存为新版本。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/xlsx/sheet-edits")
+    public ApiResponse<VersionVO> editXlsxSheets(@PathVariable Long fileId,
+                                                 @PathVariable Integer versionNo,
+                                                 @Valid @RequestBody EditXlsxSheetsDTO request) {
+        return ApiResponse.success("已生成新版本", xlsxDocumentService.editSheets(
+                SecurityUtil.requireUserId(), fileId, versionNo, request));
+    }
+
+    /** 对安全的纯值区域排序，或设置、清除工作表自动筛选，并保存为新版本。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/xlsx/data-edits")
+    public ApiResponse<VersionVO> editXlsxData(@PathVariable Long fileId,
+                                               @PathVariable Integer versionNo,
+                                               @Valid @RequestBody EditXlsxDataDTO request) {
+        return ApiResponse.success("已生成新版本", xlsxDocumentService.editData(
+                SecurityUtil.requireUserId(), fileId, versionNo, request));
+    }
+
+    /** 设置单元格或矩形区域的基础格式，并保存为新版本。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/xlsx/formats")
+    public ApiResponse<VersionVO> formatXlsxCells(@PathVariable Long fileId,
+                                                  @PathVariable Integer versionNo,
+                                                  @Valid @RequestBody FormatXlsxCellsDTO request) {
+        return ApiResponse.success("已生成新版本", xlsxDocumentService.formatCells(
+                SecurityUtil.requireUserId(), fileId, versionNo, request));
+    }
+
+    /** 编辑 PNG/JPEG 像素或转换格式，保存为带独立格式信息的新版本。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/image-edits")
+    public ApiResponse<VersionVO> editImage(@PathVariable Long fileId,
+                                           @PathVariable Integer versionNo,
+                                           @Valid @RequestBody EditImageDTO request) {
+        return ApiResponse.success("已生成新版本", imageDocumentService.edit(
+                SecurityUtil.requireUserId(), fileId, versionNo, request));
+    }
+
     /** 批量替换指定 DOCX 版本中的简单段落，并保存为新版本。 */
     @PostMapping("/{fileId}/versions/{versionNo}/paragraph-text")
     public ApiResponse<VersionVO> replaceDocxParagraphText(@PathVariable Long fileId,
@@ -212,5 +335,19 @@ public class FileController {
                 .contentType(MediaType.parseMediaType(download.contentType()))
                 .contentLength(download.contentLength())
                 .body(download.resource());
+    }
+
+    private static ResponseEntity<byte[]> toPreview(PdfPagePreview preview) {
+        ContentDisposition disposition = ContentDisposition.inline()
+                .filename(preview.fileName(), StandardCharsets.UTF_8)
+                .build();
+        byte[] content = preview.content();
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, disposition.toString())
+                .header("X-Image-Width", String.valueOf(preview.widthPixels()))
+                .header("X-Image-Height", String.valueOf(preview.heightPixels()))
+                .contentType(MediaType.IMAGE_PNG)
+                .contentLength(content.length)
+                .body(content);
     }
 }

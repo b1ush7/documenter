@@ -17,6 +17,8 @@ public class VersionVO {
     private Long fileId;
     private Integer versionNo;
     private Integer parentVersion;
+    private String contentType;
+    private String extension;
     private Long sizeBytes;
     private String sha256;
     private String instruction;
@@ -30,6 +32,8 @@ public class VersionVO {
         vo.setFileId(version.getFileId());
         vo.setVersionNo(version.getVersionNo());
         vo.setParentVersion(version.getParentVersion());
+        vo.setContentType(version.getContentType());
+        vo.setExtension(version.getExtension());
         vo.setSizeBytes(version.getSizeBytes());
         vo.setSha256(version.getSha256());
         vo.setInstruction(version.getInstruction());

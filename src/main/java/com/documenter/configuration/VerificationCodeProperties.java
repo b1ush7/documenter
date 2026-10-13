@@ -20,7 +20,7 @@ public class VerificationCodeProperties {
     private int codeLength = 6;
 
     /** 验证码有效期。 */
-    private Duration ttl = Duration.ofMinutes(5);
+    private Duration ttl = Duration.ofMinutes(15);
 
     /** 同一接收对象同一用途的重发间隔。 */
     private Duration resendInterval = Duration.ofSeconds(60);
