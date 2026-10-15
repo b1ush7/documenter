@@ -15,6 +15,7 @@ import com.documenter.dto.GenerateDocxDTO;
 import com.documenter.dto.InsertDocxImagesDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.dto.RenameFileDTO;
+import com.documenter.service.CompatibilityVerificationService;
 import com.documenter.service.DocumentVersionService;
 import com.documenter.service.DocxDocumentService;
 import com.documenter.service.FileService;
@@ -26,6 +27,7 @@ import com.documenter.util.PreviewResponses;
 import com.documenter.util.SecurityUtil;
 import com.documenter.vo.FileAssetVO;
 import com.documenter.vo.FileDownload;
+import com.documenter.vo.DocxCompatibilityReportVO;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.PagePreviewInfoVO;
 import com.documenter.vo.PageResult;
@@ -73,13 +75,15 @@ public class FileController {
     private final XlsxDocumentService xlsxDocumentService;
     private final ImageDocumentService imageDocumentService;
     private final PagePreviewService pagePreviewService;
+    private final CompatibilityVerificationService compatibilityVerificationService;
 
     public FileController(FileService fileService, DocumentVersionService versionService,
                           DocxDocumentService docxDocumentService,
                           PdfDocumentService pdfDocumentService,
                           XlsxDocumentService xlsxDocumentService,
                           ImageDocumentService imageDocumentService,
-                          PagePreviewService pagePreviewService) {
+                          PagePreviewService pagePreviewService,
+                          CompatibilityVerificationService compatibilityVerificationService) {
         this.fileService = fileService;
         this.versionService = versionService;
         this.docxDocumentService = docxDocumentService;
@@ -87,6 +91,7 @@ public class FileController {
         this.xlsxDocumentService = xlsxDocumentService;
         this.imageDocumentService = imageDocumentService;
         this.pagePreviewService = pagePreviewService;
+        this.compatibilityVerificationService = compatibilityVerificationService;
     }
 
     // ---------------------------------------------------------------- 文件
@@ -307,7 +312,18 @@ public class FileController {
                 SecurityUtil.requireUserId(), fileId, versionNo, request));
     }
 
-    /** 批量替换指定 DOCX 版本中的简单段落，并保存为新版本。 */
+    /**
+     * 批量替换指定 DOCX 版本中的简单段落，并保存为新版本。
+     *
+     * <p><b>路径中的 {@code versionNo} 同时是编辑基准版本与乐观锁的期望版本</b>（TODO 4.1）。
+     * 也就是说这次编辑声明的是「我在 {@code versionNo} 的基础上修改」：
+     * <ul>
+     *   <li>若该文件当前版本已不是 {@code versionNo}（期间其他任务或人工编辑推进了版本），
+     *       返回 <b>409</b>，不会覆盖别人的改动；</li>
+     *   <li>前端应提示用户刷新后基于最新版本重做这次编辑，而不是自动重试 ——
+     *       自动重试会把用户的修改悄悄应用到另一个版本上。</li>
+     * </ul>
+     */
     @PostMapping("/{fileId}/versions/{versionNo}/paragraph-text")
     public ApiResponse<VersionVO> replaceDocxParagraphText(@PathVariable Long fileId,
                                                            @PathVariable Integer versionNo,
@@ -379,6 +395,22 @@ public class FileController {
                 .contentType(MediaType.parseMediaType(download.contentType()))
                 .contentLength(download.contentLength())
                 .body(download.resource());
+    }
+
+    /**
+     * DOCX 应用级兼容性验收（TODO 4.1）。
+     *
+     * <p>让 LibreOffice 真正打开并排版该版本，检查页数、缺失字体与页面边缘裁切。
+     * 与预览接口一样<b>绑定明确版本</b>并复用下载路径做归属校验。
+     *
+     * <p>结论包含 ERROR 与 WARNING 两级：ERROR 表示无法正常打开或排不出内容；
+     * WARNING 表示可用但版式存在偏差风险（如字体被替换），需人工确认。
+     */
+    @PostMapping("/{fileId}/versions/{versionNo}/compatibility-check")
+    public ApiResponse<DocxCompatibilityReportVO> checkCompatibility(@PathVariable Long fileId,
+                                                                     @PathVariable Integer versionNo) {
+        return ApiResponse.success(compatibilityVerificationService.verify(
+                SecurityUtil.requireUserId(), fileId, versionNo));
     }
 
     /** 与 PagePreviewServiceImpl 的图片扩展名集合保持一致。 */

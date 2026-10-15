@@ -4,7 +4,7 @@ import com.documenter.configuration.PreviewProperties;
 import com.documenter.configuration.StorageProperties;
 import com.documenter.entity.FileAsset;
 import com.documenter.exception.BusinessException;
-import com.documenter.service.DocumentConverter;
+import com.documenter.service.OfficeRenderService;
 import com.documenter.service.DocumentVersionService;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.PagePreviewInfoVO;
@@ -25,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -56,26 +57,25 @@ class PagePreviewServiceImplTest {
     private static final Integer VERSION_NO = 3;
 
     private DocumentVersionService versionService;
-    private DocumentConverter converter;
+    private OfficeRenderService renderService;
     private PagePreviewServiceImpl service;
 
     @BeforeEach
     void setUp() {
         versionService = mock(DocumentVersionService.class);
-        converter = mock(DocumentConverter.class);
+        renderService = mock(OfficeRenderService.class);
 
         PreviewProperties previewProperties = new PreviewProperties();
         previewProperties.setDefaultDpi(110);
         previewProperties.setMaxDpi(200);
         previewProperties.setMaxPagePixels(40_000_000L);
-        previewProperties.setMaxConvertedPages(50);
         previewProperties.setCacheEnabled(false);
 
         StorageProperties storageProperties = new StorageProperties();
         storageProperties.getLocal().setTemp(Path.of(System.getProperty("java.io.tmpdir"),
                 "preview-test-tmp").toString());
 
-        service = new PagePreviewServiceImpl(versionService, converter, previewProperties, storageProperties);
+        service = new PagePreviewServiceImpl(versionService, renderService, previewProperties, storageProperties);
     }
 
     // ============================================ 绑版本与同等鉴权
@@ -131,10 +131,10 @@ class PagePreviewServiceImplTest {
     // ============================================ 未配置转换器时的降级
 
     @Test
-    void docxWithoutConverterIsReportedAsNotPreviewable() {
-        when(converter.available()).thenReturn(false);
-        when(converter.configurationHint())
-                .thenReturn("请安装 LibreOffice 并配置 res.preview.libreoffice-path");
+    void docxWithoutOfficeBackendIsReportedAsNotPreviewable() {
+        when(renderService.available()).thenReturn(false);
+        when(renderService.configurationHint())
+                .thenReturn("请配置 res.preview.office-backend=kit 并指向 office-kit-cli");
         when(versionService.downloadVersion(OWNER, FILE_ID, VERSION_NO))
                 .thenReturn(download(asset("docx", DOCX_CONTENT_TYPE), new byte[]{1, 2, 3}));
 
@@ -144,40 +144,42 @@ class PagePreviewServiceImplTest {
         assertFalse(info.previewable());
         assertTrue(info.requiresConversion());
         assertNull(info.pageCount());
-        assertTrue(info.message().contains("libreoffice-path"),
+        assertTrue(info.message().contains("office-backend")
+                        || info.message().contains("office-kit"),
                 "提示应可操作，实际: " + info.message());
     }
 
     @Test
-    void renderingDocxWithoutConverterReturns503AndDoesNotConvert() {
-        when(converter.available()).thenReturn(false);
-        when(converter.configurationHint()).thenReturn("请安装 LibreOffice");
+    void renderingDocxWithoutOfficeBackendReturns503AndDoesNotRender() {
+        when(renderService.available()).thenReturn(false);
+        when(renderService.configurationHint()).thenReturn("请配置 res.preview.office-backend=kit");
         when(versionService.downloadVersion(OWNER, FILE_ID, VERSION_NO))
                 .thenReturn(download(asset("docx", DOCX_CONTENT_TYPE), new byte[]{1, 2, 3}));
 
         BusinessException error = assertThrows(BusinessException.class,
                 () -> service.renderPage(OWNER, FILE_ID, VERSION_NO, 1, null));
 
-        // 503 而非 500：这是「部署未配置」，运维应去装转换器而不是查代码
+        // 503 而非 500：这是「部署未配置」，运维应去接渲染后端而不是查代码
         assertEquals(503, error.getCode());
-        verify(converter, never()).toPdf(any(), anyString(), anyString());
+        // 未接入时绝不能尝试渲染
+        verify(renderService, never()).render(any(), anyString(), any(), any(), anyInt());
     }
 
     @Test
-    void pdfIsPreviewableWithoutConverter() {
+    void pdfIsPreviewableWithoutOfficeBackend() {
         when(versionService.downloadVersion(OWNER, FILE_ID, VERSION_NO))
                 .thenReturn(download(asset("pdf", "application/pdf"), minimalPdf()));
 
         PagePreviewInfoVO info = service.describe(OWNER, FILE_ID, VERSION_NO);
 
-        // PDF 就地渲染，不应因为缺少外部转换器而受影响
+        // PDF 就地渲染，不应因为缺少外部渲染后端而受影响
         assertTrue(info.previewable());
         assertFalse(info.requiresConversion());
         assertEquals("native", info.engine());
         assertEquals(1, info.pageCount());
-        // 完全不触碰转换器
-        verify(converter, never()).available();
-        verify(converter, never()).toPdf(any(), anyString(), anyString());
+        // 完全不触碰渲染后端
+        verify(renderService, never()).available();
+        verify(renderService, never()).render(any(), anyString(), any(), any(), anyInt());
     }
 
     @Test

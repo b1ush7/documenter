@@ -15,8 +15,8 @@ import com.documenter.vo.PdfPagePreview;
  *       因此不存在「预览接口漏了鉴权」这种独立缺陷面。</li>
  * </ol>
  *
- * <p>覆盖范围：PDF 与图片可就地渲染；DOCX / XLSX 需要外部转换器，
- * 未配置时返回可操作的错误说明（见 {@link DocumentConverter}）。
+ * <p>覆盖范围：PDF 与图片可就地渲染；DOCX / XLSX 需要外部 Office 渲染后端，
+ * 未配置时返回可操作的错误说明（见 {@link OfficeRenderService}）。
  */
 public interface PagePreviewService {
 

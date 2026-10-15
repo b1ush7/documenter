@@ -24,26 +24,6 @@ import java.time.Duration;
 @ConfigurationProperties(prefix = "res.preview")
 public class PreviewProperties {
 
-    /** 转换引擎：none / libreoffice。none 表示不启用外部转换。 */
-    private String converter = "none";
-
-    /**
-     * LibreOffice 可执行文件路径。
-     *
-     * <p>留空时按常见安装位置自动探测。若探测不到，
-     * DOCX/XLSX 预览会给出「请配置 res.preview.libreoffice-path」的提示。
-     */
-    private String libreofficePath;
-
-    /** 单次转换的超时（TODO 3.4 要求配置超时）。 */
-    private Duration conversionTimeout = Duration.ofSeconds(60);
-
-    /** 允许转换的最大源文件字节数，避免把超大文件送进外部进程。 */
-    private long maxSourceBytes = 50L * 1024 * 1024;
-
-    /** 允许转换出的 PDF 最大页数，避免超大文档把内存打满。 */
-    private int maxConvertedPages = 500;
-
     /** 预览渲染的默认 DPI。 */
     private int defaultDpi = 110;
 
@@ -58,4 +38,41 @@ public class PreviewProperties {
 
     /** 是否启用预览缓存。相同内容 + 相同页 + 相同 DPI 只渲染一次。 */
     private boolean cacheEnabled = true;
+
+    /**
+     * Office 渲染/转换后端：none / kit。
+     *
+     * <p>kit 指打包好的 LibreOffice kit（Node CLI）。它同时提供两件本服务需要的能力：
+     * 页面渲染与格式转换，因此比让运维单独安装 LibreOffice 更可控 ——
+     * 版本固定、无需桌面会话、不依赖 office 是否被激活。
+     *
+     * <p>PDF 与图片预览不需要它；DOCX/XLSX 的版式预览与 4.1 的兼容性验收需要。
+     */
+    private String officeBackend = "none";
+
+    /** Office kit 的 Node 可执行文件路径。 */
+    private String officeKitNode;
+
+    /** Office kit 的 CLI 入口（cli.js）路径。 */
+    private String officeKitCli;
+
+    /** 单次渲染或转换的超时。 */
+    private Duration officeTimeout = Duration.ofSeconds(120);
+
+    /** 送入渲染或转换的最大输入字节数。 */
+    private long officeMaxInputBytes = 50L * 1024 * 1024;
+
+    /** 兼容性验收时最多检查的页数，避免大文档把验收流程拖垮。 */
+    private int compatibilityMaxPages = 20;
+
+    /** 兼容性验收的渲染 DPI。 */
+    private int compatibilityDpi = 110;
+
+    /**
+     * 页面边缘留白检测阈值（像素）。
+     *
+     * <p>渲染结果若在距页面边缘该范围内出现非白像素，判定为「可能被裁切」。
+     * 设为 0 表示关闭该检测。
+     */
+    private int clippingMarginPixels = 2;
 }

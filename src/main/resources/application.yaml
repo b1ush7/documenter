@@ -92,23 +92,28 @@ res:
     requeue-pending-on-startup: false
     # 占位处理器开关：接入真实处理器时必须改为 false，否则会争抢任务类型导致启动失败
     placeholder-enabled: true
-  # 页面版式预览（TODO 3.3）
+  # 页面版式预览（TODO 3.3）与兼容性验收（TODO 4.1）
   preview:
-    # 转换引擎：none / libreoffice。
-    # PDF 与图片可就地渲染，不需要转换器；DOCX / XLSX 必须先转 PDF，
-    # 因此未配置时这两类文件的预览会返回明确的可操作提示，而不是 500。
-    converter: ${PREVIEW_CONVERTER:none}
-    # 留空时按常见安装位置自动探测 soffice
-    libreoffice-path: ${PREVIEW_LIBREOFFICE_PATH:}
-    conversion-timeout: ${PREVIEW_CONVERSION_TIMEOUT:60s}
-    max-source-bytes: ${PREVIEW_MAX_SOURCE_BYTES:52428800}
-    max-converted-pages: ${PREVIEW_MAX_CONVERTED_PAGES:500}
+    # 预览渲染的默认 DPI 与上限
     default-dpi: ${PREVIEW_DEFAULT_DPI:110}
     max-dpi: ${PREVIEW_MAX_DPI:200}
     max-page-pixels: ${PREVIEW_MAX_PAGE_PIXELS:40000000}
     # 缓存放存储临时目录下，由既有的过期临时文件清理任务自动回收
     cache-enabled: ${PREVIEW_CACHE_ENABLED:true}
     cache-directory: ${PREVIEW_CACHE_DIRECTORY:preview-cache}
+    # Office 渲染后端：none / kit
+    # kit 指打包好的 LibreOffice kit（Node CLI），同时提供页面渲染与格式转换。
+    # PDF 与图片预览不需要它；DOCX/XLSX 版式预览与兼容性验收需要。
+    office-backend: ${PREVIEW_OFFICE_BACKEND:none}
+    office-kit-node: ${PREVIEW_OFFICE_KIT_NODE:}
+    office-kit-cli: ${PREVIEW_OFFICE_KIT_CLI:}
+    office-timeout: ${PREVIEW_OFFICE_TIMEOUT:120s}
+    office-max-input-bytes: ${PREVIEW_OFFICE_MAX_INPUT_BYTES:52428800}
+    # 兼容性验收：最多检查页数与渲染 DPI
+    compatibility-max-pages: ${PREVIEW_COMPAT_MAX_PAGES:20}
+    compatibility-dpi: ${PREVIEW_COMPAT_DPI:110}
+    # 页面边缘裁切检测范围（像素），0 表示关闭
+    clipping-margin-pixels: ${PREVIEW_CLIPPING_MARGIN:2}
 
 logging:
   level:

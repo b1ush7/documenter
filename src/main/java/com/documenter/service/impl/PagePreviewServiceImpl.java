@@ -4,9 +4,10 @@ import com.documenter.configuration.PreviewProperties;
 import com.documenter.configuration.StorageProperties;
 import com.documenter.entity.FileAsset;
 import com.documenter.exception.BusinessException;
-import com.documenter.service.DocumentConverter;
 import com.documenter.service.DocumentVersionService;
+import com.documenter.service.OfficeRenderService;
 import com.documenter.service.PagePreviewService;
+import com.documenter.vo.DocumentRenderManifest;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.PagePreviewInfoVO;
 import com.documenter.vo.PdfPagePreview;
@@ -25,6 +26,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -64,16 +66,16 @@ public class PagePreviewServiceImpl implements PagePreviewService {
             java.util.Set.of("png", "jpg", "jpeg", "gif", "bmp");
 
     private final DocumentVersionService versionService;
-    private final DocumentConverter documentConverter;
+    private final OfficeRenderService renderService;
     private final PreviewProperties previewProperties;
     private final StorageProperties storageProperties;
 
     public PagePreviewServiceImpl(DocumentVersionService versionService,
-                                  DocumentConverter documentConverter,
+                                  OfficeRenderService renderService,
                                   PreviewProperties previewProperties,
                                   StorageProperties storageProperties) {
         this.versionService = versionService;
-        this.documentConverter = documentConverter;
+        this.renderService = renderService;
         this.previewProperties = previewProperties;
         this.storageProperties = storageProperties;
     }
@@ -97,16 +99,16 @@ public class PagePreviewServiceImpl implements PagePreviewService {
                     1, false, true, ENGINE_NATIVE, dpi, null);
         }
 
-        // DOCX / XLSX 需要外部转换
-        if (!documentConverter.available()) {
+        // DOCX / XLSX 需要外部 Office 渲染后端
+        if (!renderService.available()) {
             return new PagePreviewInfoVO(fileId, versionNo, version.contentType(), extension,
-                    null, true, false, documentConverter.engineName(), dpi,
-                    documentConverter.configurationHint());
+                    null, true, false, renderService.backendName(), dpi,
+                    renderService.configurationHint());
         }
-        // 转换器可用时给出页数需要真正转换一次；这里返回空页数 + 提示，
-        // 由前端在首次请求页面图片时再触发转换，避免「只看一眼元信息就把大文档转一遍」。
+        // 后端可用时给出页数需要真正渲染一次；这里返回空页数 + 提示，
+        // 由前端在首次请求页面图片时再触发渲染，避免「只看一眼元信息就把大文档排一遍版」。
         return new PagePreviewInfoVO(fileId, versionNo, version.contentType(), extension,
-                null, true, true, documentConverter.engineName(), dpi,
+                null, true, true, renderService.backendName(), dpi,
                 "页数将在首次渲染时确定");
     }
 
@@ -131,48 +133,60 @@ public class PagePreviewServiceImpl implements PagePreviewService {
             return renderImageDirectly(version, actualDpi);
         }
 
-        byte[] pdfBytes = resolvePdfBytes(version, extension);
-
-        // 缓存命中直接返回，避免重复转换与重复栅格化
+        // 缓存命中直接返回，避免重复渲染（Office 渲染是最重的一步）
         String cacheKey = cacheKey(version, pageNo, actualDpi);
         byte[] cached = readCache(cacheKey);
         if (cached != null) {
-            return buildPreview(cached, pageNo, actualDpi, version, extension);
+            return buildPreview(cached, pageNo, actualDpi);
         }
 
-        byte[] png = renderPdfPage(pdfBytes, pageNo, actualDpi, version);
+        byte[] png = PDF_EXTENSION.equals(extension)
+                ? renderPdfPage(readAll(version), pageNo, actualDpi, version)
+                : renderViaOffice(version, extension, pageNo, actualDpi);
         writeCache(cacheKey, png);
-        return buildPreview(png, pageNo, actualDpi, version, extension);
+        return buildPreview(png, pageNo, actualDpi);
     }
 
-    /** 取得用于渲染的 PDF 字节；PDF 直接用，其余走转换器。 */
-    private byte[] resolvePdfBytes(FileDownload version, String extension) {
-        byte[] source = readAll(version);
-
-        if (PDF_EXTENSION.equals(extension)) {
-            return source;
-        }
-        if (IMAGE_EXTENSIONS.contains(extension)) {
-            throw new BusinessException(400, "图片版本不需要转换");
-        }
-        if (!documentConverter.available()) {
+    /**
+     * 通过 Office 渲染后端直接渲染指定页。
+     *
+     * <p>不经过「先转 PDF 再栅格化」两步：kit 本身就能按页输出图片，
+     * 少一步转换既更快，也少一次可能引入偏差的中间格式。
+     */
+    private byte[] renderViaOffice(FileDownload version, String extension,
+                                   int pageNo, int dpi) {
+        if (!renderService.available()) {
             throw new BusinessException(503,
-                    "当前部署未接入文档转换器，无法生成 " + extension.toUpperCase() + " 的版式预览；"
-                            + documentConverter.configurationHint());
+                    "当前部署未接入 Office 渲染后端，无法生成 " + extension.toUpperCase()
+                            + " 的版式预览；" + renderService.configurationHint());
         }
 
-        String baseName = baseName(version.asset());
-        log.info("开始转换文档以生成页面预览, fileId={}, versionNo={}, extension={}, engine={}",
-                version.asset().getId(), version.asset().getLatestVersion(), extension,
-                documentConverter.engineName());
-        byte[] pdf = documentConverter.toPdf(source, extension, baseName);
+        Path workDirectory = null;
+        try {
+            workDirectory = Files.createTempDirectory("page-preview-");
+            Path sourceFile = workDirectory.resolve("input." + extension);
+            try (InputStream input = version.resource().getInputStream()) {
+                Files.copy(input, sourceFile);
+            }
 
-        int pages = countPdfPages(pdf);
-        if (pages > previewProperties.getMaxConvertedPages()) {
-            throw new BusinessException(413, "转换出的页数超过预览上限（"
-                    + previewProperties.getMaxConvertedPages() + " 页）");
+            // 只渲染请求的那一页，避免为看一页而排整本文档
+            DocumentRenderManifest manifest = renderService.render(sourceFile, extension,
+                    workDirectory.resolve("render"), List.of(pageNo), dpi);
+
+            if (manifest.pages().isEmpty()) {
+                // 页码越界时后端不会产出该页，此处按 404 处理与 PDF 路径保持一致
+                throw new BusinessException(404,
+                        "第 " + pageNo + " 页不存在或无法渲染（该版本共 "
+                                + manifest.pageCount() + " 页）");
+            }
+            return Files.readAllBytes(Path.of(manifest.pages().get(0).path()));
+        } catch (IOException e) {
+            log.warn("Office 渲染页面失败, fileId={}, versionNo={}, pageNo={}",
+                    version.asset().getId(), version.asset().getLatestVersion(), pageNo, e);
+            throw new BusinessException(500, "页面预览渲染失败");
+        } finally {
+            cleanupQuietly(workDirectory);
         }
-        return pdf;
     }
 
     /** 用 PDFBox 把指定页渲染为 PNG，并校验像素上限。 */
@@ -225,8 +239,7 @@ public class PagePreviewServiceImpl implements PagePreviewService {
 
     // ------------------------------------------------------------ 辅助
 
-    private PdfPagePreview buildPreview(byte[] png, int pageNo, int dpi,
-                                        FileDownload version, String extension) {
+    private PdfPagePreview buildPreview(byte[] png, int pageNo, int dpi) {
         // 读回尺寸用于响应头，前端可据此预留高度避免布局跳动
         int width = 0;
         int height = 0;
@@ -323,6 +336,24 @@ public class PagePreviewServiceImpl implements PagePreviewService {
         return base.isBlank() ? "document" : base;
     }
 
+    /** 清理临时目录；失败只记日志，交给过期临时文件清理任务回收。 */
+    private static void cleanupQuietly(Path directory) {
+        if (directory == null) {
+            return;
+        }
+        try (var paths = Files.walk(directory)) {
+            paths.sorted(java.util.Comparator.reverseOrder()).forEach(path -> {
+                try {
+                    Files.deleteIfExists(path);
+                } catch (IOException ignored) {
+                    // 由清理任务回收
+                }
+            });
+        } catch (IOException e) {
+            log.debug("预览临时目录清理失败: {}", directory, e);
+        }
+    }
+
     // ------------------------------------------------------------ 缓存
 
     /**
@@ -379,8 +410,8 @@ public class PagePreviewServiceImpl implements PagePreviewService {
                 .resolve(previewProperties.getCacheDirectory());
     }
 
-    /** 供诊断与测试使用：当前生效的转换引擎名。 */
+    /** 供诊断与测试使用：当前生效的渲染后端名。 */
     public String converterEngine() {
-        return documentConverter.engineName();
+        return renderService.backendName();
     }
 }

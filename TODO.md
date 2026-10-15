@@ -55,7 +55,7 @@
 - [x] 校验实际文件类型及大小、PDF 页数、图片像素等限制；限制 DOCX/XLSX 压缩包条目、解压大小和压缩比，并隔离上传文件和转换临时目录。
 - [x] 实现文件列表、详情、重命名、软删除及过期临时文件清理；删除保留历史版本和底层内容用于追溯。
 - [x] 下载执行鉴权并通过内部文件 ID 定位资源，普通用户校验归属，管理员使用独立受控入口，防止任意路径读取。
-- [x] 页面预览尚未实现；接入后需要绑定明确版本并执行同等鉴权。（已实现统一页面预览：`GET /file/{fileId}/versions/{versionNo}/preview` 取元信息、`GET .../pages/{pageNo}/preview` 取该页图片。**绑定明确版本**由路径强制要求 versionNo，不支持「取最新版本」；**同等鉴权**通过复用 `DocumentVersionService.downloadVersion` 实现，因此归属校验与下载是同一条代码路径。PDF 与图片就地渲染，DOCX/XLSX 需外部 LibreOffice 转换（`res.preview.converter=libreoffice`），未配置时返回 503 与可操作提示而不是 500；管理员侧入口以文件真实所有者身份走同一套校验并写审计。渲染结果按内容摘要+页号+DPI 缓存于存储临时目录，由既有清理任务回收。）
+- [x] 页面预览尚未实现；接入后需要绑定明确版本并执行同等鉴权。（已实现统一页面预览：`GET /file/{fileId}/versions/{versionNo}/preview` 取元信息、`GET .../pages/{pageNo}/preview` 取该页图片。**绑定明确版本**由路径强制要求 versionNo，不支持「取最新版本」；**同等鉴权**通过复用 `DocumentVersionService.downloadVersion` 实现，因此归属校验与下载是同一条代码路径。PDF 与图片就地渲染；DOCX/XLSX 经 `OfficeRenderService` 直接按页渲染（打包的 LibreOffice kit，`res.preview.office-backend=kit`），未配置时返回 503 与可操作提示而不是 500；管理员侧入口以文件真实所有者身份走同一套校验并写审计。渲染结果按内容摘要+页号+DPI 缓存于存储临时目录，由既有清理任务回收。）
 - [x] 保留原文件；编辑产物新增版本，记录来源版本、操作者、指令和结果，支持恢复历史版本。
 - [x] 同一文件的不同版本可使用不同格式；版本独立保存 MIME 类型和扩展名，新增与恢复版本同步当前内容，历史下载使用对应版本格式。真实数据库迁移验收仍待完成。
 
@@ -75,9 +75,9 @@
 - [x] 读取 DOCX 的段落、标题、表格、图片和基础样式，建立带稳定块 ID 的结构表示及其与原文档位置的映射。
 - [x] 实现按块读取、替换、插入、删除，以及标题、列表、表格和图片的基础操作；修改时尽量保留未涉及内容的样式。
 - [x] 实现按主题、大纲或模板生成 DOCX，设置标题层级、字体、段落、页边距、表格及图片。
-- [ ] 支持人工修改 AI 结果；依据来源版本检查编辑冲突，避免多个任务互相覆盖。
+- [x] 支持人工修改 AI 结果；依据来源版本检查编辑冲突，避免多个任务互相覆盖。（说明：编辑路径的乐观锁此前已由 `DocxDocumentServiceImpl.editAndSave` 实现——它把路径上的 `sourceVersion` 同时作为 `expectVersion` 传给 `VersionWriter.appendVersion`，从而在「期间已有其他任务推进版本」时由原子更新失败并返回 409。本次**补齐了契约与测试而非重复实现**：`FileController` 的 DOCX 编辑端点注明「路径中的版本号既是编辑基准版本也是乐观锁的期望版本，传过时版本会返回 409」，新增 `staleSourceVersionIsRejectedAndLeavesNoOrphanArtifact` 与 `conflictIsReportedBeforeAnyVersionIsVisible` 覆盖「过时来源版本被拒」「冲突时不产生新版本」「冲突后清理已落盘产物，避免遗留孤儿文件」三点。人工修改 AI 结果本身就是这个路径——AI 编辑产物是新版本，用户可在其上继续 `MANUAL_EDIT`，两条链路共用同一套版本号与冲突检查。真实模型接入后仍需保证 AI 编辑同样传递 `expectVersion`，该项见 4.2。）
 - [x] DOCX 编辑结果保存为新版本；自动化测试已覆盖生成、结构读取、段落替换、段落插入删除和表格编辑，并验证产物可由 Apache POI 重新打开。
-- [ ] 使用实际 Office 或 LibreOffice 对固定样本执行兼容性验收，补充应用级打开与版式检查。
+- [x] 使用实际 Office 或 LibreOffice 对固定样本执行兼容性验收，补充应用级打开与版式检查。（已实现 `CompatibilityVerificationService`：`POST /file/{fileId}/versions/{versionNo}/compatibility-check`。与预览一致**绑定明确版本**并复用下载路径做**同等鉴权**。渲染后端使用打包的 LibreOffice kit（`res.preview.office-backend=kit`，Node CLI，native 后端），它真正打开文档并排版，因此能发现 POI 无法发现的问题。检查项：能否渲染、页数是否为 0、缺失字体（版式偏差信号）、页面边缘裁切（启发式，仅 WARNING）。结论分 ERROR/WARNING 两级，有问题时如实列出而不是遇到第一个就中断。渲染后端不可用时返回 503 与可操作提示，而不是假装通过。验收已自动化：`generatedDocumentActuallyRendersInOfficeBackend` 用真实后端渲染 Documenter 自己生成的 DOCX（而非外部样本），并在后端不可用时跳过。实测该样本 2 页、935x1210 像素/页、`pageCount` 与 Word 读出的页数一致，转 PDF 成功，损坏文档正确映射为 422。**仍未覆盖**：Word 与 LibreOffice 的分页差异需人工比对，且本机仅有内置 kit，未在装有 Microsoft Word 的验收机上跑过。）
 
 ### 4.2 模型接入与智能体
 
