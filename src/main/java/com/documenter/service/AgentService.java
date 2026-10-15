@@ -1,0 +1,51 @@
+package com.documenter.service;
+
+import com.documenter.vo.AgentRunResult;
+
+import java.util.function.BooleanSupplier;
+
+/**
+ * 智能体循环（TODO 4.2「建立分析需求 → 选择工具 → 执行 → 检查结果的循环，
+ * 限制步骤数、调用次数和重试次数」）。
+ *
+ * <p>为什么手写这个循环而不用 LangChain4j 的 {@code AiServices}：
+ * TODO 明确要求限制步骤数、工具调用次数与重试次数，并且要求工具执行前
+ * 统一做权限与版本检查。这些约束需要在「模型决定调用工具」与
+ * 「工具真正执行」之间插入我们的判断，而 {@code AiServices} 把这段控制权
+ * 收在框架内部。手写循环让每一次工具执行都必须经过我们的检查点。
+ */
+public interface AgentService {
+
+    /**
+     * 执行一轮智能体交互。
+     *
+     * @param userId       已认证用户，<b>不接受外部传入</b>
+     * @param fileId       关联文件；为 null 时不绑定文档（纯对话）
+     * @param versionNo    绑定的明确文档版本；有 fileId 时必填
+     * @param instruction  用户本轮的自然语言要求
+     * @param history      历史消息（用于多轮对话），可为空
+     * @param cancelled    外部取消信号；循环在每步检查它，供用户中止长时间运行
+     * @return 过程与结果
+     */
+    AgentRunResult run(Long userId, Long fileId, Integer versionNo, String instruction,
+                       java.util.List<String> history, BooleanSupplier cancelled);
+
+    /**
+     * 执行经用户确认的编辑计划（TODO 4.2「用户能够确认、继续修改或放弃结果」）。
+     *
+     * <p>与 {@link #run} 的分工：{@code run} 只产出计划、不改动文档；
+     * 本方法在用户确认后把计划落到新版本。这样「放弃」才是真的有意义的选项 ——
+     * 如果 {@code run} 直接改文档，用户就没有可放弃的东西。
+     *
+     * @param userId        已认证用户
+     * @param fileId        文件 ID
+     * @param expectVersion 计划所依据的版本，作为乐观锁期望值。
+     *                      若期间文档已被其他操作改动，会以 409 失败而不是覆盖他人修改
+     * @param plan          待执行的计划（来自 {@code run} 返回的 plans）
+     * @param instruction   原始的自然语言指令，写入版本记录便于追溯
+     * @return 执行结果，含新版本号与实际生效的批次
+     */
+    com.documenter.component.EditPlanExecutor.ExecutionResult executePlan(
+            Long userId, Long fileId, Integer expectVersion,
+            com.documenter.vo.DocumentEditPlan plan, String instruction);
+}
