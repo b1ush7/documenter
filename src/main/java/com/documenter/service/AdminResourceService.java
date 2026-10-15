@@ -1,5 +1,6 @@
 package com.documenter.service;
 
+import com.documenter.dto.AuditQueryDTO;
 import com.documenter.dto.FileQueryDTO;
 import com.documenter.dto.TaskQueryDTO;
 import com.documenter.vo.AdminFileVO;
@@ -7,6 +8,7 @@ import com.documenter.vo.AdminTaskDetailVO;
 import com.documenter.vo.AdminTaskVO;
 import com.documenter.vo.AdminOverviewVO;
 import com.documenter.vo.AdminUserUsageVO;
+import com.documenter.vo.AuditLogVO;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.PagePreviewInfoVO;
@@ -78,4 +80,13 @@ public interface AdminResourceService {
     AdminTaskVO cancelTask(Long taskId);
 
     AdminTaskVO retryTask(Long taskId);
+
+    /**
+     * 查询审计日志（TODO 4.3「管理员基础页面」）。
+     *
+     * <p>此前审计记录只写不读：有实体、有 Mapper、有写入路径，但没有查询入口。
+     * 结果是「管理员查看用户文档会留痕」这句话无法被验证，
+     * 账号禁用、角色调整、密钥更换这些敏感操作也事后无法追溯。
+     */
+    PageResult<AuditLogVO> listAuditLogs(AuditQueryDTO query);
 }

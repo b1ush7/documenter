@@ -16,6 +16,8 @@ import com.documenter.dto.InsertDocxImagesDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.dto.RenameFileDTO;
 import com.documenter.service.CompatibilityVerificationService;
+import com.documenter.service.DocumentComparisonService;
+import com.documenter.service.DocumentExportService;
 import com.documenter.service.DocumentVersionService;
 import com.documenter.service.DocxDocumentService;
 import com.documenter.service.FileService;
@@ -33,6 +35,7 @@ import com.documenter.vo.PagePreviewInfoVO;
 import com.documenter.vo.PageResult;
 import com.documenter.vo.PdfContentVO;
 import com.documenter.vo.PdfPagePreview;
+import com.documenter.vo.VersionComparisonVO;
 import com.documenter.vo.VersionVO;
 import com.documenter.vo.XlsxStructureVO;
 import com.documenter.vo.XlsxRangeVO;
@@ -76,6 +79,8 @@ public class FileController {
     private final ImageDocumentService imageDocumentService;
     private final PagePreviewService pagePreviewService;
     private final CompatibilityVerificationService compatibilityVerificationService;
+    private final DocumentComparisonService comparisonService;
+    private final DocumentExportService exportService;
 
     public FileController(FileService fileService, DocumentVersionService versionService,
                           DocxDocumentService docxDocumentService,
@@ -83,7 +88,9 @@ public class FileController {
                           XlsxDocumentService xlsxDocumentService,
                           ImageDocumentService imageDocumentService,
                           PagePreviewService pagePreviewService,
-                          CompatibilityVerificationService compatibilityVerificationService) {
+                          CompatibilityVerificationService compatibilityVerificationService,
+                          DocumentComparisonService comparisonService,
+                          DocumentExportService exportService) {
         this.fileService = fileService;
         this.versionService = versionService;
         this.docxDocumentService = docxDocumentService;
@@ -92,6 +99,8 @@ public class FileController {
         this.imageDocumentService = imageDocumentService;
         this.pagePreviewService = pagePreviewService;
         this.compatibilityVerificationService = compatibilityVerificationService;
+        this.comparisonService = comparisonService;
+        this.exportService = exportService;
     }
 
     // ---------------------------------------------------------------- 文件
@@ -410,6 +419,37 @@ public class FileController {
     public ApiResponse<DocxCompatibilityReportVO> checkCompatibility(@PathVariable Long fileId,
                                                                      @PathVariable Integer versionNo) {
         return ApiResponse.success(compatibilityVerificationService.verify(
+                SecurityUtil.requireUserId(), fileId, versionNo));
+    }
+
+    /**
+     * 比较同一文件两个版本的修改前后差异（TODO 4.3）。
+     *
+     * <p>两个版本都必须明确指定 —— 没有「和当前版本比」的语义，
+     * 否则用户看到的差异会随着别人编辑而改变。两个版本都经下载路径校验归属，
+     * 因此无法用「自己的旧版本 vs 他人的新版本」探测他人内容。
+     *
+     * <p>比较粒度是<b>块/单元格</b>而不是字符：用户关心「第二段被改了」，
+     * 字符级 diff 会把表格与段落改动变成难以阅读的增删碎片。
+     */
+    @GetMapping("/{fileId}/versions/{fromVersion}/compare/{toVersion}")
+    public ApiResponse<VersionComparisonVO> compareVersions(@PathVariable Long fileId,
+                                                            @PathVariable Integer fromVersion,
+                                                            @PathVariable Integer toVersion) {
+        return ApiResponse.success(comparisonService.compare(
+                SecurityUtil.requireUserId(), fileId, fromVersion, toVersion));
+    }
+
+    /**
+     * 将指定版本导出为 PDF（TODO 4.3）。
+     *
+     * <p>导出与预览共用同一个渲染后端，因此不会出现「预览正常但导出报不支持」。
+     * 版本本身已是 PDF 时直接返回原内容，不做无意义的再转换。
+     */
+    @GetMapping("/{fileId}/versions/{versionNo}/export/pdf")
+    public ResponseEntity<Resource> exportPdf(@PathVariable Long fileId,
+                                              @PathVariable Integer versionNo) {
+        return toResponse(exportService.exportPdf(
                 SecurityUtil.requireUserId(), fileId, versionNo));
     }
 

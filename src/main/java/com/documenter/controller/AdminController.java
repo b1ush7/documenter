@@ -4,6 +4,7 @@ import com.documenter.constant.ApiResponse;
 import com.documenter.dto.AdminUpdateUserRoleDTO;
 import com.documenter.dto.AdminUpdateUserStatusDTO;
 import com.documenter.dto.AdminUserQueryDTO;
+import com.documenter.dto.AuditQueryDTO;
 import com.documenter.dto.FileQueryDTO;
 import com.documenter.dto.RenameFileDTO;
 import com.documenter.dto.TaskQueryDTO;
@@ -17,6 +18,7 @@ import com.documenter.vo.AdminTaskDetailVO;
 import com.documenter.vo.AdminTaskVO;
 import com.documenter.vo.AdminUserUsageVO;
 import com.documenter.vo.AdminUserVO;
+import com.documenter.vo.AuditLogVO;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.PagePreviewInfoVO;
@@ -232,6 +234,20 @@ public class AdminController {
     @PostMapping("/tasks/{taskId}/retry")
     public ApiResponse<AdminTaskVO> retryTask(@PathVariable Long taskId) {
         return ApiResponse.success("重试任务已创建", adminResourceService.retryTask(taskId));
+    }
+
+    /**
+     * 审计日志查询（TODO 4.3「管理员基础页面」）。
+     *
+     * <p>此前审计只写不读，导致「管理员查看用户文档会留痕」无法验证、
+     * 敏感操作事后无法追溯。本接口补齐该能力。
+     *
+     * <p>支持按操作者、动作、目标、结果、时间范围与请求链路 ID 过滤。
+     * 其中 requestId 来自响应头 X-Request-ID，用于把一次调用的记录串起来排查。
+     */
+    @GetMapping("/audit-logs")
+    public ApiResponse<PageResult<AuditLogVO>> listAuditLogs(@Valid AuditQueryDTO query) {
+        return ApiResponse.success(adminResourceService.listAuditLogs(query));
     }
 
     private static ResponseEntity<Resource> toResponse(FileDownload download) {
