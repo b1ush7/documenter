@@ -102,27 +102,34 @@ public class TaskExecutionEngine {
         int timeoutSeconds = task.getTimeoutSeconds() == null
                 ? (int) properties.getDefaultTimeout().toSeconds() : task.getTimeoutSeconds();
 
-        int attempt = 0;
+        // 尝试序号从 1 开始，作为「任务级版本幂等键」的一半（TODO 3.4）。
+        // 同一次尝试内部若发生失败重入，处理器据此复用已产出的版本，
+        // 不会重复分配版本号或重复落盘。
+        int attemptNo = 1;
         while (true) {
-            TaskExecutionContextImpl context = new TaskExecutionContextImpl(taskMapper, stepMapper, task);
+            TaskExecutionContextImpl context =
+                    new TaskExecutionContextImpl(taskMapper, stepMapper, task, attemptNo);
             Outcome outcome = runOnce(task, handler.get(), context, timeoutSeconds);
             if (outcome.status() == TaskStatus.SUCCEEDED || outcome.status() == TaskStatus.CANCELLED) {
                 finish(taskId, outcome.status(), 100, null, null);
                 return;
             }
 
-            attempt++;
-            if (attempt > maxRetry) {
+            if (attemptNo > maxRetry) {
                 finish(taskId, TaskStatus.FAILED, currentProgress(taskId),
                         outcome.errorCode(), outcome.errorMessage());
                 return;
             }
 
-            log.warn("任务执行失败，准备第 {} 次重试, taskId={}, 原因={}", attempt, taskId, outcome.errorMessage());
+            log.warn("任务执行失败，准备第 {} 次重试, taskId={}, 原因={}",
+                    attemptNo, taskId, outcome.errorMessage());
+            // 记录已重试次数；下一次循环的 attemptNo 递增，因此新一轮允许产出新版本
             ProcessingTask update = new ProcessingTask();
             update.setId(taskId);
-            update.setRetryCount(attempt);
+            update.setRetryCount(attemptNo);
             taskMapper.updateById(update);
+
+            attemptNo++;
         }
     }
 

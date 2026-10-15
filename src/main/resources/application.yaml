@@ -92,6 +92,41 @@ res:
     requeue-pending-on-startup: false
     # 占位处理器开关：接入真实处理器时必须改为 false，否则会争抢任务类型导致启动失败
     placeholder-enabled: true
+  # 页面版式预览（TODO 3.3）与兼容性验收（TODO 4.1）
+  preview:
+    # 预览渲染的默认 DPI 与上限
+    default-dpi: ${PREVIEW_DEFAULT_DPI:110}
+    max-dpi: ${PREVIEW_MAX_DPI:200}
+    max-page-pixels: ${PREVIEW_MAX_PAGE_PIXELS:40000000}
+    # 缓存放存储临时目录下，由既有的过期临时文件清理任务自动回收
+    cache-enabled: ${PREVIEW_CACHE_ENABLED:true}
+    cache-directory: ${PREVIEW_CACHE_DIRECTORY:preview-cache}
+    # Office 渲染后端：none / kit
+    # kit 指打包好的 LibreOffice kit（Node CLI），同时提供页面渲染与格式转换。
+    # PDF 与图片预览不需要它；DOCX/XLSX 版式预览与兼容性验收需要。
+    office-backend: ${PREVIEW_OFFICE_BACKEND:none}
+    office-kit-node: ${PREVIEW_OFFICE_KIT_NODE:}
+    office-kit-cli: ${PREVIEW_OFFICE_KIT_CLI:}
+    office-timeout: ${PREVIEW_OFFICE_TIMEOUT:120s}
+    office-max-input-bytes: ${PREVIEW_OFFICE_MAX_INPUT_BYTES:52428800}
+    # 中文字体（TODO 4.3）
+    # 实测结论（Windows + 内置 native 后端）：font-directory 会传给渲染工具并影响
+    # missingFonts 诊断（传入不含中文的目录后缺失列表会新增 SimSun），
+    # 但不改变实际渲染结果 —— 该后端渲染时直接取操作系统字体库，
+    # 传入只含拉丁字体的目录后产物与用系统字体时逐字节相同。
+    # 因此：Windows 上中文能正确渲染的前提是宿主机装了中文字体；
+    # Linux 的字体解析由 fontconfig 决定，该目录可能真正生效，但尚未在 Linux 验证。
+    # 这些参数的作用是让缺字问题在兼容性报告里可见（WARNING），而不是修好它。
+    font-directory: ${PREVIEW_FONT_DIRECTORY:}
+    # 缺字时的后备字体族（逗号分隔）
+    font-fallbacks: ${PREVIEW_FONT_FALLBACKS:}
+    # 未显式指定字体的内容使用的初始字体族
+    initial-font-family: ${PREVIEW_INITIAL_FONT_FAMILY:}
+    # 兼容性验收：最多检查页数与渲染 DPI
+    compatibility-max-pages: ${PREVIEW_COMPAT_MAX_PAGES:20}
+    compatibility-dpi: ${PREVIEW_COMPAT_DPI:110}
+    # 页面边缘裁切检测范围（像素），0 表示关闭
+    clipping-margin-pixels: ${PREVIEW_CLIPPING_MARGIN:2}
 
 logging:
   level:

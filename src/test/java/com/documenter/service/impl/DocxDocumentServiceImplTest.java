@@ -7,6 +7,7 @@ import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.entity.DocumentVersion;
 import com.documenter.entity.FileAsset;
 import com.documenter.enums.ChangeType;
+import com.documenter.exception.BusinessException;
 import com.documenter.service.DocumentVersionService;
 import com.documenter.service.FileService;
 import com.documenter.service.FileStorage;
@@ -25,10 +26,12 @@ import java.util.List;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -121,6 +124,76 @@ class DocxDocumentServiceImplTest {
             assertEquals("新内容", document.getParagraphs().getFirst().getText());
         }
         verifyVersionWasAppended();
+    }
+
+    /**
+     * 依据来源版本检查编辑冲突，避免多个任务互相覆盖（TODO 4.1）。
+     *
+     * <p>场景：用户看到的界面基于版本 1，但在他操作期间另一个任务已经把文件改到了版本 2。
+     * 此时这次编辑的「来源版本」已经过时，如果仍然保存，就会把版本 2 的改动覆盖掉。
+     *
+     * <p>验证三点：
+     * <ol>
+     *   <li>来源版本被当作期望版本传给版本写入，作为乐观锁；</li>
+     *   <li>版本已被推进时返回 409，而不是静默覆盖；</li>
+     *   <li>冲突时不产生新版本，并且已经落盘的编辑产物要被清理掉 ——
+     *       否则每次冲突都会在存储里留下一个没人引用的孤儿文件。</li>
+     * </ol>
+     */
+    @Test
+    void staleSourceVersionIsRejectedAndLeavesNoOrphanArtifact() throws Exception {
+        byte[] source = createDocument(document -> document.createParagraph().createRun().setText("旧内容"));
+        when(versionService.downloadVersion(USER_ID, FILE_ID, SOURCE_VERSION))
+                .thenReturn(download(source));
+        when(fileStorage.store(any(byte[].class), eq("docx"))).thenReturn("versions/orphan.docx");
+        // 模拟「期间已有其他任务把版本推进到 2」：乐观锁更新影响行数为 0
+        when(versionWriter.appendVersion(eq(FILE_ID), eq(USER_ID),
+                any(VersionWriter.VersionContent.class), eq(ChangeType.MANUAL_EDIT),
+                any(), any(), eq(SOURCE_VERSION)))
+                .thenThrow(new BusinessException(409, "文档已被其他操作修改"));
+
+        ReplaceDocxTextDTO.Operation operation = new ReplaceDocxTextDTO.Operation();
+        operation.setBlockId("body/p0");
+        operation.setText("基于旧版本的修改");
+        ReplaceDocxTextDTO request = new ReplaceDocxTextDTO();
+        request.setOperations(List.of(operation));
+
+        BusinessException error = assertThrows(BusinessException.class,
+                () -> service.replaceParagraphText(USER_ID, FILE_ID, SOURCE_VERSION, request));
+
+        assertEquals(409, error.getCode());
+        // 关键：来源版本必须作为期望版本参与冲突判定
+        verify(versionWriter).appendVersion(eq(FILE_ID), eq(USER_ID),
+                any(VersionWriter.VersionContent.class), eq(ChangeType.MANUAL_EDIT),
+                any(), any(), eq(SOURCE_VERSION));
+        // 关键：冲突后必须清理已落盘的编辑产物，避免留下孤儿文件
+        verify(fileStorage).delete("versions/orphan.docx");
+    }
+
+    @Test
+    void conflictIsReportedBeforeAnyVersionIsVisible() throws Exception {
+        byte[] source = createDocument(document -> document.createParagraph().createRun().setText("旧内容"));
+        when(versionService.downloadVersion(USER_ID, FILE_ID, SOURCE_VERSION))
+                .thenReturn(download(source));
+        when(fileStorage.store(any(byte[].class), eq("docx"))).thenReturn("versions/orphan.docx");
+        when(versionWriter.appendVersion(eq(FILE_ID), eq(USER_ID),
+                any(VersionWriter.VersionContent.class), eq(ChangeType.MANUAL_EDIT),
+                any(), any(), eq(SOURCE_VERSION)))
+                .thenThrow(new BusinessException(409, "文档已被其他操作修改"));
+
+        ReplaceDocxTextDTO request = new ReplaceDocxTextDTO();
+        ReplaceDocxTextDTO.Operation operation = new ReplaceDocxTextDTO.Operation();
+        operation.setBlockId("body/p0");
+        operation.setText("x");
+        request.setOperations(List.of(operation));
+
+        assertThrows(BusinessException.class,
+                () -> service.replaceParagraphText(USER_ID, FILE_ID, SOURCE_VERSION, request));
+
+        // 冲突时不能产生任何成功返回值，调用方据此判断需要刷新后重试
+        verify(versionWriter, times(1)).appendVersion(eq(FILE_ID), eq(USER_ID),
+                any(VersionWriter.VersionContent.class), eq(ChangeType.MANUAL_EDIT),
+                any(), any(), eq(SOURCE_VERSION));
     }
 
     @Test

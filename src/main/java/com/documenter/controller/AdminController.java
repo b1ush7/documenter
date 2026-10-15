@@ -9,6 +9,7 @@ import com.documenter.dto.RenameFileDTO;
 import com.documenter.dto.TaskQueryDTO;
 import com.documenter.service.AdminResourceService;
 import com.documenter.service.AdminUserService;
+import com.documenter.util.PreviewResponses;
 import com.documenter.util.SecurityUtil;
 import com.documenter.vo.AdminFileVO;
 import com.documenter.vo.AdminOverviewVO;
@@ -18,9 +19,9 @@ import com.documenter.vo.AdminUserUsageVO;
 import com.documenter.vo.AdminUserVO;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.FileDownload;
+import com.documenter.vo.PagePreviewInfoVO;
 import com.documenter.vo.PageResult;
 import com.documenter.vo.PdfContentVO;
-import com.documenter.vo.PdfPagePreview;
 import com.documenter.vo.VersionVO;
 import com.documenter.vo.XlsxStructureVO;
 import com.documenter.vo.XlsxRangeVO;
@@ -158,7 +159,32 @@ public class AdminController {
                                                  @PathVariable Integer versionNo,
                                                  @PathVariable Integer pageNo,
                                                  @RequestParam(required = false) Integer dpi) {
-        return toPreview(adminResourceService.previewPdfPage(
+        return PreviewResponses.png(adminResourceService.previewPdfPage(
+                fileId, versionNo, pageNo, dpi));
+    }
+
+    /**
+     * 通用页面版式预览元信息（TODO 3.3 管理员入口）。
+     *
+     * <p>与用户侧同构：绑定明确版本，并以文件真实所有者身份走同一套归属校验。
+     */
+    @GetMapping("/files/{fileId}/versions/{versionNo}/preview")
+    public ApiResponse<PagePreviewInfoVO> previewInfo(@PathVariable Long fileId,
+                                                      @PathVariable Integer versionNo) {
+        return ApiResponse.success(adminResourceService.adminPreviewInfo(fileId, versionNo));
+    }
+
+    /**
+     * 通用页面版式预览图片（TODO 3.3 管理员入口）。
+     *
+     * <p>会写入审计日志：管理员查看用户文档内容属于敏感操作。
+     */
+    @GetMapping("/files/{fileId}/versions/{versionNo}/pages/{pageNo}/preview")
+    public ResponseEntity<byte[]> previewPage(@PathVariable Long fileId,
+                                              @PathVariable Integer versionNo,
+                                              @PathVariable Integer pageNo,
+                                              @RequestParam(required = false) Integer dpi) {
+        return PreviewResponses.png(adminResourceService.adminPreviewPage(
                 fileId, versionNo, pageNo, dpi));
     }
 
@@ -217,19 +243,5 @@ public class AdminController {
                 .contentType(MediaType.parseMediaType(download.contentType()))
                 .contentLength(download.contentLength())
                 .body(download.resource());
-    }
-
-    private static ResponseEntity<byte[]> toPreview(PdfPagePreview preview) {
-        ContentDisposition disposition = ContentDisposition.inline()
-                .filename(preview.fileName(), StandardCharsets.UTF_8)
-                .build();
-        byte[] content = preview.content();
-        return ResponseEntity.ok()
-                .header(HttpHeaders.CONTENT_DISPOSITION, disposition.toString())
-                .header("X-Image-Width", String.valueOf(preview.widthPixels()))
-                .header("X-Image-Height", String.valueOf(preview.heightPixels()))
-                .contentType(MediaType.IMAGE_PNG)
-                .contentLength(content.length)
-                .body(content);
     }
 }

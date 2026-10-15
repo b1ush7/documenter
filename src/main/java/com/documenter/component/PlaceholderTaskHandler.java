@@ -41,10 +41,16 @@ public class PlaceholderTaskHandler implements TaskHandler {
             context.reportProgress(progress);
             sleepBriefly();
         }
-        context.finishStep(TaskStepStatus.SUCCEEDED, "占位处理完成，未产生真实产物", null);
+        // 示范任务级幂等（TODO 3.4）：真实处理器产出新版本时应把任务与尝试序号传下去，
+        // 使同一次尝试内的失败重入复用已产出的版本，而不是再分配一个版本号。
+        // 占位处理器不写版本，因此这里只把两个标识写进步骤说明，便于联调时确认。
+        context.finishStep(TaskStepStatus.SUCCEEDED,
+                "占位处理完成，未产生真实产物（实际处理器应传 taskId=" + context.taskId()
+                        + ", attemptNo=" + context.attemptNo() + " 以保证版本幂等）", null);
 
         context.reportProgress(100);
-        log.info("占位处理器完成任务, taskId={}, taskType={}", task.getId(), task.getTaskType());
+        log.info("占位处理器完成任务, taskId={}, attemptNo={}, taskType={}",
+                task.getId(), context.attemptNo(), task.getTaskType());
     }
 
     @Override

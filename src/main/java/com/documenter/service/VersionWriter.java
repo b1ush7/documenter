@@ -28,6 +28,45 @@ public interface VersionWriter {
                                   Integer expectVersion);
 
     /**
+     * 带任务幂等标识地追加版本（TODO 3.4）。
+     *
+     * <p>解决的问题：任务失败后重试会重新调用处理器，而处理器里的
+     * {@code appendVersion} 每次都会分配新版本号，于是一次
+     * 「已经产出版本、但在后续步骤失败」的执行会产出内容相同的重复版本。
+     *
+     * <p>本方法的契约：
+     * <ul>
+     *   <li>{@code (taskId, attemptNo)} 已存在版本时<b>直接返回已有版本</b>，
+     *       不分配新版本号、不重复落盘；</li>
+     *   <li>{@code taskId} 为 null 时退化为普通追加（上传、手工编辑等非任务产出）。</li>
+     * </ul>
+     *
+     * <p>并发保护是双层的：应用层先查一次，减少无谓的版本号分配；
+     * 最终由唯一索引 {@code uk_document_version_task_attempt} 兜底——
+     * 即使「先查后插」在并发下失效，数据库也会拒绝第二条记录。
+     *
+     * <p>为什么用 {@code (taskId, attemptNo)} 而不是只用 taskId：
+     * 用户显式重试应当允许产出新版本（那是新的执行意图），
+     * 但同一次尝试内部的失败重入、超时重入不应重复产出。
+     *
+     * @param taskId    产出该版本的任务 ID；可为 null
+     * @param attemptNo 任务内的尝试序号，从 1 开始；taskId 非 null 时必须为正数
+     */
+    DocumentVersion appendVersion(Long fileId, Long userId, VersionContent content,
+                                  ChangeType changeType, String instruction, String summary,
+                                  Integer expectVersion, Long taskId, Integer attemptNo);
+
+    /**
+     * 该任务是否已经产出过版本（任意尝试）。
+     *
+     * <p>供需要在产出前后做副作用的调用方使用，典型场景是扣减额度：
+     * 处理器应在扣减前检查本方法，避免重试导致重复扣减。
+     * 当前尚未确定是否接入余额计费（见 TODO 第 9 节），
+     * 因此这里只提供判断依据，不替调用方做计费决策。
+     */
+    boolean hasProducedVersion(Long taskId);
+
+    /**
      * 新版本内容的位置与摘要。
      *
      * @param storageKey 存储标识

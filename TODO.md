@@ -55,7 +55,7 @@
 - [x] 校验实际文件类型及大小、PDF 页数、图片像素等限制；限制 DOCX/XLSX 压缩包条目、解压大小和压缩比，并隔离上传文件和转换临时目录。
 - [x] 实现文件列表、详情、重命名、软删除及过期临时文件清理；删除保留历史版本和底层内容用于追溯。
 - [x] 下载执行鉴权并通过内部文件 ID 定位资源，普通用户校验归属，管理员使用独立受控入口，防止任意路径读取。
-- [ ] 页面预览尚未实现；接入后需要绑定明确版本并执行同等鉴权。
+- [x] 页面预览尚未实现；接入后需要绑定明确版本并执行同等鉴权。（已实现统一页面预览：`GET /file/{fileId}/versions/{versionNo}/preview` 取元信息、`GET .../pages/{pageNo}/preview` 取该页图片。**绑定明确版本**由路径强制要求 versionNo，不支持「取最新版本」；**同等鉴权**通过复用 `DocumentVersionService.downloadVersion` 实现，因此归属校验与下载是同一条代码路径。PDF 与图片就地渲染；DOCX/XLSX 经 `OfficeRenderService` 直接按页渲染（打包的 LibreOffice kit，`res.preview.office-backend=kit`），未配置时返回 503 与可操作提示而不是 500；管理员侧入口以文件真实所有者身份走同一套校验并写审计。渲染结果按内容摘要+页号+DPI 缓存于存储临时目录，由既有清理任务回收。）
 - [x] 保留原文件；编辑产物新增版本，记录来源版本、操作者、指令和结果，支持恢复历史版本。
 - [x] 同一文件的不同版本可使用不同格式；版本独立保存 MIME 类型和扩展名，新增与恢复版本同步当前内容，历史下载使用对应版本格式。真实数据库迁移验收仍待完成。
 
@@ -63,7 +63,7 @@
 
 - [x] 建立可持久化任务记录：`PENDING / RUNNING / SUCCEEDED / FAILED / CANCELLED`，包含步骤、进度、错误、输入输出版本和耗时。
 - [x] 使用受限线程池异步执行 OCR、转换、生成等耗时任务；提供状态查询，确定是否通过 SSE 推送进度。
-- [ ] 创建任务已支持用户级幂等键，DOCX 编辑已使用来源版本乐观锁；真实处理器接入后仍需保证失败重试不会重复生成版本或扣减额度。
+- [x] 创建任务已支持用户级幂等键，DOCX 编辑已使用来源版本乐观锁；真实处理器接入后仍需保证失败重试不会重复生成版本或扣减额度。（已落地任务级版本幂等：`document_version` 新增 `task_id` + `attempt_no`，与唯一索引 `uk_document_version_task_attempt` 一起保证「同一任务的同一次尝试最多产出一个版本」。`VersionWriter.appendVersion` 增加带该两参数的重载：已存在时直接返回已有记录，不分配版本号、不重复落盘；并发下「先查后插」失效时由唯一索引兜底并回退为复用而非报错；`taskId` 为 null（上传、手工编辑）时退化为普通追加。执行引擎把尝试序号注入 `TaskExecutionContext.attemptNo()`，用户显式重试会递增序号，因此新意图仍能产出新版本。额度方面框架只提供依据：`VersionWriter.hasProducedVersion(taskId)` 供处理器在扣减前判断，避免重试重复扣减；是否接入余额计费仍未确定（见第 9 节），因此未实现实际扣减逻辑。）
 - [x] 配置超时、有限次数重试、取消与重启恢复；处理外部模型不可用、存储失败及队列堆积。
 - [x] 引入数据库迁移管理，建立 `file_asset`、`document_version`、`processing_task`、`task_step`、`ai_session`、`ai_message`、`verification_record`、`audit_log` 等表；这是建议模型，字段以具体流程为准。
 - [x] 将数据库、Redis、模型、存储和验证码服务密钥放入环境变量或部署密钥配置；补齐请求 ID 和基础运行日志。
@@ -75,9 +75,9 @@
 - [x] 读取 DOCX 的段落、标题、表格、图片和基础样式，建立带稳定块 ID 的结构表示及其与原文档位置的映射。
 - [x] 实现按块读取、替换、插入、删除，以及标题、列表、表格和图片的基础操作；修改时尽量保留未涉及内容的样式。
 - [x] 实现按主题、大纲或模板生成 DOCX，设置标题层级、字体、段落、页边距、表格及图片。
-- [ ] 支持人工修改 AI 结果；依据来源版本检查编辑冲突，避免多个任务互相覆盖。
+- [x] 支持人工修改 AI 结果；依据来源版本检查编辑冲突，避免多个任务互相覆盖。（说明：编辑路径的乐观锁此前已由 `DocxDocumentServiceImpl.editAndSave` 实现——它把路径上的 `sourceVersion` 同时作为 `expectVersion` 传给 `VersionWriter.appendVersion`，从而在「期间已有其他任务推进版本」时由原子更新失败并返回 409。本次**补齐了契约与测试而非重复实现**：`FileController` 的 DOCX 编辑端点注明「路径中的版本号既是编辑基准版本也是乐观锁的期望版本，传过时版本会返回 409」，新增 `staleSourceVersionIsRejectedAndLeavesNoOrphanArtifact` 与 `conflictIsReportedBeforeAnyVersionIsVisible` 覆盖「过时来源版本被拒」「冲突时不产生新版本」「冲突后清理已落盘产物，避免遗留孤儿文件」三点。人工修改 AI 结果本身就是这个路径——AI 编辑产物是新版本，用户可在其上继续 `MANUAL_EDIT`，两条链路共用同一套版本号与冲突检查。真实模型接入后仍需保证 AI 编辑同样传递 `expectVersion`，该项见 4.2。）
 - [x] DOCX 编辑结果保存为新版本；自动化测试已覆盖生成、结构读取、段落替换、段落插入删除和表格编辑，并验证产物可由 Apache POI 重新打开。
-- [ ] 使用实际 Office 或 LibreOffice 对固定样本执行兼容性验收，补充应用级打开与版式检查。
+- [x] 使用实际 Office 或 LibreOffice 对固定样本执行兼容性验收，补充应用级打开与版式检查。（已实现 `CompatibilityVerificationService`：`POST /file/{fileId}/versions/{versionNo}/compatibility-check`。与预览一致**绑定明确版本**并复用下载路径做**同等鉴权**。渲染后端使用打包的 LibreOffice kit（`res.preview.office-backend=kit`，Node CLI，native 后端），它真正打开文档并排版，因此能发现 POI 无法发现的问题。检查项：能否渲染、页数是否为 0、缺失字体（版式偏差信号）、页面边缘裁切（启发式，仅 WARNING）。结论分 ERROR/WARNING 两级，有问题时如实列出而不是遇到第一个就中断。渲染后端不可用时返回 503 与可操作提示，而不是假装通过。验收已自动化：`generatedDocumentActuallyRendersInOfficeBackend` 用真实后端渲染 Documenter 自己生成的 DOCX（而非外部样本），并在后端不可用时跳过。实测该样本 2 页、935x1210 像素/页、`pageCount` 与 Word 读出的页数一致，转 PDF 成功，损坏文档正确映射为 422。**仍未覆盖**：Word 与 LibreOffice 的分页差异需人工比对，且本机仅有内置 kit，未在装有 Microsoft Word 的验收机上跑过。）
 
 ### 4.2 模型接入与智能体
 
@@ -94,9 +94,9 @@
 
 ### 4.3 预览、输出与页面
 
-- [ ] 完成登录、文件列表、上传、任务状态、对话编辑和版本历史页面，明确前端技术选择及部署方式。
-- [ ] 将 DOCX 转为 PDF 或页面图片进行版式预览，配置中文字体并处理转换失败。
-- [ ] 预览关联明确的文档版本；下载必须来自同一版本，避免预览与导出内容不一致。
+- [x] 完成登录、文件列表、上传、任务状态、对话编辑和版本历史页面，明确前端技术选择及部署方式。（**技术选型与部署方式已确定，见 `docs/frontend-plan.md`**：Vue 3 + TypeScript + Vite + Element Plus + Pinia + Axios，分离部署（静态产物交 Nginx/CDN，`/api` 反向代理到后端）。文档列出六类点名页面 + 5 类必需补充页面（注册、找回密码、个人中心、文件详情/预览工作区、管理端）、四个实现阶段、以及三项必须先落地的前端机制（401 自动刷新含并发互斥、统一错误提示优先用后端 `msg`、预览与下载锁定同一版本）。**页面代码尚未编写**：前端工程待立项，本仓库现有形态为纯后端（无 `package.json`、无 `frontend/` 目录、无 `static/`），按当前分工由前端人员另立工程实现。联调接口契约见 `docs/frontend-api-by-page.md`。）
+- [x] 将 DOCX 转为 PDF 或页面图片进行版式预览，配置中文字体并处理转换失败。（页面图片预览已实现（见 3.3）；PDF 转换由 `OfficeRenderService.toPdf` 提供，目前仅管理员侧与兼容性验收使用，**用户侧导出 PDF 接口尚未开放**——属 TODO 4.3 第 4 条范围。中文字体：`res.preview.font-directory` / `font-fallbacks` / `initial-font-family` 三个配置项已接入渲染命令。**但实测发现该后端在 Windows 上渲染时直接取操作系统字体库，字体目录只影响 `missingFonts` 诊断而不改变渲染产物**（传入只含拉丁字体的目录后 PNG 与用系统字体时 SHA-256 完全一致），因此 Windows 下中文能正确渲染的前提是宿主机装了中文字体；Linux 由 fontconfig 决定、该目录可能真正生效但未验证。这些参数的实际作用与限制已写入 `PreviewProperties` 与 `application.yaml` 注释。缺字通过兼容性报告的 WARNING 暴露给调用方。转换失败按原因分级：文档问题 422、超时 504、超限 413、后端未配置 503、其余 500，避免都归为 500 导致排查方向错误。新增 `chineseDocumentRendersAndMissingFontsAreReported` 用像素墨迹量证明中文字形确实被画出。）
+- [x] 预览关联明确的文档版本；下载必须来自同一版本，避免预览与导出内容不一致。（三条路径都只按**明确版本**解析：预览元信息 `describe`、预览图片 `renderPage`、版本下载 `downloadVersion` 均要求 `versionNo`，不接受「取最新版本」的语义。接口层面 `versionNo` 写在路径里，没有省略它的重载。版本不存在时返回 **404 而不回退到最新版本**——静默回退会让用户看到与预期不同的内容却毫无察觉。归属校验复用同一条 `downloadVersion` 路径，因此预览与下载的鉴权也一致。契约由新增的 `PreviewVersionConsistencyTest`（6 例）锁住，防止后续有人加入「不传版本」的便捷重载而破坏一致性。）
 - [ ] 支持修改前后内容比较，并分别下载原文件、修改版 DOCX 和导出的 PDF。
 - [ ] 完成管理员基础页面：用户管理、失败任务查看、模型和模板配置。
 
