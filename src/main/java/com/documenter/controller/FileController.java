@@ -18,13 +18,16 @@ import com.documenter.dto.RenameFileDTO;
 import com.documenter.service.DocumentVersionService;
 import com.documenter.service.DocxDocumentService;
 import com.documenter.service.FileService;
+import com.documenter.service.PagePreviewService;
 import com.documenter.service.PdfDocumentService;
 import com.documenter.service.XlsxDocumentService;
 import com.documenter.service.ImageDocumentService;
+import com.documenter.util.PreviewResponses;
 import com.documenter.util.SecurityUtil;
 import com.documenter.vo.FileAssetVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.DocxStructureVO;
+import com.documenter.vo.PagePreviewInfoVO;
 import com.documenter.vo.PageResult;
 import com.documenter.vo.PdfContentVO;
 import com.documenter.vo.PdfPagePreview;
@@ -69,18 +72,21 @@ public class FileController {
     private final PdfDocumentService pdfDocumentService;
     private final XlsxDocumentService xlsxDocumentService;
     private final ImageDocumentService imageDocumentService;
+    private final PagePreviewService pagePreviewService;
 
     public FileController(FileService fileService, DocumentVersionService versionService,
                           DocxDocumentService docxDocumentService,
                           PdfDocumentService pdfDocumentService,
                           XlsxDocumentService xlsxDocumentService,
-                          ImageDocumentService imageDocumentService) {
+                          ImageDocumentService imageDocumentService,
+                          PagePreviewService pagePreviewService) {
         this.fileService = fileService;
         this.versionService = versionService;
         this.docxDocumentService = docxDocumentService;
         this.pdfDocumentService = pdfDocumentService;
         this.xlsxDocumentService = xlsxDocumentService;
         this.imageDocumentService = imageDocumentService;
+        this.pagePreviewService = pagePreviewService;
     }
 
     // ---------------------------------------------------------------- 文件
@@ -177,8 +183,46 @@ public class FileController {
                                                  @PathVariable Integer versionNo,
                                                  @PathVariable Integer pageNo,
                                                  @RequestParam(required = false) Integer dpi) {
-        return toPreview(pdfDocumentService.renderPage(
+        return PreviewResponses.png(pdfDocumentService.renderPage(
                 SecurityUtil.requireUserId(), fileId, versionNo, pageNo, dpi));
+    }
+
+    /**
+     * 通用页面版式预览元信息（TODO 3.3）。
+     *
+     * <p>前端先调本接口拿到页数与可预览性，再按页请求图片。
+     * DOCX / XLSX 需要外部转换器，未配置时 {@code previewable=false} 且 {@code message} 给出配置方法。
+     */
+    @GetMapping("/{fileId}/versions/{versionNo}/preview")
+    public ApiResponse<PagePreviewInfoVO> previewInfo(@PathVariable Long fileId,
+                                                      @PathVariable Integer versionNo) {
+        return ApiResponse.success(pagePreviewService.describe(
+                SecurityUtil.requireUserId(), fileId, versionNo));
+    }
+
+    /**
+     * 通用页面版式预览图片（TODO 3.3）。
+     *
+     * <p>与 PDF 专用预览接口的区别：本接口接受任意受支持格式，内部按需转换。
+     * 两个接口都<b>绑定明确版本</b>并复用下载路径做归属校验，不存在鉴权差异。
+     */
+    @GetMapping("/{fileId}/versions/{versionNo}/pages/{pageNo}/preview")
+    public ResponseEntity<byte[]> previewPage(@PathVariable Long fileId,
+                                              @PathVariable Integer versionNo,
+                                              @PathVariable Integer pageNo,
+                                              @RequestParam(required = false) Integer dpi) {
+        Long userId = SecurityUtil.requireUserId();
+        PagePreviewInfoVO info = pagePreviewService.describe(userId, fileId, versionNo);
+        PdfPagePreview preview = pagePreviewService.renderPage(userId, fileId, versionNo, pageNo, dpi);
+
+        // 图片版本：原样回传以保留原始格式与透明通道。
+        // 判断依据用版本自身的扩展名，而不是渲染结果的文件名后缀——后者是内部构造值，
+        // 一旦命名规则调整就会静默退化成 PNG。
+        if (isImageExtension(info.extension())) {
+            return PreviewResponses.originalImage(preview,
+                    MediaType.parseMediaType(info.contentType()));
+        }
+        return PreviewResponses.png(preview);
     }
 
     /** 读取指定 XLSX 版本的工作表、单元格、样式、公式、合并区域与图表结构。 */
@@ -337,17 +381,11 @@ public class FileController {
                 .body(download.resource());
     }
 
-    private static ResponseEntity<byte[]> toPreview(PdfPagePreview preview) {
-        ContentDisposition disposition = ContentDisposition.inline()
-                .filename(preview.fileName(), StandardCharsets.UTF_8)
-                .build();
-        byte[] content = preview.content();
-        return ResponseEntity.ok()
-                .header(HttpHeaders.CONTENT_DISPOSITION, disposition.toString())
-                .header("X-Image-Width", String.valueOf(preview.widthPixels()))
-                .header("X-Image-Height", String.valueOf(preview.heightPixels()))
-                .contentType(MediaType.IMAGE_PNG)
-                .contentLength(content.length)
-                .body(content);
+    /** 与 PagePreviewServiceImpl 的图片扩展名集合保持一致。 */
+    private static final java.util.Set<String> PREVIEW_IMAGE_EXTENSIONS =
+            java.util.Set.of("png", "jpg", "jpeg", "gif", "bmp");
+
+    private static boolean isImageExtension(String extension) {
+        return extension != null && PREVIEW_IMAGE_EXTENSIONS.contains(extension.toLowerCase());
     }
 }

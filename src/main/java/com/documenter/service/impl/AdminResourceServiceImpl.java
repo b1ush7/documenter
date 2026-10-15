@@ -15,6 +15,7 @@ import com.documenter.service.AuditService;
 import com.documenter.service.DocumentVersionService;
 import com.documenter.service.DocxDocumentService;
 import com.documenter.service.FileService;
+import com.documenter.service.PagePreviewService;
 import com.documenter.service.PdfDocumentService;
 import com.documenter.service.TaskService;
 import com.documenter.service.XlsxDocumentService;
@@ -25,6 +26,7 @@ import com.documenter.vo.AdminTaskVO;
 import com.documenter.vo.AdminUserUsageVO;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.FileDownload;
+import com.documenter.vo.PagePreviewInfoVO;
 import com.documenter.vo.PageResult;
 import com.documenter.vo.PdfContentVO;
 import com.documenter.vo.PdfPagePreview;
@@ -52,6 +54,7 @@ public class AdminResourceServiceImpl implements AdminResourceService {
     private final DocxDocumentService docxDocumentService;
     private final PdfDocumentService pdfDocumentService;
     private final XlsxDocumentService xlsxDocumentService;
+    private final PagePreviewService pagePreviewService;
     private final TaskService taskService;
     private final AuditService auditService;
 
@@ -63,6 +66,7 @@ public class AdminResourceServiceImpl implements AdminResourceService {
                                     DocxDocumentService docxDocumentService,
                                     PdfDocumentService pdfDocumentService,
                                     XlsxDocumentService xlsxDocumentService,
+                                    PagePreviewService pagePreviewService,
                                     TaskService taskService,
                                     AuditService auditService) {
         this.fileAssetMapper = fileAssetMapper;
@@ -73,6 +77,7 @@ public class AdminResourceServiceImpl implements AdminResourceService {
         this.docxDocumentService = docxDocumentService;
         this.pdfDocumentService = pdfDocumentService;
         this.xlsxDocumentService = xlsxDocumentService;
+        this.pagePreviewService = pagePreviewService;
         this.taskService = taskService;
         this.auditService = auditService;
     }
@@ -213,6 +218,28 @@ public class AdminResourceServiceImpl implements AdminResourceService {
                 asset.getUserId(), fileId, versionNo, pageNo, dpi);
         auditService.success(AuditAction.ADMIN_FILE_VIEW, "FILE", fileId,
                 "预览 PDF 版本 " + versionNo + " 第 " + pageNo + " 页");
+        return preview;
+    }
+
+    @Override
+    public PagePreviewInfoVO adminPreviewInfo(Long fileId, Integer versionNo) {
+        FileAsset asset = requireFile(fileId);
+        // 以真实所有者身份调用：管理员不需要绕过归属校验，
+        // 而是复用同一套「绑定明确版本 + 归属校验」的实现
+        PagePreviewInfoVO info = pagePreviewService.describe(asset.getUserId(), fileId, versionNo);
+        auditService.success(AuditAction.ADMIN_FILE_VIEW, "FILE", fileId,
+                "查看版本 " + versionNo + " 的页面预览元信息");
+        return info;
+    }
+
+    @Override
+    public PdfPagePreview adminPreviewPage(Long fileId, Integer versionNo, Integer pageNo, Integer dpi) {
+        FileAsset asset = requireFile(fileId);
+        PdfPagePreview preview = pagePreviewService.renderPage(
+                asset.getUserId(), fileId, versionNo, pageNo, dpi);
+        // 管理员查看用户文档内容属于敏感操作，必须留痕
+        auditService.success(AuditAction.ADMIN_FILE_VIEW, "FILE", fileId,
+                "预览版本 " + versionNo + " 第 " + pageNo + " 页");
         return preview;
     }
 

@@ -46,11 +46,14 @@ class AdminResourceServiceImplTest {
     private final DocxDocumentService docxDocumentService = mock(DocxDocumentService.class);
     private final PdfDocumentService pdfDocumentService = mock(PdfDocumentService.class);
     private final XlsxDocumentService xlsxDocumentService = mock(XlsxDocumentService.class);
+    private final com.documenter.service.PagePreviewService pagePreviewService =
+            mock(com.documenter.service.PagePreviewService.class);
     private final TaskService taskService = mock(TaskService.class);
     private final AuditService auditService = mock(AuditService.class);
     private final AdminResourceServiceImpl service = new AdminResourceServiceImpl(
             fileAssetMapper, taskMapper, statisticsMapper, fileService, versionService,
-            docxDocumentService, pdfDocumentService, xlsxDocumentService, taskService, auditService);
+            docxDocumentService, pdfDocumentService, xlsxDocumentService, pagePreviewService,
+            taskService, auditService);
 
     @Test
     void readsXlsxWithActualOwnerAndWritesAudit() {
