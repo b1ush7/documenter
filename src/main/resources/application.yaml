@@ -127,6 +127,44 @@ res:
     compatibility-dpi: ${PREVIEW_COMPAT_DPI:110}
     # 页面边缘裁切检测范围（像素），0 表示关闭
     clipping-margin-pixels: ${PREVIEW_CLIPPING_MARGIN:2}
+  # 文本模型接入（TODO 4.2）
+  # 部署时在 base-url / api-key / model-name 填入实际值即可启用。
+  # 密钥建议用环境变量注入，不要写进版本库。
+  ai:
+    # 总开关。false 时对话接口返回明确提示，其余功能不受影响
+    enabled: ${AI_ENABLED:false}
+    # 提供方：auto / openai / stub
+    # auto：配齐 base-url + api-key + model-name 就用真实模型，否则回退桩模型
+    # stub：强制使用桩模型（无网络的测试与演示环境，产出非真实模型结果）
+    provider: ${AI_PROVIDER:auto}
+    # 必须指向兼容 OpenAI 协议的端点
+    # 例：https://dashscope.aliyuncs.com/compatible-mode/v1
+    base-url: ${AI_BASE_URL:}
+    api-key: ${AI_API_KEY:}
+    model-name: ${AI_MODEL_NAME:}
+    temperature: ${AI_TEMPERATURE:0.2}
+    max-output-tokens: ${AI_MAX_OUTPUT_TOKENS:2048}
+    timeout: ${AI_TIMEOUT:60s}
+    max-retries: ${AI_MAX_RETRIES:2}
+    # ---- 智能体循环上限 ----
+    # 必须有上限：模型可能陷入「调用工具 → 结果不理想 → 再调用」的循环
+    max-steps: ${AI_MAX_STEPS:8}
+    max-tool-calls: ${AI_MAX_TOOL_CALLS:12}
+    max-same-tool-repeats: ${AI_MAX_SAME_TOOL_REPEATS:4}
+    max-model-retries: ${AI_MAX_MODEL_RETRIES:1}
+    # ---- 提示词与上下文 ----
+    # 长文档按结构分块截断，而不是简单截字符串（后者会把段落切成两半）
+    max-document-chars: ${AI_MAX_DOCUMENT_CHARS:12000}
+    max-tool-result-chars: ${AI_MAX_TOOL_RESULT_CHARS:6000}
+    record-tool-messages: ${AI_RECORD_TOOL_MESSAGES:true}
+    # 提交前确认：编辑类工具只产出计划，不直接落版本
+    require-confirmation: ${AI_REQUIRE_CONFIRMATION:true}
+    # ---- 成本统计 ----
+    # 默认 0 表示不计价。真实价格随模型与供应商变动，因此要求显式配置，
+    # 而不是内置一张容易过期的价目表（过期价目比没有更糟）
+    cost-per-1k-input-tokens: ${AI_COST_PER_1K_INPUT:0}
+    cost-per-1k-output-tokens: ${AI_COST_PER_1K_OUTPUT:0}
+    daily-call-limit-per-user: ${AI_DAILY_CALL_LIMIT:0}
 
 logging:
   level:

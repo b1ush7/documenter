@@ -147,6 +147,13 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                     .toList();
             for (ResolvedParagraphEdit edit : edits) {
                 switch (edit.operation().getType()) {
+                    // REPLACE_TEXT 与插入、删除放在同一批执行（TODO 4.2）。
+                    // 一个编辑计划里常同时包含「改一段 + 删一段」；分成两次调用的话，
+                    // 第一次成功、第二次失败会留下半成品：文档既不是原样也不是
+                    // 用户期望的结果，而且用户无法判断改到了哪一步。
+                    // 放在同一批里由同一个版本写入收口，要么整体生效要么整体不生效。
+                    case "REPLACE_TEXT" -> replaceSimpleParagraph(edit.paragraph(),
+                            edit.operation().getBlockId(), edit.operation().getText());
                     case "INSERT_BEFORE" -> insertParagraph(edit.paragraph(), edit.operation().getText(), false);
                     case "INSERT_AFTER" -> insertParagraph(edit.paragraph(), edit.operation().getText(), true);
                     case "DELETE" -> deleteParagraph(edit.paragraph(), edit.operation().getBlockId());

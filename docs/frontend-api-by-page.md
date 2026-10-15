@@ -382,6 +382,51 @@ POST /file/{fileId}/versions/{versionNo}/restore?expectVersion=3
 恢复**不覆盖历史**，而是新建一个 `changeType=RESTORE` 的版本，因此恢复本身也可被再次撤销。
 并发冲突时返回 `409`，`msg` 会告知当前实际版本号。
 
+### 8.1.1 通用页面版式预览
+
+```
+GET /file/{fileId}/versions/{versionNo}/preview                     预览元信息
+GET /file/{fileId}/versions/{versionNo}/pages/{pageNo}/preview      该页图片（PNG）
+GET /admin/files/{fileId}/versions/{versionNo}/preview               管理员入口
+GET /admin/files/{fileId}/versions/{versionNo}/pages/{pageNo}/preview
+```
+
+与上一条「PDF 专用预览」的区别：本组接口接受**任意受支持格式**，内部按需转换。
+两组都绑定明确版本并复用下载路径做归属校验，鉴权没有差异。
+
+**用法**：先取元信息决定怎么渲染，再按页请求图片。
+
+```json
+// GET .../preview
+{
+  "fileId": 10, "versionNo": 2, "contentType": "…wordprocessingml.document",
+  "extension": "docx",
+  "pageCount": null, "requiresConversion": true, "previewable": true,
+  "engine": "libreoffice-kit", "dpi": 110,
+  "message": "页数将在首次渲染时确定"
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| pageCount | 可预览页数；DOCX/XLSX 在首次渲染前为 `null`（避免「只看一眼元信息就把大文档排一遍版」） |
+| requiresConversion | 是否需要外部渲染后端。PDF 与图片为 `false` |
+| previewable | 是否具备预览条件 |
+| engine | 实际引擎；PDF 与图片为 `native` |
+| message | 不可预览或需提示时的可读说明，正常为 `null` |
+
+**图片接口的响应**：
+- 非图片版本返回 **PNG 字节流**，带响应头 `X-Image-Width` / `X-Image-Height`，
+  建议据此刻预留高度避免布局跳动
+- **图片版本原样回传原图**（保留原始格式与透明通道），此时 `Content-Type` 为该图真实类型
+- 响应带 `Cache-Control: private, max-age=3600`；服务端按「内容摘要 + 页号 + DPI」缓存，
+  同一版本重复请求不会重复渲染
+
+**`dpi` 参数**：默认 110，允许 60–200，超出返回 400。分辨率越高越慢、内存占用越大。
+
+**渲染后端未配置时**：元信息接口返回 `previewable=false` 与可操作提示（HTTP 200）；
+图片接口返回 **503**。前端应展示 `message`/`msg`，而不是报「未知错误」。
+
 ### 8.2 文档结构读取（按格式）
 
 ```
@@ -494,6 +539,93 @@ POST /file/{fileId}/versions/{versionNo}/xlsx/formats           基础格式
 - `resultSummary`（结果说明）
 - `createTime`、`sizeBytes`
 - 操作：预览、下载、**恢复到此版本**
+
+### 9.1 修改前后比较
+
+```
+GET /file/{fileId}/versions/{fromVersion}/compare/{toVersion}
+```
+
+响应 `data`：
+
+```json
+{
+  "fileId": 10, "fromVersion": 1, "toVersion": 2, "format": "DOCX",
+  "truncated": false,
+  "changes": [
+    { "type": "MODIFIED", "key": "body/p1", "label": "段落 body/p1",
+      "before": "旧内容", "after": "新内容", "kind": "PARAGRAPH" },
+    { "type": "ADDED", "key": "body/p2", "label": "段落 body/p2",
+      "before": null, "after": "新增段落", "kind": "PARAGRAPH" }
+  ]
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| type | `ADDED` / `REMOVED` / `MODIFIED` |
+| key | 定位标识。DOCX 为块 ID（如 `body/p1`、`body/t0/r1/c0`），XLSX 为 `工作表!单元格`（如 `Sheet1!A1`） |
+| label | 面向人的位置描述，可直接展示 |
+| before | 改动前内容；`ADDED` 时为 `null` |
+| after | 改动后内容；`REMOVED` 时为 `null` |
+| kind | 块类型：`PARAGRAPH` / `HEADING` / `CELL` / `IMAGE`，便于按类型显示图标 |
+| truncated | `true` 表示因超出读取上限而未比较完，**此时 `changes` 不是完整结论**，界面必须提示 |
+
+**比较粒度是块/单元格而不是字符**。用户关心的是「第二段被改了」，
+字符级 diff 会把表格与段落改动渲染成一串难以阅读的增删碎片。
+代价是段落内的小改动会显示为整段变化 —— 这是刻意的取舍。
+
+**两个版本都必须显式指定**，没有「和当前版本比」的语义，否则用户看到的差异会随别人编辑而改变。
+两个版本都经下载路径校验归属，因此不能用「自己的旧版本 vs 他人的新版本」探测他人内容。
+
+**注意 `truncated`**：XLSX 结构的单元格读取有上限，超大表的比较结果可能不完整。
+
+### 9.2 导出 PDF
+
+```
+GET /file/{fileId}/versions/{versionNo}/export/pdf
+```
+
+返回 **PDF 字节流**（不是统一 JSON），用 `response.blob()` 处理。
+
+- 该版本本身已是 PDF 时直接返回原内容，不做无意义的再转换
+- 其余格式经渲染后端转换，因此**未配置渲染后端时返回 503**，前端应展示该提示
+- 响应头里的文件名已把原扩展名替换为 `.pdf`（如 `报告.docx` → `报告.pdf`），便于与原文件配对
+- 支持转换的格式：`docx`、`xlsx`、`pptx`（另有 `odt`/`ods`/`odp`/`doc`/`xls`/`ppt`）。
+  **其他格式返回 400 并说明支持范围**，而不是送到后端再失败
+
+### 9.3 应用级兼容性验收
+
+```
+POST /file/{fileId}/versions/{versionNo}/compatibility-check
+```
+
+让办公软件真正打开并排版该版本，检查能否渲染、页数、缺失字体与页面边缘裁切。
+
+```json
+{
+  "fileId": 10, "versionNo": 2, "compatible": true,
+  "engine": "libreoffice-kit", "pageCount": 2, "renderedPages": 2,
+  "missingFonts": ["Courier"],
+  "issues": [
+    { "severity": "WARNING", "code": "MISSING_FONTS",
+      "message": "以下字体缺失并被替换，版式可能与预期不同：Courier" }
+  ]
+}
+```
+
+| 问题代码 | 级别 | 含义 |
+| --- | --- | --- |
+| `NO_PAGES` | ERROR | 可解析但排不出任何页面 |
+| `NO_RENDERED_PAGE` | ERROR | 未产生页面图片，渲染流程异常 |
+| `PAGES_TRUNCATED` | WARNING | 页数超出检查上限，只检查了前若干页 |
+| `MISSING_FONTS` | WARNING | 字体缺失被替换，版式可能不同 |
+| `CONTENT_NEAR_BORDER` | WARNING | 页面边缘存在内容，可能被裁切 |
+
+**只有 ERROR 会使 `compatible=false`**；WARNING 表示「可用但需人工确认」。
+本接口仅支持 DOCX，其他格式返回 400。
+
+**该接口耗时可观**（需要真正排版），建议前端触发时显示进度提示，不要在页面加载时自动调用。
 
 ## P10 图片编辑
 
@@ -917,6 +1049,54 @@ GET    /admin/templates/{id}/download
 格式约束：`name` 必填、只允许字母数字下划线且不能以数字开头；非法结构后端返回 `400`。
 
 **替换内容不删除旧文件**（便于回退），清理由后台任务负责。
+
+## P22 审计日志页
+
+```
+GET /admin/audit-logs?page=&size=&userId=&action=&targetType=&targetId=&result=&from=&to=&requestId=
+```
+
+响应 `data`：`PageResult<AuditLog>`
+
+```json
+{
+  "records": [{
+    "id": 7, "userId": 1, "username": "admin_snapshot",
+    "action": "ADMIN_FILE_VIEW", "targetType": "FILE", "targetId": "10",
+    "detail": "查看版本 2 的页面预览元信息", "result": "SUCCESS",
+    "requestIp": "127.0.0.1", "requestId": "req-abc-123",
+    "createTime": "2026-10-15T20:30:00"
+  }],
+  "total": 1, "page": 1, "size": 20, "pages": 1
+}
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| userId | 按操作者过滤 |
+| action | 按动作过滤，见下表 |
+| targetType | `USER` / `FILE` / `VERSION` / `TASK` / `MODEL_CONFIG` |
+| targetId | 按资源 ID 过滤 |
+| result | `SUCCESS` / `FAILURE` |
+| from / to | 时间范围（ISO-8601 本地时间，含端点） |
+| requestId | 按请求链路 ID 过滤 |
+
+**为什么需要这一页**：审计记录此前是「只写不读」——有写入路径但没有查询入口。
+实际后果是「管理员查看用户文档会留痕」这句话无法被验证、账号禁用与角色调整
+事后无法追溯、写入字段是否完整也没有任何环节会发现。
+
+**界面上必须体现的三个字段**：
+
+- `username` 是**快照**，不是当前用户名。用户改名后旧记录仍显示当时的名字 ——
+  这是刻意设计的，用于追溯，前端**不要**去关联当前用户表覆盖它
+- `requestId` 可与后端日志对齐。用户报告某次操作异常时，用响应头里的
+  `X-Request-ID` 能直接定位那次调用产生的全部记录
+- `result` 为 `FAILURE` 的记录包含登录失败、越权尝试等，**建议默认提供
+  「只看失败」的筛选**，这是审计最主要的用途之一
+
+`detail` 在写入时已脱敏（不含密码、密钥、模型 Key 或文件正文），可安全展示。
+
+**建议的快捷筛选**：按动作、只看 `FAILURE`、按时间倒序（后端已固定按时间倒序，无需前端排序）。
 
 ---
 

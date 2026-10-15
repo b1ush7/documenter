@@ -41,6 +41,8 @@ class AdminResourceServiceImplTest {
     private final FileAssetMapper fileAssetMapper = mock(FileAssetMapper.class);
     private final ProcessingTaskMapper taskMapper = mock(ProcessingTaskMapper.class);
     private final AdminStatisticsMapper statisticsMapper = mock(AdminStatisticsMapper.class);
+    private final com.documenter.mapper.AuditLogMapper auditLogMapper =
+            mock(com.documenter.mapper.AuditLogMapper.class);
     private final FileService fileService = mock(FileService.class);
     private final DocumentVersionService versionService = mock(DocumentVersionService.class);
     private final DocxDocumentService docxDocumentService = mock(DocxDocumentService.class);
@@ -51,7 +53,7 @@ class AdminResourceServiceImplTest {
     private final TaskService taskService = mock(TaskService.class);
     private final AuditService auditService = mock(AuditService.class);
     private final AdminResourceServiceImpl service = new AdminResourceServiceImpl(
-            fileAssetMapper, taskMapper, statisticsMapper, fileService, versionService,
+            fileAssetMapper, taskMapper, statisticsMapper, auditLogMapper, fileService, versionService,
             docxDocumentService, pdfDocumentService, xlsxDocumentService, pagePreviewService,
             taskService, auditService);
 
