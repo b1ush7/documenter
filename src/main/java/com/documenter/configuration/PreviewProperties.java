@@ -62,6 +62,41 @@ public class PreviewProperties {
     /** 送入渲染或转换的最大输入字节数。 */
     private long officeMaxInputBytes = 50L * 1024 * 1024;
 
+    /**
+     * 字体目录（TODO 4.3「配置中文字体」）。
+     *
+     * <p><b>实测结论（2026-10，Windows + 内置 LibreOffice native 后端）</b>：
+     * 该选项会传给渲染工具，并<b>影响 {@code missingFonts} 诊断结果</b>
+     * ——传入不含中文字形的目录后，缺失字体列表会新增 {@code SimSun}；
+     * 但<b>不影响实际渲染</b>：传入只含拉丁字体的目录后，
+     * 渲染结果与使用系统字体时<b>逐字节相同</b>（PNG SHA-256 一致）。
+     * 原因是该后端在渲染阶段直接向操作系统字体库请求字体，
+     * 字体目录参数只作用于字体可用性检测。
+     *
+     * <p>因此：在 Windows 上让中文正确渲染的<b>真正前提是宿主机装了中文字体</b>；
+     * 在 Linux 上字体解析通常由 fontconfig 决定，该目录可能真正生效，
+     * 但本项目尚未在 Linux 运行时验证过。
+     *
+     * <p>保留该配置的理由：它是渲染工具的公开参数，接入成本为零，
+     * 且在 Linux 部署时是让渲染结果不依赖宿主字体的唯一手段。
+     * 多个目录用 {@link java.io.File#pathSeparator} 分隔。
+     */
+    private String fontDirectory;
+
+    /**
+     * 缺字时的后备字体族（逗号分隔）。
+     *
+     * <p>与 {@link #fontDirectory} 同样受后端限制，见其说明。
+     */
+    private String fontFallbacks;
+
+    /**
+     * 初始字体族，影响未显式指定字体的内容。
+     *
+     * <p>与 {@link #fontDirectory} 同样受后端限制，见其说明。
+     */
+    private String initialFontFamily;
+
     /** 兼容性验收时最多检查的页数，避免大文档把验收流程拖垮。 */
     private int compatibilityMaxPages = 20;
 

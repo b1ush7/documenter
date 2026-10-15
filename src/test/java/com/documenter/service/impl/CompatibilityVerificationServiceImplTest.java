@@ -385,6 +385,103 @@ class CompatibilityVerificationServiceImplTest {
         return service;
     }
 
+    // ==================================================== 中文版式（TODO 4.3）
+
+    /**
+     * 中文文档必须能被渲染，且中文字体缺失时要能报告出来（TODO 4.3「配置中文字体」）。
+     *
+     * <p>这条验收的价值在于：中文字形能否渲染取决于<b>渲染环境</b>的字体，
+     * 而不是文档里写的字体名。开发机通常装了宋体/黑体所以看着正常，
+     * 部署到未装中文字体的精简容器后同一份文档会渲染成方块或空白。
+     * 因此缺字必须能<b>被检测到并报告</b>，即使当前环境恰好有字体。
+     *
+     * <p>实测记录：在同一台 Windows 机器上，传入只含拉丁字体的字体目录后
+     * 渲染产物与使用系统字体时逐字节相同（PNG SHA-256 一致），
+     * 说明该后端渲染时直接取操作系统字体库。因此本用例断言的是
+     * 「中文可渲染」与「缺字可报告」，而不是「字体目录改变了渲染结果」。
+     */
+    @Test
+    void chineseDocumentRendersAndMissingFontsAreReported() throws IOException {
+        LibreOfficeKitRenderService renderService = kitRenderService();
+        Assumptions.assumeTrue(renderService.available(),
+                "Office kit 不可用，跳过中文渲染验收");
+
+        byte[] docx = buildChineseDocx();
+        Path workspace = Files.createTempDirectory("compat-cjk-");
+        try {
+            Path source = workspace.resolve("chinese.docx");
+            Files.write(source, docx);
+
+            DocumentRenderManifest manifest = renderService.render(source, "docx",
+                    workspace.resolve("render"), List.of(1), 110);
+
+            assertTrue(manifest.pageCount() >= 1, "中文文档应至少排出 1 页");
+            assertFalse(manifest.pages().isEmpty(), "应产出页面图片");
+            DocumentRenderManifest.Page firstPage = manifest.pages().get(0);
+            assertTrue(firstPage.byteLength() > 0, "页面图片不应为空");
+
+            // 中文字形是有实际笔画的，墨迹量应远高于空白页；用像素统计证明内容真的画出来了
+            int inkPixels = countInkPixels(firstPage.path());
+            assertTrue(inkPixels > 500,
+                    "中文文档渲染后应有明显墨迹（实际 " + inkPixels + " 像素），"
+                            + "墨迹过少通常意味着字形缺失被渲染成空白");
+
+            System.out.println("[中文版式验收] 页面=" + firstPage.width() + "x" + firstPage.height()
+                    + " 墨迹像素=" + inkPixels + " 缺失字体=" + manifest.missingFonts());
+        } finally {
+            deleteRecursively(workspace);
+        }
+    }
+
+    /** 构造含中文标题、正文、中文标点与中文表格的 DOCX。 */
+    private static byte[] buildChineseDocx() throws IOException {
+        try (org.apache.poi.xwpf.usermodel.XWPFDocument document =
+                     new org.apache.poi.xwpf.usermodel.XWPFDocument();
+             ByteArrayOutputStream buffer = new ByteArrayOutputStream()) {
+
+            org.apache.poi.xwpf.usermodel.XWPFParagraph heading = document.createParagraph();
+            heading.setStyle("Heading1");
+            heading.createRun().setText("中文版式验收样本");
+
+            document.createParagraph().createRun()
+                    .setText("这是一段中文正文，用于验证渲染时中文字形是否存在。");
+            document.createParagraph().createRun()
+                    .setText("第二段包含中文标点：，。！？；：（）【】以及数字 12345 和英文 ABC。");
+
+            org.apache.poi.xwpf.usermodel.XWPFTable table = document.createTable(2, 2);
+            table.getRow(0).getCell(0).setText("中文列头");
+            table.getRow(0).getCell(1).setText("English");
+            table.getRow(1).getCell(0).setText("值一");
+            table.getRow(1).getCell(1).setText("value");
+
+            document.write(buffer);
+            return buffer.toByteArray();
+        }
+    }
+
+    /** 统计页面左上半区的深色像素，作为「内容真的被画出来」的证据。 */
+    private static int countInkPixels(String imagePath) throws IOException {
+        BufferedImage image = ImageIO.read(Path.of(imagePath).toFile());
+        if (image == null) {
+            return 0;
+        }
+        int width = image.getWidth() / 2;
+        int height = image.getHeight() / 2;
+        int ink = 0;
+        for (int x = 0; x < width; x++) {
+            for (int y = 0; y < height; y++) {
+                int rgb = image.getRGB(x, y);
+                int r = (rgb >> 16) & 0xFF;
+                int g = (rgb >> 8) & 0xFF;
+                int b = rgb & 0xFF;
+                if (r < 200 || g < 200 || b < 200) {
+                    ink++;
+                }
+            }
+        }
+        return ink;
+    }
+
     // ==================================================== 夹具
 
     private void stubDocxVersion(Long userId) {

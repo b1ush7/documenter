@@ -126,6 +126,7 @@ public class LibreOfficeKitRenderService implements OfficeRenderService {
         command.add(Long.toString(Math.max(1000, properties.getOfficeTimeout().toMillis() - 5_000)));
         command.add("--max-input-bytes");
         command.add(Long.toString(properties.getOfficeMaxInputBytes()));
+        appendFontOptions(command);
 
         String output = run(command, workingDirectoryOf(source));
         return parseManifest(output, outputDir);
@@ -154,6 +155,7 @@ public class LibreOfficeKitRenderService implements OfficeRenderService {
         command.add(Long.toString(Math.max(1000, properties.getOfficeTimeout().toMillis() - 5_000)));
         command.add("--max-input-bytes");
         command.add(Long.toString(properties.getOfficeMaxInputBytes()));
+        appendFontOptions(command);
 
         run(command, workingDirectoryOf(source));
         Path produced = Path.of(target);
@@ -161,6 +163,58 @@ public class LibreOfficeKitRenderService implements OfficeRenderService {
             throw new BusinessException(500, "转换未产生 PDF 产物，文档可能不受支持");
         }
         return produced;
+    }
+
+    /**
+     * 追加字体相关选项（TODO 4.3「配置中文字体」）。
+     *
+     * <p>中文字形能否渲染取决于渲染环境的字体，而不是文档里写的字体名。
+     * 开发机通常装了宋体/黑体，本地看着正常；部署到未装中文字体的精简容器后，
+     * 同一份文档会渲染成方块或空白——这类问题在开发阶段几乎发现不了。
+     *
+     * <p><b>实测限制（Windows + native 后端）</b>：这些参数会传给渲染工具并影响
+     * {@code missingFonts} 诊断，但<b>不改变实际渲染结果</b>——该后端渲染时
+     * 直接向操作系统字体库取字体。因此本方法在 Windows 上的作用是让缺字问题
+     * <b>可见</b>（体现为兼容性报告里的 WARNING），而不是修好它；
+     * 真正让中文渲染正确的前提仍是宿主机装有中文字体。
+     * Linux 由 fontconfig 决定字体解析，这些参数可能真正生效，但尚未在该运行时验证。
+     *
+     * <p>只传入实际存在的目录：传不存在的路径会让字体检测把原本可用的系统字体
+     * 也判为缺失（实测 {@code missingFonts} 会凭空多出文档实际使用的字体），
+     * 产生误导性的告警。
+     */
+    private void appendFontOptions(List<String> command) {
+        String configured = properties.getFontDirectory();
+        if (configured != null && !configured.isBlank()) {
+            List<String> existing = new ArrayList<>();
+            for (String part : configured.split(java.io.File.pathSeparator)) {
+                String trimmed = part.trim();
+                if (trimmed.isEmpty()) {
+                    continue;
+                }
+                if (Files.isDirectory(Path.of(trimmed))) {
+                    existing.add(trimmed);
+                } else {
+                    log.warn("res.preview.font-directory 中的路径不存在，已忽略: {}", trimmed);
+                }
+            }
+            if (!existing.isEmpty()) {
+                // 多个目录需按平台分隔符拼接，与 kit 的约定一致
+                command.add("--font-directory");
+                command.add(String.join(java.io.File.pathSeparator, existing));
+            }
+        }
+
+        if (properties.getFontFallbacks() != null && !properties.getFontFallbacks().isBlank()) {
+            command.add("--font-fallbacks");
+            command.add(properties.getFontFallbacks().trim());
+        }
+
+        if (properties.getInitialFontFamily() != null
+                && !properties.getInitialFontFamily().isBlank()) {
+            command.add("--initial-font-family");
+            command.add(properties.getInitialFontFamily().trim());
+        }
     }
 
     /**
