@@ -27,6 +27,8 @@ public class TaskExecutionContextImpl implements TaskExecutionContext {
     private final ProcessingTaskMapper taskMapper;
     private final TaskStepMapper stepMapper;
     private final Long taskId;
+    /** 当前执行尝试序号，从 1 开始；用于任务级版本幂等（TODO 3.4）。 */
+    private final int attemptNo;
 
     private int stepCounter = 0;
     private Long currentStepId;
@@ -34,16 +36,37 @@ public class TaskExecutionContextImpl implements TaskExecutionContext {
     private LocalDateTime currentStepStart;
     private int lastReportedProgress = -1;
 
+    /**
+     * 兼容构造器：不带尝试序号。
+     *
+     * <p>此时 {@link #attemptNo()} 返回 0，版本写入会退化为<b>非幂等</b>的普通追加。
+     * 任务执行引擎请使用带 attemptNo 的构造器，否则失败重试可能重复产出版本。
+     *
+     * @deprecated 使用 {@link #TaskExecutionContextImpl(ProcessingTaskMapper, TaskStepMapper,
+     *             ProcessingTask, int)}
+     */
+    @Deprecated
     public TaskExecutionContextImpl(ProcessingTaskMapper taskMapper, TaskStepMapper stepMapper,
                                    ProcessingTask task) {
+        this(taskMapper, stepMapper, task, 0);
+    }
+
+    public TaskExecutionContextImpl(ProcessingTaskMapper taskMapper, TaskStepMapper stepMapper,
+                                   ProcessingTask task, int attemptNo) {
         this.taskMapper = taskMapper;
         this.stepMapper = stepMapper;
         this.taskId = task.getId();
+        this.attemptNo = attemptNo;
     }
 
     @Override
     public Long taskId() {
         return taskId;
+    }
+
+    @Override
+    public int attemptNo() {
+        return attemptNo;
     }
 
     @Override

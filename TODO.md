@@ -63,7 +63,7 @@
 
 - [x] 建立可持久化任务记录：`PENDING / RUNNING / SUCCEEDED / FAILED / CANCELLED`，包含步骤、进度、错误、输入输出版本和耗时。
 - [x] 使用受限线程池异步执行 OCR、转换、生成等耗时任务；提供状态查询，确定是否通过 SSE 推送进度。
-- [ ] 创建任务已支持用户级幂等键，DOCX 编辑已使用来源版本乐观锁；真实处理器接入后仍需保证失败重试不会重复生成版本或扣减额度。
+- [x] 创建任务已支持用户级幂等键，DOCX 编辑已使用来源版本乐观锁；真实处理器接入后仍需保证失败重试不会重复生成版本或扣减额度。（已落地任务级版本幂等：`document_version` 新增 `task_id` + `attempt_no`，与唯一索引 `uk_document_version_task_attempt` 一起保证「同一任务的同一次尝试最多产出一个版本」。`VersionWriter.appendVersion` 增加带该两参数的重载：已存在时直接返回已有记录，不分配版本号、不重复落盘；并发下「先查后插」失效时由唯一索引兜底并回退为复用而非报错；`taskId` 为 null（上传、手工编辑）时退化为普通追加。执行引擎把尝试序号注入 `TaskExecutionContext.attemptNo()`，用户显式重试会递增序号，因此新意图仍能产出新版本。额度方面框架只提供依据：`VersionWriter.hasProducedVersion(taskId)` 供处理器在扣减前判断，避免重试重复扣减；是否接入余额计费仍未确定（见第 9 节），因此未实现实际扣减逻辑。）
 - [x] 配置超时、有限次数重试、取消与重启恢复；处理外部模型不可用、存储失败及队列堆积。
 - [x] 引入数据库迁移管理，建立 `file_asset`、`document_version`、`processing_task`、`task_step`、`ai_session`、`ai_message`、`verification_record`、`audit_log` 等表；这是建议模型，字段以具体流程为准。
 - [x] 将数据库、Redis、模型、存储和验证码服务密钥放入环境变量或部署密钥配置；补齐请求 ID 和基础运行日志。
