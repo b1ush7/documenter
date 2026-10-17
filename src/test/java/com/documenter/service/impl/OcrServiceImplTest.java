@@ -59,6 +59,12 @@ class OcrServiceImplTest {
         var request = new OcrRequestDTO();
         request.setLanguage("zh");
         request.setPages(List.of(1));
+        var region = new OcrRequestDTO.Region();
+        region.setX(5);
+        region.setY(4);
+        region.setWidth(30);
+        region.setHeight(12);
+        request.setRegion(region);
 
         var result = service.recognize(USER_ID, FILE_ID, VERSION, request);
 
@@ -67,7 +73,10 @@ class OcrServiceImplTest {
         assertEquals("OCR", result.pages().getFirst().source());
         assertEquals(42, result.pages().getFirst().confidence());
         assertTrue(result.pages().getFirst().needsReview());
-        assertEquals(3, result.pages().getFirst().lines().getFirst().left());
+        assertEquals(5, result.pages().getFirst().region().x());
+        assertEquals(30, result.pages().getFirst().region().width());
+        assertEquals(8, result.pages().getFirst().lines().getFirst().left());
+        assertEquals(8, result.pages().getFirst().lines().getFirst().top());
     }
 
     @Test
@@ -84,6 +93,33 @@ class OcrServiceImplTest {
         assertTrue(result.pages().getFirst().text().contains("Native text"));
         assertEquals(0, result.renderedPages());
         verify(engine, never()).recognize(any(byte[].class), any());
+    }
+
+    @Test
+    void regionRequestOverridesNativeTextAndMapsCoordinatesToFullPage() throws Exception {
+        when(versions.downloadVersion(USER_ID, FILE_ID, VERSION))
+                .thenReturn(download(textPdf("Native text"), "pdf", "application/pdf"));
+        when(engine.available()).thenReturn(true);
+        when(engine.name()).thenReturn("cloud-vision");
+        when(engine.recognize(any(byte[].class), eq("en"))).thenReturn(
+                new OcrEngine.Result(List.of(
+                        new OcrEngine.Line("区域文字", 2, 3, 20, 10, 95, false)), false));
+        var request = new OcrRequestDTO();
+        request.setLanguage("en");
+        var region = new OcrRequestDTO.Region();
+        region.setX(10);
+        region.setY(12);
+        region.setWidth(120);
+        region.setHeight(80);
+        request.setRegion(region);
+
+        var result = service.recognize(USER_ID, FILE_ID, VERSION, request);
+
+        assertEquals("OCR", result.pages().getFirst().source());
+        assertEquals(1, result.renderedPages());
+        assertEquals(10, result.pages().getFirst().region().x());
+        assertEquals(12, result.pages().getFirst().lines().getFirst().left());
+        assertEquals(15, result.pages().getFirst().lines().getFirst().top());
     }
 
     @Test
@@ -114,6 +150,19 @@ class OcrServiceImplTest {
         assertEquals(404, assertThrows(BusinessException.class,
                 () -> service.recognize(USER_ID, FILE_ID, VERSION,
                         badPage)).getCode());
+
+        var badRegionRequest = new OcrRequestDTO();
+        var badRegion = new OcrRequestDTO.Region();
+        badRegion.setX(30);
+        badRegion.setY(0);
+        badRegion.setWidth(20);
+        badRegion.setHeight(20);
+        badRegionRequest.setRegion(badRegion);
+        when(versions.downloadVersion(USER_ID, FILE_ID, VERSION))
+                .thenReturn(download(png(), "png", "image/png"));
+        assertEquals(400, assertThrows(BusinessException.class,
+                () -> service.recognize(USER_ID, FILE_ID, VERSION,
+                        badRegionRequest)).getCode());
     }
 
     private static OcrProperties properties() {

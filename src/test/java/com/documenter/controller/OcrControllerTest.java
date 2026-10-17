@@ -49,6 +49,7 @@ class OcrControllerTest {
         var result = new OcrResultVO(10L, 2, "cloud-vision", "zh+en",
                 3, 1, false, List.of(new OcrResultVO.Page(
                 2, "OCR", 100, 80, "标题", 93d, false,
+                new OcrResultVO.Region(5, 8, 40, 30),
                 List.of(new OcrResultVO.Line("标题", 10, 12, 30, 16, 93, false)),
                 false)));
         when(service.recognize(eq(7L), eq(10L), eq(2), any())).thenReturn(result);
@@ -56,10 +57,12 @@ class OcrControllerTest {
         mvc.perform(post("/file/10/versions/2/ocr")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"language":"zh+en","pages":[2],"dpi":200}
+                                {"language":"zh+en","pages":[2],"dpi":200,
+                                 "region":{"x":5,"y":8,"width":40,"height":30}}
                                 """))
                 .andExpect(jsonPath("$.code").value(0))
                 .andExpect(jsonPath("$.data.pages[0].source").value("OCR"))
+                .andExpect(jsonPath("$.data.pages[0].region.x").value(5))
                 .andExpect(jsonPath("$.data.pages[0].lines[0].confidence").value(93));
     }
 

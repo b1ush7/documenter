@@ -13,8 +13,8 @@ public record OcrResultVO(Long fileId, Integer versionNo, String engine, String 
 
     /** source 为 NATIVE / OCR / EMPTY。 */
     public record Page(int pageNo, String source, int width, int height, String text,
-                       Double confidence, boolean needsReview, List<Line> lines,
-                       boolean truncated) {
+                       Double confidence, boolean needsReview, Region region,
+                       List<Line> lines, boolean truncated) {
 
         public Page {
             lines = lines == null ? List.of() : List.copyOf(lines);
@@ -24,5 +24,9 @@ public record OcrResultVO(Long fileId, Integer versionNo, String engine, String 
     /** OCR 行坐标单位为对应渲染图或原始图片的像素，confidence 为 0～100。 */
     public record Line(String text, int left, int top, int width, int height,
                        double confidence, boolean needsReview) {
+    }
+
+    /** 本次识别区域；坐标相对完整页面或原图。 */
+    public record Region(int x, int y, int width, int height) {
     }
 }

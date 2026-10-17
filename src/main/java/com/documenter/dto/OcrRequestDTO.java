@@ -3,6 +3,7 @@ package com.documenter.dto;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.Size;
+import jakarta.validation.Valid;
 import lombok.Data;
 
 import java.util.List;
@@ -24,4 +25,24 @@ public class OcrRequestDTO {
     @Min(value = 100, message = "OCR DPI 不能小于 100")
     @Max(value = 300, message = "OCR DPI 不能大于 300")
     private Integer dpi;
+
+    /** 相对于实际渲染页面或原始图片的像素矩形；为空时识别整页。 */
+    @Valid
+    private Region region;
+
+    @Data
+    public static class Region {
+
+        @Min(value = 0, message = "OCR 区域横坐标不能小于 0")
+        private int x;
+
+        @Min(value = 0, message = "OCR 区域纵坐标不能小于 0")
+        private int y;
+
+        @Min(value = 1, message = "OCR 区域宽度必须大于 0")
+        private int width;
+
+        @Min(value = 1, message = "OCR 区域高度必须大于 0")
+        private int height;
+    }
 }

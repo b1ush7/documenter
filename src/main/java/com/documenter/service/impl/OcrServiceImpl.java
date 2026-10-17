@@ -68,16 +68,18 @@ public class OcrServiceImpl implements OcrService {
         byte[] content = readAll(source);
         if ("pdf".equals(extension)) {
             return recognizePdf(fileId, versionNo, content, language,
-                    requestedPages, safeRequest.getDpi());
+                    requestedPages, safeRequest.getDpi(), safeRequest.getRegion());
         }
         if (IMAGE_EXTENSIONS.contains(extension)) {
-            return recognizeImage(fileId, versionNo, content, language, requestedPages);
+            return recognizeImage(fileId, versionNo, content, language,
+                    requestedPages, safeRequest.getRegion());
         }
         throw new BusinessException(415, "OCR 仅支持 PDF、PNG 和 JPEG");
     }
 
     private OcrResultVO recognizeImage(Long fileId, Integer versionNo, byte[] content,
-                                       String language, List<Integer> pages) {
+                                       String language, List<Integer> pages,
+                                       OcrRequestDTO.Region requestedRegion) {
         if (!pages.isEmpty() && !pages.equals(List.of(1))) {
             throw new BusinessException(400, "图片只有第 1 页");
         }
@@ -91,18 +93,20 @@ public class OcrServiceImpl implements OcrService {
             throw new BusinessException(415, "无法识别该图片格式");
         }
         validatePixels(image);
-        byte[] png = encodePng(image);
+        CroppedImage cropped = crop(image, requestedRegion);
+        byte[] png = encodePng(cropped.image());
         requireEngine();
         OcrEngine.Result recognized = engine.recognize(png, language);
         OcrResultVO.Page page = toPage(1, "OCR", image.getWidth(), image.getHeight(),
-                recognized);
+                recognized, cropped.region(), cropped.offsetX(), cropped.offsetY());
         return new OcrResultVO(fileId, versionNo, engine.name(), language,
                 1, 1, recognized.truncated(), List.of(page));
     }
 
     private OcrResultVO recognizePdf(Long fileId, Integer versionNo, byte[] content,
                                      String language, List<Integer> requestedPages,
-                                     Integer requestedDpi) {
+                                     Integer requestedDpi,
+                                     OcrRequestDTO.Region requestedRegion) {
         int dpi = resolveDpi(requestedDpi);
         try (PDDocument document = Loader.loadPDF(content)) {
             int totalPages = document.getNumberOfPages();
@@ -122,13 +126,13 @@ public class OcrServiceImpl implements OcrService {
             boolean engineChecked = false;
             for (int pageNo : pages) {
                 NativeText nativeText = nativeText(document, pageNo);
-                if (!nativeText.text().isBlank()) {
+                if (requestedRegion == null && !nativeText.text().isBlank()) {
                     totalChars = checkedChars(totalChars, nativeText.text());
                     OcrResultVO.Line nativeLine = nativeText.text().contains("\n")
                             ? null : new OcrResultVO.Line(nativeText.text(), 0, 0, 0, 0,
                             100, false);
                     results.add(new OcrResultVO.Page(pageNo, "NATIVE", 0, 0,
-                            nativeText.text(), 100d, false,
+                            nativeText.text(), 100d, false, null,
                             nativeLine == null ? List.of() : List.of(nativeLine),
                             nativeText.truncated()));
                     truncated |= nativeText.truncated();
@@ -144,14 +148,17 @@ public class OcrServiceImpl implements OcrService {
                         .renderImageWithDPI(pageNo - 1, dpi, ImageType.RGB);
                 validatePixels(image);
                 renderedPages++;
-                OcrEngine.Result recognized = engine.recognize(encodePng(image), language);
+                CroppedImage cropped = crop(image, requestedRegion);
+                OcrEngine.Result recognized = engine.recognize(
+                        encodePng(cropped.image()), language);
                 String pageText = recognized.lines().stream()
                         .map(OcrEngine.Line::text)
                         .reduce((left, right) -> left + "\n" + right).orElse("");
                 if (!pageText.isBlank()) totalChars = checkedChars(totalChars, pageText);
                 truncated |= recognized.truncated();
                 results.add(toPage(pageNo, recognized.lines().isEmpty() ? "EMPTY" : "OCR",
-                        image.getWidth(), image.getHeight(), recognized));
+                        image.getWidth(), image.getHeight(), recognized,
+                        cropped.region(), cropped.offsetX(), cropped.offsetY()));
             }
             return new OcrResultVO(fileId, versionNo, engine.name(), language,
                     totalPages, renderedPages, truncated, results);
@@ -163,9 +170,11 @@ public class OcrServiceImpl implements OcrService {
     }
 
     private OcrResultVO.Page toPage(int pageNo, String source, int width, int height,
-                                    OcrEngine.Result result) {
+                                    OcrEngine.Result result, OcrResultVO.Region region,
+                                    int offsetX, int offsetY) {
         List<OcrResultVO.Line> lines = result.lines().stream()
-                .map(line -> new OcrResultVO.Line(line.text(), line.left(), line.top(),
+                .map(line -> new OcrResultVO.Line(line.text(),
+                        line.left() + offsetX, line.top() + offsetY,
                         line.width(), line.height(), line.confidence(), line.needsReview()))
                 .toList();
         String text = lines.stream().map(OcrResultVO.Line::text)
@@ -175,7 +184,34 @@ public class OcrServiceImpl implements OcrService {
                 .average().orElse(0) * 100d) / 100d;
         boolean needsReview = lines.stream().anyMatch(OcrResultVO.Line::needsReview);
         return new OcrResultVO.Page(pageNo, source, width, height, text,
-                confidence, needsReview, lines, result.truncated());
+                confidence, needsReview, region, lines, result.truncated());
+    }
+
+    private static CroppedImage crop(BufferedImage image,
+                                     OcrRequestDTO.Region requested) {
+        if (requested == null) {
+            return new CroppedImage(image, null, 0, 0);
+        }
+        long right = (long) requested.getX() + requested.getWidth();
+        long bottom = (long) requested.getY() + requested.getHeight();
+        if (requested.getWidth() < 1 || requested.getHeight() < 1
+                || requested.getX() < 0 || requested.getY() < 0
+                || right > image.getWidth() || bottom > image.getHeight()) {
+            throw new BusinessException(400, "OCR 区域超出页面或图片范围");
+        }
+        BufferedImage cropped = new BufferedImage(requested.getWidth(),
+                requested.getHeight(), BufferedImage.TYPE_INT_ARGB);
+        var graphics = cropped.createGraphics();
+        try {
+            graphics.drawImage(image.getSubimage(requested.getX(), requested.getY(),
+                    requested.getWidth(), requested.getHeight()), 0, 0, null);
+        } finally {
+            graphics.dispose();
+        }
+        return new CroppedImage(cropped,
+                new OcrResultVO.Region(requested.getX(), requested.getY(),
+                        requested.getWidth(), requested.getHeight()),
+                requested.getX(), requested.getY());
     }
 
     private NativeText nativeText(PDDocument document, int pageNo) throws IOException {
@@ -284,4 +320,6 @@ public class OcrServiceImpl implements OcrService {
     }
 
     private record NativeText(String text, boolean truncated) { }
+    private record CroppedImage(BufferedImage image, OcrResultVO.Region region,
+                                int offsetX, int offsetY) { }
 }
