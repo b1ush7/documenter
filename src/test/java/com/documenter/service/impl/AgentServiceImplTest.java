@@ -119,6 +119,10 @@ class AgentServiceImplTest {
         assertTrue(messages.get(1) instanceof dev.langchain4j.data.message.UserMessage);
         assertTrue(messages.get(2) instanceof AiMessage);
         assertEquals("first answer", ((AiMessage) messages.get(2)).text());
+        assertTrue(captured.getValue().parameters().toolSpecifications().isEmpty(),
+                "无文档会话不应向模型声明任何工具");
+        assertTrue(((dev.langchain4j.data.message.SystemMessage) messages.getFirst())
+                .text().contains("没有提供任何工具"));
     }
 
     @Test
