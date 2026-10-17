@@ -1208,8 +1208,11 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 | `INSERT_ROW_BEFORE` | `ROW` | `values` 必填，列数必须与参照行一致 |
 | `INSERT_ROW_AFTER` | `ROW` | `values` 必填，列数必须与参照行一致 |
 | `DELETE_ROW` | `ROW` | 不得传 `text` 或 `values` |
+| `SET_ROW_HEIGHT` | `ROW` | `dimensionTwips` 必填，1～20000；使用最小行高规则 |
+| `REPEAT_HEADER_ROW` | `ROW` | `repeatHeader` 必填布尔值；控制跨页重复标题行 |
+| `SET_COLUMN_WIDTH` | `CELL` | `dimensionTwips` 必填，1～20000；应用到该单元格所在整列 |
 
-单次 1～100 项；每个插入行最多 100 个单元格，每个文本最长 100000。表格必须保留至少一行，包含嵌套表格的单元格暂不支持整体替换。
+单次 1～100 项；每个插入行最多 100 个单元格，每个文本最长 100000。表格必须保留至少一行，包含嵌套表格的单元格暂不支持整体替换。列宽操作要求所有行具有相同单元格数量；含横向合并网格的表格返回 `422`。这三类格式操作不改动单元格块索引，并与其他表格操作在同一批中原子提交。
 
 ### 4.7 设置标题、正文、列表格式或段前分页
 

@@ -521,7 +521,7 @@ POST /file/{fileId}/versions/{versionNo}/inline-images        插入图片
 | --- | --- |
 | paragraph-text | `blockId`、`text` |
 | paragraph-edits | `instruction`、`operations[].type`（插入/删除）、`blockId`、`text` |
-| table-edits | `type`、`blockId`、`text` |
+| table-edits | `type`、`blockId`、`text`、`values`、`dimensionTwips`、`repeatHeader` |
 | paragraph-formats | `type`、`blockId`、`level`（标题层级） |
 | inline-images | `blockId`、`imageFileId`、`imageVersionNo`、`widthPixels`、`heightPixels` |
 
@@ -531,7 +531,7 @@ paragraph-formats 新增 SET_PAGE_BREAK_BEFORE / CLEAR_PAGE_BREAK_BEFORE，只�
 
 结构查询的 blocks 末尾现在可能包含 HEADER/FOOTER 容器，children 为页眉页脚中的段落、表格及图片；正文原有 body 路径不变。例如 `header0/p1`、`footer0/t0/r0/c0/p0` 可通过 paragraph-text 替换普通段落。N 是该版本的部件索引，不是页码或节号；跨节共享同一页眉页脚时，修改会作用于所有引用位置，提交前应在界面说明。
 
-页眉页脚的新增、删除、首页/奇偶页引用设置，以及 AI 编辑、格式与插图操作尚未开放。页码域、书签、图片、超链接、内容控件等复杂段落替换返回 422；不能把“能读出文字”当作“可以整段编辑”。段落插入不会复制分节设置，含分节设置的段落不能直接删除。编辑成功后按新版本重新读取结构与预览，既有版本比较也会返回页眉页脚文字差异。详细规则见 [API.md 第 4.3～4.5 节](../API.md#43-读取-docx-结构)。
+页眉页脚支持普通文字替换和分节链接/独立设置；正文脚注与 TOC 域另有专门接口。页码域、书签、图片、超链接、内容控件等复杂段落替换返回 422；不能把“能读出文字”当作“可以整段编辑”。段落插入不会复制分节设置，含分节设置的段落不能直接删除。表格支持行高、整列宽度和重复标题行；列宽遇到横向合并网格返回 422。编辑成功后按新版本重新读取结构与预览，既有版本比较也会返回页眉页脚文字差异。详细规则见 [API.md 第 4.3～4.11 节](../API.md#43-读取-docx-结构)。
 
 **约束**：部分操作会被拒绝（如"删除表格中唯一的行"、"替换含图片的段落"），
 返回 `400` 或 `422`，`msg` 会说明原因。前端应把 `msg` 原样展示。

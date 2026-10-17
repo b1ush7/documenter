@@ -38,6 +38,8 @@ import org.apache.poi.xwpf.usermodel.XWPFTable;
 import org.apache.poi.xwpf.usermodel.XWPFTableCell;
 import org.apache.poi.xwpf.usermodel.XWPFTableRow;
 import org.apache.poi.xwpf.usermodel.XWPFFootnote;
+import org.apache.poi.xwpf.usermodel.TableRowHeightRule;
+import org.apache.poi.xwpf.usermodel.TableWidthType;
 import org.apache.poi.xwpf.model.XWPFHeaderFooterPolicy;
 import org.apache.poi.wp.usermodel.HeaderFooterType;
 import org.w3c.dom.Node;
@@ -598,6 +600,11 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                     case "INSERT_ROW_AFTER" -> insertRow(edit.table(), edit.row(),
                             edit.operation().getValues(), true);
                     case "DELETE_ROW" -> deleteRow(edit.table(), edit.row(), edit.operation().getBlockId());
+                    case "SET_ROW_HEIGHT" -> setRowHeight(edit.row(), edit.operation().getDimensionTwips());
+                    case "REPEAT_HEADER_ROW" -> setRepeatHeader(edit.row(),
+                            Boolean.TRUE.equals(edit.operation().getRepeatHeader()));
+                    case "SET_COLUMN_WIDTH" -> setColumnWidth(edit.table(), edit.cell(),
+                            edit.operation().getDimensionTwips());
                     default -> throw new BusinessException(400, "不支持的表格操作");
                 }
             }
@@ -1137,12 +1144,21 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                 throw new BusinessException(400, "同一表格块不能重复执行相同操作：" + operation.getBlockId());
             }
             boolean setCell = "SET_CELL_TEXT".equals(operation.getType());
+            boolean setColumnWidth = "SET_COLUMN_WIDTH".equals(operation.getType());
             boolean insert = operation.getType().startsWith("INSERT_ROW_");
             boolean delete = "DELETE_ROW".equals(operation.getType());
-            if (setCell) {
-                if (!cellPattern.matcher(operation.getBlockId()).matches() || operation.getText() == null
-                        || operation.getValues() != null) {
-                    throw new BusinessException(400, "SET_CELL_TEXT 必须指向单元格且只包含 text");
+            boolean setRowHeight = "SET_ROW_HEIGHT".equals(operation.getType());
+            boolean repeatHeader = "REPEAT_HEADER_ROW".equals(operation.getType());
+            if (setCell || setColumnWidth) {
+                if (!cellPattern.matcher(operation.getBlockId()).matches()
+                        || operation.getValues() != null || operation.getRepeatHeader() != null) {
+                    throw new BusinessException(400, "单元格操作必须指向单元格");
+                }
+                if (setCell && (operation.getText() == null || operation.getDimensionTwips() != null)) {
+                    throw new BusinessException(400, "SET_CELL_TEXT 必须且只能包含 text");
+                }
+                if (setColumnWidth && (operation.getText() != null || operation.getDimensionTwips() == null)) {
+                    throw new BusinessException(400, "SET_COLUMN_WIDTH 必须包含 dimensionTwips");
                 }
                 for (String deletedRow : deletedRows) {
                     if (operation.getBlockId().startsWith(deletedRow + "/")) {
@@ -1153,27 +1169,42 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                 if (!rowPattern.matcher(operation.getBlockId()).matches() || operation.getText() != null) {
                     throw new BusinessException(400, "行操作必须指向表格行且不能包含 text");
                 }
-                if (insert && (operation.getValues() == null || operation.getValues().isEmpty())) {
+                if (insert && (operation.getValues() == null || operation.getValues().isEmpty()
+                        || operation.getDimensionTwips() != null || operation.getRepeatHeader() != null)) {
                     throw new BusinessException(400, operation.getType() + " 必须包含 values");
                 }
-                if (delete && operation.getValues() != null) {
-                    throw new BusinessException(400, "DELETE_ROW 不能包含 values");
+                if (!insert && operation.getValues() != null) {
+                    throw new BusinessException(400, operation.getType() + " 不能包含 values");
                 }
                 if (delete) {
+                    if (operation.getDimensionTwips() != null || operation.getRepeatHeader() != null) {
+                        throw new BusinessException(400, "DELETE_ROW 不能包含格式字段");
+                    }
                     if (insertedRows.contains(operation.getBlockId())) {
                         throw new BusinessException(400, "同一行不能同时作为插入参照和删除目标");
                     }
                     deletedRows.add(operation.getBlockId());
-                } else {
+                } else if (insert) {
                     if (deletedRows.contains(operation.getBlockId())) {
                         throw new BusinessException(400, "同一行不能同时作为插入参照和删除目标");
                     }
                     insertedRows.add(operation.getBlockId());
+                } else if (setRowHeight) {
+                    if (operation.getDimensionTwips() == null || operation.getRepeatHeader() != null
+                            || deletedRows.contains(operation.getBlockId())) {
+                        throw new BusinessException(400, "SET_ROW_HEIGHT 字段不合法或目标行将被删除");
+                    }
+                } else if (repeatHeader) {
+                    if (operation.getRepeatHeader() == null || operation.getDimensionTwips() != null
+                            || deletedRows.contains(operation.getBlockId())) {
+                        throw new BusinessException(400, "REPEAT_HEADER_ROW 字段不合法或目标行将被删除");
+                    }
                 }
             }
         }
         for (EditDocxTableDTO.Operation operation : operations) {
-            if ("SET_CELL_TEXT".equals(operation.getType())) {
+            if ("SET_CELL_TEXT".equals(operation.getType())
+                    || "SET_COLUMN_WIDTH".equals(operation.getType())) {
                 int cellSeparator = operation.getBlockId().lastIndexOf("/c");
                 if (deletedRows.contains(operation.getBlockId().substring(0, cellSeparator))) {
                     throw new BusinessException(400, "不能修改同一请求中将被删除的行");
@@ -1471,9 +1502,11 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
 
     private static ResolvedTableEdit resolveTableEdit(XWPFDocument document,
                                                        EditDocxTableDTO.Operation operation) {
-        if ("SET_CELL_TEXT".equals(operation.getType())) {
-            return new ResolvedTableEdit(operation, null, null,
-                    requireCell(document, operation.getBlockId()));
+        if ("SET_CELL_TEXT".equals(operation.getType())
+                || "SET_COLUMN_WIDTH".equals(operation.getType())) {
+            XWPFTableCell cell = requireCell(document, operation.getBlockId());
+            return new ResolvedTableEdit(operation, cell.getTableRow().getTable(),
+                    cell.getTableRow(), cell);
         }
         XWPFTableRow row = requireRow(document, operation.getBlockId());
         return new ResolvedTableEdit(operation, row.getTable(), row, null);
@@ -1543,6 +1576,35 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         int index = table.getRows().indexOf(row);
         if (index < 0 || !table.removeRow(index)) {
             throw new BusinessException(422, "无法删除表格行：" + blockId);
+        }
+    }
+
+    private static void setRowHeight(XWPFTableRow row, Integer heightTwips) {
+        row.setHeight(heightTwips);
+        row.setHeightRule(TableRowHeightRule.AT_LEAST);
+    }
+
+    private static void setRepeatHeader(XWPFTableRow row, boolean repeat) {
+        var properties = row.getCtRow().isSetTrPr()
+                ? row.getCtRow().getTrPr() : row.getCtRow().addNewTrPr();
+        if (repeat && properties.sizeOfTblHeaderArray() == 0) properties.addNewTblHeader();
+        while (!repeat && properties.sizeOfTblHeaderArray() > 0) {
+            properties.removeTblHeader(0);
+        }
+    }
+
+    private static void setColumnWidth(XWPFTable table, XWPFTableCell target, Integer widthTwips) {
+        int column = target.getTableRow().getTableCells().indexOf(target);
+        if (column < 0) throw new BusinessException(400, "无法确定目标列");
+        int expectedCells = table.getRow(0).getTableCells().size();
+        if (column >= expectedCells) throw new BusinessException(400, "目标列超出表格网格");
+        for (var row : table.getRows()) {
+            if (row.getTableCells().size() != expectedCells) {
+                throw new BusinessException(422, "含横向合并单元格的表格暂不支持按列设置宽度");
+            }
+            XWPFTableCell cell = row.getTableCells().get(column);
+            cell.setWidth(String.valueOf(widthTwips));
+            cell.setWidthType(TableWidthType.DXA);
         }
     }
 

@@ -42,7 +42,7 @@ public interface DocxDocumentService {
     VersionVO editParagraphs(Long userId, Long fileId, Integer sourceVersion,
                              EditDocxParagraphsDTO request);
 
-    /** 修改单元格文本或增删表格行，并保存为新版本。 */
+    /** 修改单元格文本、增删行，或设置行高、列宽和重复标题行。 */
     VersionVO editTable(Long userId, Long fileId, Integer sourceVersion,
                         EditDocxTableDTO request);
 

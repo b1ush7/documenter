@@ -2,6 +2,8 @@ package com.documenter.dto;
 
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
@@ -25,7 +27,8 @@ public class EditDocxTableDTO {
     public static class Operation {
 
         @NotNull(message = "操作类型不能为空")
-        @Pattern(regexp = "^(SET_CELL_TEXT|INSERT_ROW_BEFORE|INSERT_ROW_AFTER|DELETE_ROW)$",
+        @Pattern(regexp = "^(SET_CELL_TEXT|INSERT_ROW_BEFORE|INSERT_ROW_AFTER|DELETE_ROW|"
+                + "SET_ROW_HEIGHT|REPEAT_HEADER_ROW|SET_COLUMN_WIDTH)$",
                 message = "不支持的表格操作")
         private String type;
 
@@ -42,5 +45,13 @@ public class EditDocxTableDTO {
         @Size(max = 100, message = "单行不能超过 100 个单元格")
         private List<@NotNull(message = "单元格文本不能为空")
                 @Size(max = 100000, message = "单元格文本过长") String> values;
+
+        /** SET_COLUMN_WIDTH / SET_ROW_HEIGHT 使用，单位为 twips。 */
+        @Min(value = 1, message = "表格尺寸必须大于 0")
+        @Max(value = 20000, message = "表格尺寸过大")
+        private Integer dimensionTwips;
+
+        /** REPEAT_HEADER_ROW 使用。 */
+        private Boolean repeatHeader;
     }
 }
