@@ -1,6 +1,7 @@
 package com.documenter.service.impl;
 
 import com.documenter.dto.EditDocxParagraphsDTO;
+import com.documenter.dto.EditDocxFootnotesDTO;
 import com.documenter.dto.EditDocxTableDTO;
 import com.documenter.dto.FormatDocxParagraphsDTO;
 import com.documenter.dto.GenerateDocxDTO;
@@ -18,6 +19,7 @@ import com.documenter.service.VersionWriter;
 import com.documenter.util.Digests;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.DocxHeaderFooterLinksVO;
+import com.documenter.vo.DocxFootnotesVO;
 import com.documenter.vo.DocumentEditPlan;
 import com.documenter.vo.FileAssetVO;
 import com.documenter.vo.FileDownload;
@@ -33,6 +35,7 @@ import org.apache.poi.xwpf.usermodel.XWPFRun;
 import org.apache.poi.xwpf.usermodel.XWPFTable;
 import org.apache.poi.xwpf.usermodel.XWPFTableCell;
 import org.apache.poi.xwpf.usermodel.XWPFTableRow;
+import org.apache.poi.xwpf.usermodel.XWPFFootnote;
 import org.apache.poi.xwpf.model.XWPFHeaderFooterPolicy;
 import org.apache.poi.wp.usermodel.HeaderFooterType;
 import org.w3c.dom.Node;
@@ -54,8 +57,10 @@ import java.io.InputStream;
 import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -173,6 +178,226 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
             log.warn("读取 DOCX 页眉页脚链接失败, fileId={}, versionNo={}", fileId, versionNo, failure);
             throw new BusinessException(422, "DOCX 页眉页脚链接无法读取或内容已损坏");
         }
+    }
+
+    @Override
+    public DocxFootnotesVO readFootnotes(Long userId, Long fileId, Integer versionNo) {
+        FileDownload version = versionService.downloadVersion(userId, fileId, versionNo);
+        if (!isDocx(version)) {
+            throw new BusinessException(400, "当前版本不是 DOCX 文档");
+        }
+        try (InputStream input = version.resource().getInputStream();
+             XWPFDocument document = new XWPFDocument(input)) {
+            return new DocxFootnotesVO(fileId, versionNo, readFootnoteItems(document));
+        } catch (IOException | RuntimeException failure) {
+            if (failure instanceof BusinessException business) throw business;
+            log.warn("读取 DOCX 脚注失败, fileId={}, versionNo={}", fileId, versionNo, failure);
+            throw new BusinessException(422, "DOCX 脚注无法读取或内容已损坏");
+        }
+    }
+
+    @Override
+    public VersionVO editFootnotes(Long userId, Long fileId, Integer sourceVersion,
+                                   EditDocxFootnotesDTO request) {
+        validateFootnoteOperations(request);
+        return editAndSave(userId, fileId, sourceVersion, request.getInstruction(),
+                "执行 " + request.getOperations().size() + " 个脚注操作", document -> {
+                    Map<Integer, List<String>> references = footnoteReferences(document);
+                    for (var operation : request.getOperations()) {
+                        switch (operation.getType()) {
+                            case "ADD" -> addFootnote(document, operation);
+                            case "UPDATE" -> {
+                                requireReferencedFootnote(document, references, operation.getFootnoteId());
+                                updateFootnoteText(document, operation.getFootnoteId(), operation.getText());
+                            }
+                            case "DELETE" -> {
+                                requireReferencedFootnote(document, references, operation.getFootnoteId());
+                                removeFootnoteReferences(document, operation.getFootnoteId());
+                                removeFootnoteById(document, operation.getFootnoteId());
+                            }
+                            default -> throw new BusinessException(400, "不支持的脚注操作");
+                        }
+                    }
+                });
+    }
+
+    private static void validateFootnoteOperations(EditDocxFootnotesDTO request) {
+        if (request == null || request.getOperations() == null
+                || request.getOperations().isEmpty() || request.getOperations().size() > 50) {
+            throw new BusinessException(400, "脚注操作数量不合法");
+        }
+        Set<Integer> changedExisting = new HashSet<>();
+        for (var operation : request.getOperations()) {
+            if (operation == null || operation.getType() == null) {
+                throw new BusinessException(400, "脚注操作不能为空");
+            }
+            switch (operation.getType()) {
+                case "ADD" -> {
+                    if (operation.getTargetBlockId() == null || operation.getTargetBlockId().isBlank()
+                            || operation.getFootnoteId() != null
+                            || operation.getText() == null || operation.getText().isBlank()) {
+                        throw new BusinessException(400, "ADD 必须提供正文目标段落和脚注文字");
+                    }
+                }
+                case "UPDATE", "DELETE" -> {
+                    if (operation.getFootnoteId() == null || operation.getFootnoteId() < 1
+                            || operation.getTargetBlockId() != null
+                            || !changedExisting.add(operation.getFootnoteId())) {
+                        throw new BusinessException(400, "UPDATE/DELETE 必须提供唯一正数脚注 ID");
+                    }
+                    if (operation.getType().equals("UPDATE")
+                            && (operation.getText() == null || operation.getText().isBlank())) {
+                        throw new BusinessException(400, "UPDATE 必须提供脚注文字");
+                    }
+                    if (operation.getType().equals("DELETE") && operation.getText() != null) {
+                        throw new BusinessException(400, "DELETE 不能提供脚注文字");
+                    }
+                }
+                default -> throw new BusinessException(400, "脚注操作只支持 ADD、UPDATE、DELETE");
+            }
+        }
+    }
+
+    private static List<DocxFootnotesVO.Footnote> readFootnoteItems(XWPFDocument document) {
+        Map<Integer, List<String>> references = footnoteReferences(document);
+        List<DocxFootnotesVO.Footnote> result = new ArrayList<>();
+        for (var entry : references.entrySet()) {
+            XWPFFootnote footnote = document.getFootnoteByID(entry.getKey());
+            if (footnote == null) {
+                throw new BusinessException(422, "正文引用了不存在的脚注：" + entry.getKey());
+            }
+            String text = footnote.getParagraphs().stream()
+                    .map(XWPFParagraph::getText)
+                    .filter(value -> value != null && !value.isBlank())
+                    .reduce((left, right) -> left + "\n" + right)
+                    .orElse("");
+            result.add(new DocxFootnotesVO.Footnote(entry.getKey(), text, entry.getValue()));
+        }
+        return List.copyOf(result);
+    }
+
+    private static Map<Integer, List<String>> footnoteReferences(XWPFDocument document) {
+        Map<Integer, List<String>> references = new LinkedHashMap<>();
+        collectFootnoteReferences(document.getBodyElements(), "body", references);
+        return references;
+    }
+
+    private static void collectFootnoteReferences(List<IBodyElement> elements, String parent,
+                                                  Map<Integer, List<String>> references) {
+        int paragraphIndex = 0;
+        int tableIndex = 0;
+        for (IBodyElement element : elements) {
+            if (element instanceof XWPFParagraph paragraph) {
+                String blockId = parent + "/p" + paragraphIndex++;
+                for (XWPFRun run : paragraph.getRuns()) {
+                    for (var reference : run.getCTR().getFootnoteReferenceList()) {
+                        int id;
+                        try {
+                            id = reference.getId().intValueExact();
+                        } catch (ArithmeticException invalid) {
+                            throw new BusinessException(422, "脚注 ID 超出支持范围");
+                        }
+                        references.computeIfAbsent(id, ignored -> new ArrayList<>()).add(blockId);
+                    }
+                }
+            } else if (element instanceof XWPFTable table) {
+                String tablePath = parent + "/t" + tableIndex++;
+                for (int rowIndex = 0; rowIndex < table.getRows().size(); rowIndex++) {
+                    var row = table.getRow(rowIndex);
+                    for (int cellIndex = 0; cellIndex < row.getTableCells().size(); cellIndex++) {
+                        collectFootnoteReferences(row.getCell(cellIndex).getBodyElements(),
+                                tablePath + "/r" + rowIndex + "/c" + cellIndex, references);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void requireReferencedFootnote(XWPFDocument document,
+                                                   Map<Integer, List<String>> references,
+                                                   int id) {
+        if (!references.containsKey(id) || document.getFootnoteByID(id) == null) {
+            throw new BusinessException(404, "脚注不存在或未被正文引用：" + id);
+        }
+    }
+
+    private static void addFootnote(XWPFDocument document,
+                                    EditDocxFootnotesDTO.Operation operation) {
+        XWPFParagraph target = requireParagraph(document, operation.getTargetBlockId());
+        if (target.getCTP().isSetPPr() && target.getCTP().getPPr().isSetSectPr()) {
+            throw new BusinessException(422, "不能在分节边界段落上新增脚注");
+        }
+        XWPFFootnote footnote = document.createFootnote();
+        XWPFParagraph paragraph = footnote.createParagraph();
+        footnote.ensureFootnoteRef(paragraph);
+        appendTextWithBreaks(paragraph, operation.getText());
+
+        XWPFRun reference = target.createRun();
+        reference.getCTR().addNewRPr().addNewRStyle().setVal("FootnoteReference");
+        reference.getCTR().addNewFootnoteReference().setId(footnote.getId());
+    }
+
+    private static void updateFootnoteText(XWPFDocument document, int id, String text) {
+        XWPFFootnote footnote = document.getFootnoteByID(id);
+        if (footnote.getBodyElements().stream().anyMatch(element -> element instanceof XWPFTable)) {
+            throw new BusinessException(422, "包含表格的脚注不能通过文字接口整体修改");
+        }
+        if (footnote.getParagraphs().size() != 1) {
+            throw new BusinessException(422, "多段落脚注不能通过文字接口整体修改");
+        }
+        XWPFParagraph paragraph = footnote.getParagraphs().getFirst();
+        while (!paragraph.getRuns().isEmpty()) {
+            paragraph.removeRun(0);
+        }
+        footnote.ensureFootnoteRef(paragraph);
+        appendTextWithBreaks(paragraph, text);
+    }
+
+    private static void appendTextWithBreaks(XWPFParagraph paragraph, String text) {
+        String[] lines = text.replace("\r\n", "\n").replace('\r', '\n').split("\\n", -1);
+        XWPFRun run = paragraph.createRun();
+        for (int index = 0; index < lines.length; index++) {
+            if (index > 0) run.addBreak();
+            run.setText(lines[index]);
+        }
+    }
+
+    private static void removeFootnoteReferences(XWPFDocument document, int id) {
+        removeFootnoteReferences(document.getBodyElements(), id);
+    }
+
+    private static void removeFootnoteReferences(List<IBodyElement> elements, int id) {
+        for (IBodyElement element : elements) {
+            if (element instanceof XWPFParagraph paragraph) {
+                for (XWPFRun run : paragraph.getRuns()) {
+                    var references = run.getCTR().getFootnoteReferenceList();
+                    for (int index = references.size() - 1; index >= 0; index--) {
+                        if (references.get(index).getId().intValue() == id) {
+                            run.getCTR().removeFootnoteReference(index);
+                        }
+                    }
+                }
+            } else if (element instanceof XWPFTable table) {
+                for (var row : table.getRows()) {
+                    for (var cell : row.getTableCells()) {
+                        removeFootnoteReferences(cell.getBodyElements(), id);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void removeFootnoteById(XWPFDocument document, int id) {
+        List<XWPFFootnote> footnotes = document.getFootnotes();
+        for (int index = 0; index < footnotes.size(); index++) {
+            if (footnotes.get(index).getId().intValueExact() == id) {
+                if (!document.removeFootnote(index)) {
+                    throw new BusinessException(422, "无法删除脚注：" + id);
+                }
+                return;
+            }
+        }
+        throw new BusinessException(404, "脚注不存在：" + id);
     }
 
     @Override

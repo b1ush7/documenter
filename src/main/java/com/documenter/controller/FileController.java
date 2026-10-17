@@ -5,6 +5,7 @@ import com.documenter.dto.ConvertPdfToDocxDTO;
 import com.documenter.dto.FileQueryDTO;
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.EditDocxTableDTO;
+import com.documenter.dto.EditDocxFootnotesDTO;
 import com.documenter.dto.EditXlsxCellsDTO;
 import com.documenter.dto.EditImageDTO;
 import com.documenter.dto.EditXlsxDataDTO;
@@ -36,6 +37,7 @@ import com.documenter.vo.FileDownload;
 import com.documenter.vo.DocxCompatibilityReportVO;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.DocxHeaderFooterLinksVO;
+import com.documenter.vo.DocxFootnotesVO;
 import com.documenter.vo.PagePreviewInfoVO;
 import com.documenter.vo.PageResult;
 import com.documenter.vo.PdfContentVO;
@@ -419,6 +421,24 @@ public class FileController {
             @PathVariable Long fileId, @PathVariable Integer versionNo) {
         return ApiResponse.success(docxDocumentService.readHeaderFooterLinks(
                 SecurityUtil.requireUserId(), fileId, versionNo));
+    }
+
+    /** 查询正文脚注及其引用段落。 */
+    @GetMapping("/{fileId}/versions/{versionNo}/footnotes")
+    public ApiResponse<DocxFootnotesVO> readFootnotes(
+            @PathVariable Long fileId, @PathVariable Integer versionNo) {
+        return ApiResponse.success(docxDocumentService.readFootnotes(
+                SecurityUtil.requireUserId(), fileId, versionNo));
+    }
+
+    /** 新增、修改或删除正文脚注并生成新版本。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/footnotes")
+    public ApiResponse<VersionVO> editFootnotes(
+            @PathVariable Long fileId,
+            @PathVariable Integer versionNo,
+            @Valid @RequestBody EditDocxFootnotesDTO request) {
+        return ApiResponse.success("脚注已更新", docxDocumentService.editFootnotes(
+                SecurityUtil.requireUserId(), fileId, versionNo, request));
     }
 
     /**

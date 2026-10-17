@@ -150,6 +150,8 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/inline-images` | 是 | 插入已有图片 |
 | DOCX | GET | `/file/{fileId}/versions/{versionNo}/header-footer-links` | 是 | 查询各分节页眉页脚链接状态 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/header-footer-links` | 是 | 设置页眉页脚链接到上一节或取消链接 |
+| DOCX | GET | `/file/{fileId}/versions/{versionNo}/footnotes` | 是 | 查询正文脚注及引用段落 |
+| DOCX | POST | `/file/{fileId}/versions/{versionNo}/footnotes` | 是 | 新增、修改或删除正文脚注 |
 | 版本 | POST | `/file/{fileId}/versions/{versionNo}/restore` | 是 | 恢复历史版本 |
 | 任务 | POST | `/task` | 是 | 提交异步任务 |
 | 任务 | GET | `/task/list` | 是 | 任务分页列表 |
@@ -1303,6 +1305,32 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 
 本接口不会尝试复制或更新 PAGE/NUMPAGES 等复杂域、目录、图片或复杂表格；取消链接给出的纯文字会替代该分节对上一节的继承。FIRST/EVEN 会自动启用首页不同/奇偶页不同设置。
 
+### 4.10 查询和编辑 DOCX 正文脚注
+
+`GET /file/{fileId}/versions/{versionNo}/footnotes` 返回 `DocxFootnotes`。只返回被正文或表格单元格段落引用的普通脚注，不返回 Word 内部的分隔符、续页分隔等特殊 footnote part。每项包含正整数 `id`、脚注文字和引用该脚注的 `referencedBy` 块 ID 列表。
+
+`POST /file/{fileId}/versions/{versionNo}/footnotes`
+
+```json
+{
+  "instruction": "补充来源说明",
+  "operations": [
+    {"type": "ADD", "targetBlockId": "body/p1", "text": "来源说明"}
+  ]
+}
+```
+
+| 字段 | 必填 | 规则 |
+| --- | --- | --- |
+| `operations` | 是 | 1～50 个操作，成功后整批生成一个 `MANUAL_EDIT` 版本 |
+| `type` | 是 | `ADD`、`UPDATE`、`DELETE` |
+| `targetBlockId` | ADD 必填 | 正文或表格单元格中的段落；不能使用页眉页脚或分节边界段落 |
+| `footnoteId` | UPDATE/DELETE 必填 | 必须是被正文引用且存在的普通脚注 |
+| `text` | ADD/UPDATE 必填 | 最多 100000 字符，支持换行；DELETE 不传 |
+| `instruction` | 否 | 最多 2000 字符，写入版本说明 |
+
+ADD 在目标段落末尾添加脚注引用，并创建独立 footnote part；UPDATE 保留脚注 ID 和正文引用，重建该脚注的首段纯文字；DELETE 先删除正文及表格中的全部同 ID 引用，再移除 footnote part。UPDATE 遇到多段落、表格或其他无法安全整体替换的脚注结构时返回 `422`，不会破坏原内容。任一操作失败不保存部分版本，版本冲突返回 `409`。
+
 ## 5. 异步任务
 
 当前仅开放两个有真实处理器的任务类型：`CONVERT` 调用 PDF 转 DOCX 处理链，`EXPORT` 调用既有 Office 渲染后端导出 PDF。两者成功后都把产物写入版本历史，并在任务 `outputVersion` 返回明确版本号。`OCR` 与 `AI_EDIT` 继续使用各自现有同步接口，不接受新建异步任务；历史记录仍可查询。默认不启用占位处理器。
@@ -1543,6 +1571,10 @@ PENDING -> RUNNING -> SUCCEEDED
 ### 6.15 DocxHeaderFooterLinks
 
 顶层包含 `fileId`、`versionNo`、`totalSections` 和 `sections[]`。每节包含 `sectionNo`、`defaultHeaderLinked`、`firstHeaderLinked`、`evenHeaderLinked`、`defaultFooterLinked`、`firstFooterLinked`、`evenFooterLinked`。字段为 `true` 表示该分节没有对应显式引用，会继承上一节；第一节没有上一节，因此全部为 `false`。
+
+### 6.16 DocxFootnotes
+
+包含 `fileId`、`versionNo` 和 `footnotes[]`。每项包含正整数 `id`、脚注纯文字 `text`，以及引用该脚注的正文/表格段落块 ID 数组 `referencedBy`。内部 footnote part 名称和特殊分隔脚注不会返回。
 
 ## 7. 管理员
 

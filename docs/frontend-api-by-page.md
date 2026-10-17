@@ -438,6 +438,7 @@ GET /file/{fileId}/versions/{versionNo}/xlsx/structure         XLSX 结构
 GET /file/{fileId}/versions/{versionNo}/xlsx/range             XLSX 区域
 GET /file/{fileId}/versions/{versionNo}/xlsx/formula-results   XLSX 公式计算结果
 GET /file/{fileId}/versions/{versionNo}/header-footer-links   DOCX 分节页眉页脚链接状态
+GET /file/{fileId}/versions/{versionNo}/footnotes             DOCX 正文脚注与引用位置
 ```
 
 **DOCX 结构** `DocxStructureVO`：
@@ -475,6 +476,8 @@ DOCX 页眉页脚链接使用同一路径的 GET/POST：
 ```
 
 取消链接时 `text` 必填，链接时必须为空。第一节不能链接上一节；重复设置相同状态返回 409。只在确实继承/拥有显式引用的状态下操作，避免覆盖复杂 PAGE、图片或表格内容。
+
+正文脚注 GET 返回被引用的普通脚注及 `referencedBy` 块 ID。POST 使用 `operations[]` 执行 ADD/UPDATE/DELETE，分别需要目标正文段落、脚注 ID 和脚注文字；成功后一次生成一个版本。多段落或含表格等复杂脚注不会通过纯文字 UPDATE 强行覆盖。
 
 **XLSX 结构**包含 `sheets[]`（含 `firstRow`/`lastRow`）、`cells[]`、`styles[]`、`charts[]`。
 单元格含 `address`、`type`、`value` 等；**读取单元格数量有上限**，超大表只返回部分。

@@ -1,6 +1,7 @@
 package com.documenter.service;
 
 import com.documenter.dto.EditDocxParagraphsDTO;
+import com.documenter.dto.EditDocxFootnotesDTO;
 import com.documenter.dto.EditDocxTableDTO;
 import com.documenter.dto.FormatDocxParagraphsDTO;
 import com.documenter.dto.GenerateDocxDTO;
@@ -9,6 +10,7 @@ import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.dto.UpdateDocxHeaderFooterLinkDTO;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.DocxHeaderFooterLinksVO;
+import com.documenter.vo.DocxFootnotesVO;
 import com.documenter.vo.DocumentEditPlan;
 import com.documenter.vo.FileAssetVO;
 import com.documenter.vo.VersionVO;
@@ -60,4 +62,11 @@ public interface DocxDocumentService {
 
     /** 查询明确 DOCX 版本各分节的页眉页脚链接状态。 */
     DocxHeaderFooterLinksVO readHeaderFooterLinks(Long userId, Long fileId, Integer versionNo);
+
+    /** 查询被正文引用的脚注及其引用段落。 */
+    DocxFootnotesVO readFootnotes(Long userId, Long fileId, Integer versionNo);
+
+    /** 新增、修改或删除脚注，并保存为一个新版本。 */
+    VersionVO editFootnotes(Long userId, Long fileId, Integer sourceVersion,
+                            EditDocxFootnotesDTO request);
 }
