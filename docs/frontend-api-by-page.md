@@ -441,6 +441,7 @@ GET /file/{fileId}/versions/{versionNo}/header-footer-links   DOCX 分节页眉�
 GET /file/{fileId}/versions/{versionNo}/footnotes             DOCX 正文脚注与引用位置
 GET /file/{fileId}/versions/{versionNo}/table-of-contents     DOCX TOC 域与更新标记
 POST /file/{fileId}/versions/{versionNo}/ocr                  PDF 扫描页或图片云端 OCR
+POST /file/{fileId}/versions/{versionNo}/ocr/text             OCR 结果下载为纯文本
 ```
 
 **DOCX 结构** `DocxStructureVO`：
@@ -461,10 +462,11 @@ POST /file/{fileId}/versions/{versionNo}/ocr                  PDF 扫描页或�
 
 ```json
 {"language":"zh+en","pages":[2,3],"dpi":200,
+ "enhance":true,
  "region":{"x":40,"y":80,"width":900,"height":600}}
 ```
 
-响应 `pages[]` 的 `source` 为 `NATIVE`、`OCR` 或 `EMPTY`；OCR 页返回完整页面宽高、区域、整页文字、平均置信度、`needsReview` 和按阅读顺序排列的 `lines[]`。每行包含完整页面坐标 `left/top/width/height` 和置信度；低于阈值的行应进入人工复核。传入 `region` 时只上传该矩形，但仍返回完整页面坐标；未传区域时，PDF 有原生文字的页直接返回，不发送云端。云 OCR 默认关闭且只使用管理端启用、设为默认的 `scope=OCR` 模型；启用后页面会上传云端，界面必须提示数据外发风险。原生 PDF 结果、失败码和配置见 [API.md 第 3.11.1 节](../API.md#3111-云端-ocr)。
+响应 `pages[]` 的 `source` 为 `NATIVE`、`OCR` 或 `EMPTY`；OCR 页返回完整页面宽高、区域、整页文字、平均置信度、`needsReview`、启发式 `paragraphs[]` 和按阅读顺序排列的 `lines[]`。每行包含完整页面坐标 `left/top/width/height` 和置信度；低于阈值的行应进入人工复核。`enhance=true` 会转灰度并拉伸对比度但不改坐标；`paragraphs[]` 只用于复制或文本导出，不能当作表格结构已恢复。传入 `region` 时只上传该矩形，但仍返回完整页面坐标；未传区域时，PDF 有原生文字的页直接返回，不发送云端。云 OCR 默认关闭且只使用管理端启用、设为默认的 `scope=OCR` 模型；启用后页面会上传云端，界面必须提示数据外发风险。`POST .../ocr/text` 用相同请求返回带换页符的 UTF-8 文本附件。原生 PDF 结果、失败码和配置见 [API.md 第 3.11.1 节](../API.md#3111-云端-ocr)。
 
 **PDF 页面预览**返回**图片字节流**，不是 JSON。前端用 `URL.createObjectURL` 渲染。
 页数有限制，超大 PDF 只会渲染部分页。

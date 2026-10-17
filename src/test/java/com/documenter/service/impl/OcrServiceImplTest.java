@@ -77,6 +77,7 @@ class OcrServiceImplTest {
         assertEquals(30, result.pages().getFirst().region().width());
         assertEquals(8, result.pages().getFirst().lines().getFirst().left());
         assertEquals(8, result.pages().getFirst().lines().getFirst().top());
+        assertEquals(1, result.pages().getFirst().paragraphs().size());
     }
 
     @Test
@@ -120,6 +121,47 @@ class OcrServiceImplTest {
         assertEquals(10, result.pages().getFirst().region().x());
         assertEquals(12, result.pages().getFirst().lines().getFirst().left());
         assertEquals(15, result.pages().getFirst().lines().getFirst().top());
+    }
+
+    @Test
+    void groupsSpatialLinesIntoParagraphsByVerticalGap() throws Exception {
+        when(versions.downloadVersion(USER_ID, FILE_ID, VERSION))
+                .thenReturn(download(png(), "png", "image/png"));
+        when(engine.available()).thenReturn(true);
+        when(engine.name()).thenReturn("cloud-vision");
+        when(engine.recognize(any(byte[].class), eq("auto"))).thenReturn(
+                new OcrEngine.Result(List.of(
+                        new OcrEngine.Line("第一段第一行", 2, 2, 25, 8, 95, false),
+                        new OcrEngine.Line("第一段第二行", 2, 12, 25, 8, 94, false),
+                        new OcrEngine.Line("第二段", 2, 30, 18, 8, 93, false)), false));
+
+        var result = service.recognize(
+                USER_ID, FILE_ID, VERSION, new OcrRequestDTO());
+
+        assertEquals(2, result.pages().getFirst().paragraphs().size());
+        assertEquals("第一段第一行\n第一段第二行",
+                result.pages().getFirst().paragraphs().get(0).text());
+        assertEquals("第二段", result.pages().getFirst().paragraphs().get(1).text());
+    }
+
+    @Test
+    void contrastEnhancementPreservesDimensionsAndExpandsGrayRange() {
+        BufferedImage image = new BufferedImage(20, 20, BufferedImage.TYPE_INT_RGB);
+        for (int y = 0; y < image.getHeight(); y++) {
+            for (int x = 0; x < image.getWidth(); x++) {
+                int gray = x < 10 ? 100 : 120;
+                image.setRGB(x, y, (gray << 16) | (gray << 8) | gray);
+            }
+        }
+
+        BufferedImage enhanced = OcrServiceImpl.enhance(image);
+
+        assertEquals(20, enhanced.getWidth());
+        assertEquals(20, enhanced.getHeight());
+        assertTrue((enhanced.getRGB(0, 0) & 0xff)
+                < (enhanced.getRGB(19, 0) & 0xff));
+        assertTrue((enhanced.getRGB(19, 0) & 0xff) - (enhanced.getRGB(0, 0) & 0xff)
+                > 20);
     }
 
     @Test

@@ -68,18 +68,20 @@ public class OcrServiceImpl implements OcrService {
         byte[] content = readAll(source);
         if ("pdf".equals(extension)) {
             return recognizePdf(fileId, versionNo, content, language,
-                    requestedPages, safeRequest.getDpi(), safeRequest.getRegion());
+                    requestedPages, safeRequest.getDpi(), safeRequest.getRegion(),
+                    safeRequest.isEnhance());
         }
         if (IMAGE_EXTENSIONS.contains(extension)) {
             return recognizeImage(fileId, versionNo, content, language,
-                    requestedPages, safeRequest.getRegion());
+                    requestedPages, safeRequest.getRegion(), safeRequest.isEnhance());
         }
         throw new BusinessException(415, "OCR 仅支持 PDF、PNG 和 JPEG");
     }
 
     private OcrResultVO recognizeImage(Long fileId, Integer versionNo, byte[] content,
                                        String language, List<Integer> pages,
-                                       OcrRequestDTO.Region requestedRegion) {
+                                       OcrRequestDTO.Region requestedRegion,
+                                       boolean enhance) {
         if (!pages.isEmpty() && !pages.equals(List.of(1))) {
             throw new BusinessException(400, "图片只有第 1 页");
         }
@@ -94,7 +96,7 @@ public class OcrServiceImpl implements OcrService {
         }
         validatePixels(image);
         CroppedImage cropped = crop(image, requestedRegion);
-        byte[] png = encodePng(cropped.image());
+        byte[] png = encodePng(enhance ? enhance(cropped.image()) : cropped.image());
         requireEngine();
         OcrEngine.Result recognized = engine.recognize(png, language);
         OcrResultVO.Page page = toPage(1, "OCR", image.getWidth(), image.getHeight(),
@@ -106,7 +108,8 @@ public class OcrServiceImpl implements OcrService {
     private OcrResultVO recognizePdf(Long fileId, Integer versionNo, byte[] content,
                                      String language, List<Integer> requestedPages,
                                      Integer requestedDpi,
-                                     OcrRequestDTO.Region requestedRegion) {
+                                     OcrRequestDTO.Region requestedRegion,
+                                     boolean enhance) {
         int dpi = resolveDpi(requestedDpi);
         try (PDDocument document = Loader.loadPDF(content)) {
             int totalPages = document.getNumberOfPages();
@@ -133,6 +136,7 @@ public class OcrServiceImpl implements OcrService {
                             100, false);
                     results.add(new OcrResultVO.Page(pageNo, "NATIVE", 0, 0,
                             nativeText.text(), 100d, false, null,
+                            List.of(),
                             nativeLine == null ? List.of() : List.of(nativeLine),
                             nativeText.truncated()));
                     truncated |= nativeText.truncated();
@@ -150,7 +154,8 @@ public class OcrServiceImpl implements OcrService {
                 renderedPages++;
                 CroppedImage cropped = crop(image, requestedRegion);
                 OcrEngine.Result recognized = engine.recognize(
-                        encodePng(cropped.image()), language);
+                        encodePng(enhance ? enhance(cropped.image()) : cropped.image()),
+                        language);
                 String pageText = recognized.lines().stream()
                         .map(OcrEngine.Line::text)
                         .reduce((left, right) -> left + "\n" + right).orElse("");
@@ -183,8 +188,51 @@ public class OcrServiceImpl implements OcrService {
                 : Math.round(lines.stream().mapToDouble(OcrResultVO.Line::confidence)
                 .average().orElse(0) * 100d) / 100d;
         boolean needsReview = lines.stream().anyMatch(OcrResultVO.Line::needsReview);
+        List<OcrResultVO.Paragraph> paragraphs = paragraphs(lines);
         return new OcrResultVO.Page(pageNo, source, width, height, text,
-                confidence, needsReview, region, lines, result.truncated());
+                confidence, needsReview, region, paragraphs, lines, result.truncated());
+    }
+
+    private static List<OcrResultVO.Paragraph> paragraphs(List<OcrResultVO.Line> lines) {
+        if (lines.isEmpty()) return List.of();
+        List<Integer> heights = lines.stream().map(OcrResultVO.Line::height)
+                .sorted().toList();
+        int medianHeight = heights.get(heights.size() / 2);
+        int gapThreshold = Math.max(8, (int) Math.ceil(Math.max(1, medianHeight) * 0.9));
+        List<OcrResultVO.Paragraph> result = new ArrayList<>();
+        int start = 0;
+        for (int index = 1; index <= lines.size(); index++) {
+            boolean boundary = index == lines.size();
+            if (!boundary) {
+                OcrResultVO.Line previous = lines.get(index - 1);
+                OcrResultVO.Line current = lines.get(index);
+                int gap = current.top() - (previous.top() + previous.height());
+                boundary = gap > gapThreshold;
+            }
+            if (boundary) {
+                result.add(toParagraph(lines.subList(start, index)));
+                start = index;
+            }
+        }
+        return List.copyOf(result);
+    }
+
+    private static OcrResultVO.Paragraph toParagraph(List<OcrResultVO.Line> lines) {
+        int left = lines.stream().mapToInt(OcrResultVO.Line::left).min().orElse(0);
+        int top = lines.stream().mapToInt(OcrResultVO.Line::top).min().orElse(0);
+        int right = lines.stream().mapToInt(line -> line.left() + line.width())
+                .max().orElse(left);
+        int bottom = lines.stream().mapToInt(line -> line.top() + line.height())
+                .max().orElse(top);
+        double confidence = Math.round(lines.stream()
+                .mapToDouble(OcrResultVO.Line::confidence).average().orElse(0) * 100d) / 100d;
+        return new OcrResultVO.Paragraph(
+                lines.stream().map(OcrResultVO.Line::text)
+                        .reduce((leftText, rightText) -> leftText + "\n" + rightText).orElse(""),
+                left, top, Math.max(0, right - left), Math.max(0, bottom - top),
+                confidence,
+                lines.stream().anyMatch(OcrResultVO.Line::needsReview),
+                lines);
     }
 
     private static CroppedImage crop(BufferedImage image,
@@ -212,6 +260,55 @@ public class OcrServiceImpl implements OcrService {
                 new OcrResultVO.Region(requested.getX(), requested.getY(),
                         requested.getWidth(), requested.getHeight()),
                 requested.getX(), requested.getY());
+    }
+
+    /**
+     * 转灰度并按 1%～99% 分位拉伸对比度。透明像素按白底处理，尺寸和坐标不变。
+     */
+    static BufferedImage enhance(BufferedImage source) {
+        int width = source.getWidth();
+        int height = source.getHeight();
+        BufferedImage flattened = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        var graphics = flattened.createGraphics();
+        try {
+            graphics.setColor(java.awt.Color.WHITE);
+            graphics.fillRect(0, 0, width, height);
+            graphics.drawImage(source, 0, 0, null);
+        } finally {
+            graphics.dispose();
+        }
+
+        int[] pixels = flattened.getRGB(0, 0, width, height, null, 0, width);
+        int[] histogram = new int[256];
+        for (int pixel : pixels) {
+            int gray = (((pixel >> 16) & 0xff) * 77
+                    + ((pixel >> 8) & 0xff) * 150 + (pixel & 0xff) * 29) >> 8;
+            histogram[gray]++;
+        }
+        int lowTarget = Math.max(0, pixels.length / 100);
+        int highTarget = Math.max(lowTarget, pixels.length - pixels.length / 100);
+        int low = 0;
+        int accumulated = 0;
+        while (low < 255 && (accumulated += histogram[low]) <= lowTarget) low++;
+        int high = 255;
+        accumulated = 0;
+        while (high > 0 && (accumulated += histogram[high]) <= pixels.length - highTarget) high--;
+        if (high <= low) {
+            low = 0;
+            high = 255;
+        }
+        double scale = 255d / Math.max(1, high - low);
+        int[] enhanced = new int[pixels.length];
+        for (int index = 0; index < pixels.length; index++) {
+            int pixel = pixels[index];
+            int gray = (((pixel >> 16) & 0xff) * 77
+                    + ((pixel >> 8) & 0xff) * 150 + (pixel & 0xff) * 29) >> 8;
+            int value = Math.max(0, Math.min(255,
+                    (int) Math.round((gray - low) * scale)));
+            enhanced[index] = (value << 16) | (value << 8) | value;
+        }
+        flattened.setRGB(0, 0, width, height, enhanced, 0, width);
+        return flattened;
     }
 
     private NativeText nativeText(PDDocument document, int pageNo) throws IOException {

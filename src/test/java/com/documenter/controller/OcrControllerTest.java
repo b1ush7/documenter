@@ -50,6 +50,7 @@ class OcrControllerTest {
                 3, 1, false, List.of(new OcrResultVO.Page(
                 2, "OCR", 100, 80, "标题", 93d, false,
                 new OcrResultVO.Region(5, 8, 40, 30),
+                List.of(),
                 List.of(new OcrResultVO.Line("标题", 10, 12, 30, 16, 93, false)),
                 false)));
         when(service.recognize(eq(7L), eq(10L), eq(2), any())).thenReturn(result);
@@ -76,5 +77,30 @@ class OcrControllerTest {
                 .andExpect(jsonPath("$.code").value(400));
 
         verify(service, never()).recognize(any(), any(), any(), any());
+    }
+
+    @Test
+    void exportsPagesAsUtf8PlainTextWithFormFeedSeparator() throws Exception {
+        var result = new OcrResultVO(10L, 2, "cloud-vision", "zh",
+                2, 0, false, List.of(
+                nativePage(1, "第一页"),
+                nativePage(2, "第二页")));
+        when(service.recognize(eq(7L), eq(10L), eq(2), any())).thenReturn(result);
+
+        mvc.perform(post("/file/10/versions/2/ocr/text")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"language\":\"zh\"}"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
+                        .status().isOk())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
+                        .header().string("Content-Type",
+                                org.hamcrest.Matchers.startsWith("text/plain")))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
+                        .content().string(org.hamcrest.Matchers.containsString("\f")));
+    }
+
+    private static OcrResultVO.Page nativePage(int pageNo, String text) {
+        return new OcrResultVO.Page(pageNo, "NATIVE", 0, 0, text,
+                100d, false, null, List.of(), List.of(), false);
     }
 }

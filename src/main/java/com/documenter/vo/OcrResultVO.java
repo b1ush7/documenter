@@ -14,9 +14,19 @@ public record OcrResultVO(Long fileId, Integer versionNo, String engine, String 
     /** source 为 NATIVE / OCR / EMPTY。 */
     public record Page(int pageNo, String source, int width, int height, String text,
                        Double confidence, boolean needsReview, Region region,
-                       List<Line> lines, boolean truncated) {
+                       List<Paragraph> paragraphs, List<Line> lines, boolean truncated) {
 
         public Page {
+            paragraphs = paragraphs == null ? List.of() : List.copyOf(paragraphs);
+            lines = lines == null ? List.of() : List.copyOf(lines);
+        }
+    }
+
+    /** 服务端按纵向间距对 OCR 行做启发式分组，不表示已恢复完整表格结构。 */
+    public record Paragraph(String text, int left, int top, int width, int height,
+                            double confidence, boolean needsReview, List<Line> lines) {
+
+        public Paragraph {
             lines = lines == null ? List.of() : List.copyOf(lines);
         }
     }

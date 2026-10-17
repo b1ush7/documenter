@@ -26,6 +26,9 @@ public class OcrRequestDTO {
     @Max(value = 300, message = "OCR DPI 不能大于 300")
     private Integer dpi;
 
+    /** true 时在 OCR 前转灰度并按 1%/99% 分位拉伸对比度，不改变坐标和尺寸。 */
+    private boolean enhance;
+
     /** 相对于实际渲染页面或原始图片的像素矩形；为空时识别整页。 */
     @Valid
     private Region region;
