@@ -3,12 +3,15 @@ package com.documenter.controller;
 import com.documenter.constant.ApiResponse;
 import com.documenter.dto.OcrRequestDTO;
 import com.documenter.dto.SaveOcrCorrectionsDTO;
+import com.documenter.dto.OcrOrganizeRequestDTO;
 import com.documenter.service.OcrCorrectionService;
+import com.documenter.service.OcrOrganizationService;
 import com.documenter.service.OcrService;
 import com.documenter.util.OcrTextFormatter;
 import com.documenter.util.SecurityUtil;
 import com.documenter.vo.OcrResultVO;
 import com.documenter.vo.OcrCorrectionVO;
+import com.documenter.vo.AgentRunResult;
 import jakarta.validation.Valid;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
@@ -31,10 +34,13 @@ public class OcrController {
 
     private final OcrService ocrService;
     private final OcrCorrectionService correctionService;
+    private final OcrOrganizationService organizationService;
 
-    public OcrController(OcrService ocrService, OcrCorrectionService correctionService) {
+    public OcrController(OcrService ocrService, OcrCorrectionService correctionService,
+                         OcrOrganizationService organizationService) {
         this.ocrService = ocrService;
         this.correctionService = correctionService;
+        this.organizationService = organizationService;
     }
 
     /** 识别一个明确 PDF 或图片版本；PDF 原生文字页直接复用，扫描页送入配置的 OCR 引擎。 */
@@ -82,5 +88,15 @@ public class OcrController {
             @PathVariable String fingerprint) {
         return ApiResponse.success(correctionService.get(
                 SecurityUtil.requireUserId(), fileId, versionNo, fingerprint));
+    }
+
+    /** 使用已保存的人工校正内容调用现有文本模型做只读整理。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/ocr/corrections/{fingerprint}/organize")
+    public ApiResponse<AgentRunResult> organizeCorrections(
+            @PathVariable Long fileId, @PathVariable Integer versionNo,
+            @PathVariable String fingerprint,
+            @Valid @RequestBody(required = false) OcrOrganizeRequestDTO request) {
+        return ApiResponse.success(organizationService.organize(
+                SecurityUtil.requireUserId(), fileId, versionNo, fingerprint, request));
     }
 }

@@ -137,6 +137,7 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | PDF/图片 | POST | `/file/{fileId}/versions/{versionNo}/ocr/text` | 是 | 云端识别并下载 UTF-8 纯文本 |
 | PDF/图片 | PUT | `/file/{fileId}/versions/{versionNo}/ocr/corrections` | 是 | 按 OCR 结果指纹保存逐页人工校正 |
 | PDF/图片 | GET | `/file/{fileId}/versions/{versionNo}/ocr/corrections/{fingerprint}` | 是 | 读取已保存的逐页人工校正 |
+| PDF/图片 | POST | `/file/{fileId}/versions/{versionNo}/ocr/corrections/{fingerprint}/organize` | 是 | 将人工校正内容交给现有文本模型只读整理 |
 | PDF | POST | `/file/{fileId}/versions/{versionNo}/pdf/convert-to-docx` | 是 | 将原生文字或已启用 OCR 的 PDF 重建为 DOCX 新版本 |
 | XLSX | GET | `/file/{fileId}/versions/{versionNo}/xlsx/structure` | 是 | 读取工作表与单元格结构 |
 | XLSX | GET | `/file/{fileId}/versions/{versionNo}/xlsx/range` | 是 | 读取指定矩形区域 |
@@ -642,13 +643,32 @@ PUT /file/10/versions/2/ocr/corrections
 {
   "fingerprint": "64 位小写十六进制 SHA-256",
   "pages": [
-    {"pageNo": 1, "text": "人工确认后的第一页文字"},
-    {"pageNo": 2, "text": ""}
+    {
+      "pageNo": 1,
+      "text": "人工确认后的第一页文字",
+      "tables": [{
+        "tableIndex": 0,
+        "rows": 2,
+        "columns": 2,
+        "cells": [
+          {"row": 0, "column": 0, "rowSpan": 1, "columnSpan": 2, "text": "人工确认表头"}
+        ]
+      }]
+    },
+    {"pageNo": 2, "text": "", "tables": []}
   ]
 }
 ```
 
-单次 1～100 页，页码不能重复；空字符串表示用户确认该页无文字，总字符数沿用 OCR 输出上限。同一用户、文件版本和指纹重复保存时覆盖校正内容；并发首次保存冲突返回 `409`。`GET .../ocr/corrections/{fingerprint}` 返回 `fileId/versionNo/fingerprint/pages/updatedAt`，不存在返回 `404`。校正记录使用迁移 V7，当前测试未连接真实 MariaDB。指纹只标识 OCR 结果，不包含云端 API Key。
+单次 1～100 页，页码不能重复；空字符串表示用户确认该页无文字，总字符数沿用 OCR 输出上限。每页可选 0～20 个表格，`tableIndex` 指向 OCR 响应该页 `tables[]` 的零基下标；行列、合并跨度必须完整覆盖且不能重叠，否则返回 400。同一用户、文件版本和指纹重复保存时覆盖校正内容；并发首次保存冲突返回 `409`。`GET .../ocr/corrections/{fingerprint}` 返回 `fileId/versionNo/fingerprint/pages/updatedAt`，不存在返回 `404`。校正记录使用迁移 V7，当前测试未连接真实 MariaDB。指纹只标识 OCR 结果，不包含云端 API Key。
+
+`POST .../ocr/corrections/{fingerprint}/organize` 接受可选 `instruction`（最多 500 字符），读取已保存的人工校正文本和表格，并调用现有 `res.ai` 文本模型：
+
+```json
+{"instruction":"整理成会议纪要，保留负责人和截止日期"}
+```
+
+响应沿用现有 `AgentRunResult`，包含 `reply`、步骤、用量、结束原因、来源提示和费用配置状态。该入口不绑定文档、不开放编辑工具，只做只读整理；校正内容作为不可信数据放入提示词边界，不会获得文件写入权限。每日额度、重试、SSE 之外的同步语义和模型未配置提示沿用现有 AI 流程。校正内容超过 `AI_MAX_DOCUMENT_CHARS` 返回 413。
 
 云端 OCR 默认关闭。部署前需在管理端创建、配置并启用 `scope=OCR` 的默认模型；接口地址必须是 HTTPS 的 OpenAI 兼容 `chat/completions` 端点，模型需支持 `image_url` data URL，并能按约定返回行文字及像素坐标。API Key 继续使用既有 AES-256-GCM 模型密钥存储，不返回前端。启用后会把扫描页和图片发送给该云服务，敏感文档不得启用或必须使用满足组织合规要求的部署。未启用、未配置默认模型、鉴权失败或上游不可用返回 503；超时返回 504；其他上游失败、响应格式错误或超过配置的响应大小上限（默认 16 MiB）返回 502，上游限流返回 429。结果缓存位于存储临时目录，键包含图片摘要、模型配置和语言，不包含明文密钥。
 

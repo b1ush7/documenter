@@ -4,6 +4,8 @@ import com.documenter.entity.User;
 import com.documenter.exception.GlobalExceptionHandler;
 import com.documenter.service.OcrService;
 import com.documenter.service.OcrCorrectionService;
+import com.documenter.service.OcrOrganizationService;
+import com.documenter.vo.AgentRunResult;
 import com.documenter.vo.OcrCorrectionVO;
 import com.documenter.vo.OcrResultVO;
 import org.junit.jupiter.api.AfterEach;
@@ -32,11 +34,13 @@ class OcrControllerTest {
 
     private final OcrService service = mock(OcrService.class);
     private final OcrCorrectionService corrections = mock(OcrCorrectionService.class);
+    private final OcrOrganizationService organization = mock(OcrOrganizationService.class);
     private MockMvc mvc;
 
     @BeforeEach
     void setUp() {
-        mvc = MockMvcBuilders.standaloneSetup(new OcrController(service, corrections))
+        mvc = MockMvcBuilders.standaloneSetup(
+                        new OcrController(service, corrections, organization))
                 .setControllerAdvice(new GlobalExceptionHandler()).build();
         var user = new User();
         user.setId(7L);
@@ -112,7 +116,9 @@ class OcrControllerTest {
     void savesAndReadsCorrectionsByOcrFingerprint() throws Exception {
         String fingerprint = "a".repeat(64);
         var corrected = new OcrCorrectionVO(10L, 2, fingerprint,
-                List.of(new OcrCorrectionVO.Page(1, "人工校正")), null);
+                List.of(new OcrCorrectionVO.Page(1, "人工校正",
+                        List.of(new OcrCorrectionVO.Table(0, 1, 1,
+                                List.of(new OcrCorrectionVO.Cell(0, 0, 1, 1, "人工校正")))))), null);
         when(corrections.save(eq(7L), eq(10L), eq(2), any())).thenReturn(corrected);
         when(corrections.get(7L, 10L, 2, fingerprint)).thenReturn(corrected);
 
@@ -123,12 +129,32 @@ class OcrControllerTest {
                                  "pages":[{"pageNo":1,"text":"人工校正"}]}
                                 """))
                 .andExpect(jsonPath("$.code").value(0))
-                .andExpect(jsonPath("$.data.pages[0].text").value("人工校正"));
+                .andExpect(jsonPath("$.data.pages[0].text").value("人工校正"))
+                .andExpect(jsonPath("$.data.pages[0].tables[0].cells[0].text")
+                        .value("人工校正"));
         mvc.perform(get("/file/10/versions/2/ocr/corrections/" + fingerprint))
                 .andExpect(jsonPath("$.code").value(0))
                 .andExpect(jsonPath("$.data.fingerprint").value(fingerprint));
         verify(corrections).save(eq(7L), eq(10L), eq(2), any());
         verify(corrections).get(7L, 10L, 2, fingerprint);
+    }
+
+    @Test
+    void organizesSavedCorrectionsThroughExistingAiFlow() throws Exception {
+        String fingerprint = "b".repeat(64);
+        var result = new AgentRunResult("整理结果", List.of(), List.of(), null,
+                AgentRunResult.Termination.COMPLETED, false, List.of(),
+                "未提供资料来源；涉及新增事实时请人工核验。");
+        when(organization.organize(eq(7L), eq(10L), eq(2), eq(fingerprint), any()))
+                .thenReturn(result);
+
+        mvc.perform(post("/file/10/versions/2/ocr/corrections/" + fingerprint + "/organize")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"instruction\":\"整理成会议纪要\"}"))
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.reply").value("整理结果"))
+                .andExpect(jsonPath("$.data.termination").value("COMPLETED"));
+        verify(organization).organize(eq(7L), eq(10L), eq(2), eq(fingerprint), any());
     }
 
     private static OcrResultVO.Page nativePage(int pageNo, String text) {

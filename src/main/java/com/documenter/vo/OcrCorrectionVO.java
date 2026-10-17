@@ -11,6 +11,20 @@ public record OcrCorrectionVO(Long fileId, Integer versionNo, String fingerprint
         pages = pages == null ? List.of() : List.copyOf(pages);
     }
 
-    public record Page(Integer pageNo, String text) {
+    public record Page(Integer pageNo, String text, List<Table> tables) {
+
+        public Page {
+            tables = tables == null ? List.of() : List.copyOf(tables);
+        }
+    }
+
+    public record Table(int tableIndex, int rows, int columns, List<Cell> cells) {
+
+        public Table {
+            cells = cells == null ? List.of() : List.copyOf(cells);
+        }
+    }
+
+    public record Cell(int row, int column, int rowSpan, int columnSpan, String text) {
     }
 }

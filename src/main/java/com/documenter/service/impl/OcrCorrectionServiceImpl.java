@@ -74,7 +74,7 @@ public class OcrCorrectionServiceImpl implements OcrCorrectionService {
         }
         return new OcrCorrectionVO(fileId, versionNo, request.getFingerprint(),
                 request.getPages().stream().map(page -> new OcrCorrectionVO.Page(
-                        page.getPageNo(), page.getText())).toList(), now);
+                        page.getPageNo(), page.getText(), toTables(page.getTables()))).toList(), now);
     }
 
     @Override
@@ -119,6 +119,7 @@ public class OcrCorrectionServiceImpl implements OcrCorrectionService {
         }
         Set<Integer> pages = new HashSet<>();
         int characters = 0;
+        int tableCells = 0;
         for (SaveOcrCorrectionsDTO.PageCorrection page : request.getPages()) {
             if (page == null || page.getPageNo() == null || page.getPageNo() < 1
                     || page.getText() == null) {
@@ -128,8 +129,72 @@ public class OcrCorrectionServiceImpl implements OcrCorrectionService {
                 throw new BusinessException(400, "OCR 校正页码不能重复");
             }
             characters += page.getText().codePointCount(0, page.getText().length());
+            Set<Integer> tableIndexes = new HashSet<>();
+            if (page.getTables() != null) {
+                for (SaveOcrCorrectionsDTO.TableCorrection table : page.getTables()) {
+                    if (table == null || table.getTableIndex() == null
+                            || table.getTableIndex() < 0 || table.getRows() == null
+                            || table.getColumns() == null || table.getCells() == null
+                            || table.getCells().isEmpty()) {
+                        throw new BusinessException(400, "OCR 校正表格参数不完整");
+                    }
+                    if (!tableIndexes.add(table.getTableIndex())) {
+                        throw new BusinessException(400, "同一页 OCR 校正表格序号不能重复");
+                    }
+                    if (table.getRows() < 1
+                            || table.getRows() > properties.getMaxTableRows()
+                            || table.getColumns() < 1
+                            || table.getColumns() > properties.getMaxTableColumns()) {
+                        throw new BusinessException(400, "OCR 校正表格行列数超出限制");
+                    }
+                    tableCells += table.getCells().size();
+                    if (tableCells > properties.getMaxTableCells()) {
+                        throw new BusinessException(413, "OCR 校正表格单元格总数超过限制");
+                    }
+                    validateTable(table);
+                    for (SaveOcrCorrectionsDTO.CellCorrection cell : table.getCells()) {
+                        characters += cell.getText().codePointCount(0, cell.getText().length());
+                    }
+                }
+            }
             if (characters > properties.getMaxOutputChars()) {
                 throw new BusinessException(413, "OCR 校正文本总量超过限制");
+            }
+        }
+    }
+
+    private static void validateTable(SaveOcrCorrectionsDTO.TableCorrection table) {
+        boolean[][] covered = new boolean[table.getRows()][table.getColumns()];
+        for (SaveOcrCorrectionsDTO.CellCorrection cell : table.getCells()) {
+            if (cell == null || cell.getRow() == null || cell.getColumn() == null
+                    || cell.getRowSpan() == null || cell.getColumnSpan() == null
+                    || cell.getText() == null) {
+                throw new BusinessException(400, "OCR 校正单元格参数不完整");
+            }
+            int row = cell.getRow();
+            int column = cell.getColumn();
+            int rowSpan = cell.getRowSpan();
+            int columnSpan = cell.getColumnSpan();
+            if (row < 0 || column < 0 || rowSpan < 1 || columnSpan < 1
+                    || row + rowSpan > table.getRows()
+                    || column + columnSpan > table.getColumns()) {
+                throw new BusinessException(400, "OCR 校正单元格跨度超出表格范围");
+            }
+            for (int rowIndex = row; rowIndex < row + rowSpan; rowIndex++) {
+                for (int columnIndex = column;
+                     columnIndex < column + columnSpan; columnIndex++) {
+                    if (covered[rowIndex][columnIndex]) {
+                        throw new BusinessException(400, "OCR 校正表格单元格区域重叠");
+                    }
+                    covered[rowIndex][columnIndex] = true;
+                }
+            }
+        }
+        for (boolean[] row : covered) {
+            for (boolean value : row) {
+                if (!value) {
+                    throw new BusinessException(400, "OCR 校正表格存在未覆盖单元格");
+                }
             }
         }
     }
@@ -138,9 +203,20 @@ public class OcrCorrectionServiceImpl implements OcrCorrectionService {
         try {
             return objectMapper.writeValueAsString(pages.stream()
                     .map(page -> new OcrCorrectionVO.Page(
-                            page.getPageNo(), page.getText())).toList());
+                            page.getPageNo(), page.getText(),
+                            toTables(page.getTables()))).toList());
         } catch (JsonProcessingException e) {
             throw new BusinessException(500, "OCR 校正文本序列化失败");
         }
+    }
+
+    private static List<OcrCorrectionVO.Table> toTables(
+            List<SaveOcrCorrectionsDTO.TableCorrection> tables) {
+        if (tables == null) return List.of();
+        return tables.stream().map(table -> new OcrCorrectionVO.Table(
+                table.getTableIndex(), table.getRows(), table.getColumns(),
+                table.getCells().stream().map(cell -> new OcrCorrectionVO.Cell(
+                        cell.getRow(), cell.getColumn(), cell.getRowSpan(),
+                        cell.getColumnSpan(), cell.getText())).toList())).toList();
     }
 }

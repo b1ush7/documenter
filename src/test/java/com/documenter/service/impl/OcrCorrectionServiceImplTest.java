@@ -37,10 +37,17 @@ class OcrCorrectionServiceImplTest {
     void savesNewCorrectionAndReadsItBack() throws Exception {
         when(mapper.selectOne(any())).thenReturn(null).thenReturn(savedEntity());
 
-        var saved = service.save(USER_ID, FILE_ID, VERSION, request("人工校正文本"));
+        var request = request("人工校正文本");
+        request.getPages().getFirst().setTables(List.of(tableCorrection(
+                new int[][]{{0, 0, 1, 2}}, 1, 2,
+                List.of("人工确认"))));
+        var saved = service.save(USER_ID, FILE_ID, VERSION, request);
         var loaded = service.get(USER_ID, FILE_ID, VERSION, FINGERPRINT);
 
         assertEquals("人工校正文本", saved.pages().getFirst().text());
+        assertEquals(1, saved.pages().getFirst().tables().size());
+        assertEquals("人工确认", saved.pages().getFirst().tables().getFirst()
+                .cells().getFirst().text());
         assertEquals("人工校正文本", loaded.pages().getFirst().text());
         verify(versions, org.mockito.Mockito.times(2))
                 .downloadVersion(USER_ID, FILE_ID, VERSION);
@@ -71,6 +78,24 @@ class OcrCorrectionServiceImplTest {
                 () -> service.get(USER_ID, FILE_ID, VERSION, FINGERPRINT)).getCode());
     }
 
+    @Test
+    void rejectsOverlappingOrIncompleteCorrectedTable() {
+        var overlapping = request("文本");
+        overlapping.getPages().getFirst().setTables(List.of(tableCorrection(
+                new int[][]{
+                        {0, 0, 1, 2},
+                        {0, 1, 1, 1}
+                }, 1, 2, List.of("A", "B"))));
+        assertEquals(400, assertThrows(BusinessException.class,
+                () -> service.save(USER_ID, FILE_ID, VERSION, overlapping)).getCode());
+
+        var incomplete = request("文本");
+        incomplete.getPages().getFirst().setTables(List.of(tableCorrection(
+                new int[][]{{0, 0, 1, 1}}, 2, 2, List.of("A"))));
+        assertEquals(400, assertThrows(BusinessException.class,
+                () -> service.save(USER_ID, FILE_ID, VERSION, incomplete)).getCode());
+    }
+
     private static SaveOcrCorrectionsDTO request(String text) {
         var request = new SaveOcrCorrectionsDTO();
         request.setFingerprint(FINGERPRINT);
@@ -92,8 +117,29 @@ class OcrCorrectionServiceImplTest {
         entity.setVersionNo(VERSION);
         entity.setFingerprint(FINGERPRINT);
         entity.setCorrectionsJson(new ObjectMapper().writeValueAsString(
-                List.of(new com.documenter.vo.OcrCorrectionVO.Page(1, "人工校正文本"))));
+                List.of(new com.documenter.vo.OcrCorrectionVO.Page(
+                        1, "人工校正文本", List.of()))));
         entity.setUpdateTime(LocalDateTime.of(2026, 10, 17, 20, 0));
         return entity;
+    }
+
+    private static SaveOcrCorrectionsDTO.TableCorrection tableCorrection(
+            int[][] cells, int rows, int columns, List<String> texts) {
+        var table = new SaveOcrCorrectionsDTO.TableCorrection();
+        table.setTableIndex(0);
+        table.setRows(rows);
+        table.setColumns(columns);
+        var result = new java.util.ArrayList<SaveOcrCorrectionsDTO.CellCorrection>();
+        for (int index = 0; index < cells.length; index++) {
+            var cell = new SaveOcrCorrectionsDTO.CellCorrection();
+            cell.setRow(cells[index][0]);
+            cell.setColumn(cells[index][1]);
+            cell.setRowSpan(cells[index][2]);
+            cell.setColumnSpan(cells[index][3]);
+            cell.setText(texts.get(index));
+            result.add(cell);
+        }
+        table.setCells(result);
+        return table;
     }
 }
