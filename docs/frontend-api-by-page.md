@@ -440,6 +440,7 @@ GET /file/{fileId}/versions/{versionNo}/xlsx/formula-results   XLSX 公式计算
 GET /file/{fileId}/versions/{versionNo}/header-footer-links   DOCX 分节页眉页脚链接状态
 GET /file/{fileId}/versions/{versionNo}/footnotes             DOCX 正文脚注与引用位置
 GET /file/{fileId}/versions/{versionNo}/table-of-contents     DOCX TOC 域与更新标记
+POST /file/{fileId}/versions/{versionNo}/ocr                  PDF 扫描页或图片云端 OCR
 ```
 
 **DOCX 结构** `DocxStructureVO`：
@@ -456,7 +457,13 @@ GET /file/{fileId}/versions/{versionNo}/table-of-contents     DOCX TOC 域与更
 `blockId` 是稳定标识，**后续所有编辑操作都以它定位目标块**。前端必须原样回传，不要自己重排。
 
 **PDF 内容** `PdfContentVO`：包含 `documentType` 与 `pages[]`，每页有 `pageNo`、`type`（文本型/扫描型）、`text`、字数。
-扫描页的 `text` 为空，需要后续走 OCR（P2 范围）。
+扫描页的 `text` 为空，可把明确版本和页码提交到 `POST /file/{fileId}/versions/{versionNo}/ocr`：
+
+```json
+{"language":"zh+en","pages":[2,3],"dpi":200}
+```
+
+响应 `pages[]` 的 `source` 为 `NATIVE`、`OCR` 或 `EMPTY`；OCR 页返回实际渲染图的宽高、整页文字、平均置信度、`needsReview` 和按阅读顺序排列的 `lines[]`。每行包含像素坐标 `left/top/width/height` 和置信度；低于阈值的行应进入人工复核。PDF 有原生文字的页直接返回，不发送云端。云 OCR 默认关闭且只使用管理端启用、设为默认的 `scope=OCR` 模型；启用后扫描页会上传云端，界面必须提示数据外发风险。原生 PDF 结果、失败码和配置见 [API.md 第 3.11.1 节](../API.md#3111-云端-ocr)。
 
 **PDF 页面预览**返回**图片字节流**，不是 JSON。前端用 `URL.createObjectURL` 渲染。
 页数有限制，超大 PDF 只会渲染部分页。
@@ -464,10 +471,10 @@ GET /file/{fileId}/versions/{versionNo}/table-of-contents     DOCX TOC 域与更
 文字型 PDF 可调用 `POST /file/{fileId}/versions/{versionNo}/pdf/convert-to-docx` 生成新版本：
 
 ```json
-{"mode":"LAYOUT","instruction":"按版式优先重建"}
+{"mode":"LAYOUT","instruction":"按版式优先重建","ocrLanguage":"zh+en"}
 ```
 
-`EDITABLE` 适合继续编辑，`LAYOUT` 尽量保留文字横向位置、字号、粗斜体和基础行距。路径版本必须是当前版本，成功后返回 `Version`，可用新 versionNo 读取 DOCX 结构、继续人工或 AI 编辑。扫描页、复杂表格/域/脚注和精确分页仍需提示限制；没有原生文字的页面会让整次转换返回 422，不使用整页图片冒充可编辑内容。
+`EDITABLE` 适合继续编辑，`LAYOUT` 尽量保留文字横向位置、字号、粗斜体和基础行距。路径版本必须是当前版本，成功后返回 `Version`，可用新 versionNo 读取 DOCX 结构、继续人工或 AI 编辑。不传 `ocrLanguage` 时，含扫描页的转换仍返回 422；传入后扫描页走云端 OCR 再重建文字，模型不可用返回 503。复杂表格/域/脚注、精确分页和 OCR 真实质量仍需提示限制，不使用整页扫描图冒充可编辑内容。
 
 DOCX 页眉页脚链接使用同一路径的 GET/POST：
 
@@ -663,7 +670,7 @@ POST /file/{fileId}/versions/{versionNo}/compatibility-check
 
 ## P10 图片基础处理
 
-仅保留本地格式转换、尺寸调整、裁剪、直角旋转、亮度及单行文字水印。图片生成、智能修图、背景/对象替换和蒙版不在范围；PDF/图片 OCR 另行接入。
+仅保留本地格式转换、尺寸调整、裁剪、直角旋转、亮度及单行文字水印。图片生成、智能修图、背景/对象替换和蒙版不在范围；PDF/图片 OCR 使用独立的云端文字识别入口。
 
 ```
 POST /file/{fileId}/versions/{versionNo}/image-edits
@@ -1256,8 +1263,8 @@ FileDetailPage
 | --- | --- | --- |
 | AI 模型调用 | 同步回复与确认后端已接通，真实模型效果待验收 | 使用 replies 流程展示差异、确认/放弃；识别 stub，旧 messages 仅记录消息 |
 | 任务进度推送 | **仅轮询** | 需自行实现轮询与停止策略 |
-| OCR | 未实现（P2） | 扫描型 PDF 的 `text` 为空 |
-| PDF 转可编辑 DOCX | 未实现（P2） | 无此入口 |
+| OCR | 后端已接入 OpenAI 兼容云端模型，真实供应商和中文质量待验收 | 默认关闭；启用后发送扫描页，展示坐标、置信度和低置信度复核标记 |
+| PDF 转可编辑 DOCX | 已有后端入口 | 原生文字直接转换；扫描页需显式传 `ocrLanguage` 并配置默认 OCR 模型 |
 | 图片基础处理 | 已有后端接口 | 格式转换/缩放/裁剪/直角旋转/亮度/单行水印；图片模型不在范围 |
 | 前端工程 | **不存在** | 已有技术与部署建议，工程位置和方案落地仍待确认 |
 | 邮件验证码 | 未实现 | 只有短信渠道（当前为 Mock） |

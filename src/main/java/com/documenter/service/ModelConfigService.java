@@ -40,4 +40,15 @@ public interface ModelConfigService {
      * @return 明文密钥；未配置或未启用时返回 null
      */
     String requirePlainApiKey(String code);
+
+    /**
+     * 读取某用途当前启用的默认配置，供服务端运行时调用。
+     * 返回对象只允许在服务端内部使用，序列化到接口前必须丢弃 apiKey。
+     */
+    ModelRuntimeConfig requireDefaultRuntimeConfig(String scope);
+
+    record ModelRuntimeConfig(String code, String provider, String baseUrl,
+                              String modelName, String apiKey, int timeoutSeconds,
+                              Integer maxOutputTokens, java.math.BigDecimal temperature) {
+    }
 }

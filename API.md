@@ -133,7 +133,8 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | DOCX | GET | `/file/{fileId}/versions/{versionNo}/structure` | 是 | 读取 DOCX 结构 |
 | PDF | GET | `/file/{fileId}/versions/{versionNo}/pdf/content` | 是 | 提取 PDF 原生文本并检测页面类型 |
 | PDF | GET | `/file/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview` | 是 | 渲染 PDF 指定页 PNG 预览 |
-| PDF | POST | `/file/{fileId}/versions/{versionNo}/pdf/convert-to-docx` | 是 | 将原生文字 PDF 重建为可编辑 DOCX 新版本 |
+| PDF/图片 | POST | `/file/{fileId}/versions/{versionNo}/ocr` | 是 | 云端识别 PDF 扫描页或 PNG/JPEG |
+| PDF | POST | `/file/{fileId}/versions/{versionNo}/pdf/convert-to-docx` | 是 | 将原生文字或已启用 OCR 的 PDF 重建为 DOCX 新版本 |
 | XLSX | GET | `/file/{fileId}/versions/{versionNo}/xlsx/structure` | 是 | 读取工作表与单元格结构 |
 | XLSX | GET | `/file/{fileId}/versions/{versionNo}/xlsx/range` | 是 | 读取指定矩形区域 |
 | XLSX | GET | `/file/{fileId}/versions/{versionNo}/xlsx/formula-results` | 是 | 即时计算区域内公式，返回结果或错误 |
@@ -541,6 +542,61 @@ POST /file/10/versions/2/restore?expectVersion=5
 
 这是基于 PDF 内容对象的启发式分类，不执行 OCR，也不保证能识别只使用矢量路径绘制的文字或扫描内容。默认每页最多返回 100,000 个 Unicode 字符，整份文档最多返回 2,000,000 个；超出时通过 `textTruncated` 明确标记，限制可由部署环境变量调整。
 
+### 3.11.1 云端 OCR
+
+`POST /file/{fileId}/versions/{versionNo}/ocr`
+
+```json
+{
+  "language": "zh+en",
+  "pages": [2, 3],
+  "dpi": 200
+}
+```
+
+| 字段 | 必填 | 约束 |
+| --- | --- | --- |
+| `language` | 否 | 默认 `auto`；只接受部署配置开放的语言，例如 `zh`、`en`、`zh+en` |
+| `pages` | 否 | PDF 页码数组，最多 50 项且不能重复；为空时识别全部页，超过部署页数上限返回 413；图片只能传 `[1]` 或省略 |
+| `dpi` | 否 | PDF 扫描页渲染 DPI，100～部署上限，默认 200；图片始终使用原始像素 |
+
+接口支持 PDF、PNG 和 JPEG 的明确版本。PDF 中已有原生文字的页面直接复用 PDFBox 结果，`source=NATIVE` 且不调用云服务；无原生文字页渲染后发送到云端，图片页直接编码 PNG 发送。响应统一返回 `OcrResult`：
+
+```json
+{
+  "fileId": 10,
+  "versionNo": 2,
+  "engine": "cloud-vision",
+  "language": "zh+en",
+  "totalPages": 3,
+  "renderedPages": 1,
+  "truncated": false,
+  "pages": [{
+    "pageNo": 2,
+    "source": "OCR",
+    "width": 1700,
+    "height": 2200,
+    "text": "标题\nInvoice 42",
+    "confidence": 94.5,
+    "needsReview": false,
+    "truncated": false,
+    "lines": [{
+      "text": "标题",
+      "left": 120,
+      "top": 180,
+      "width": 240,
+      "height": 42,
+      "confidence": 96,
+      "needsReview": false
+    }]
+  }]
+}
+```
+
+坐标单位是实际送入 OCR 的 PNG 像素。低置信度阈值默认 60；低于阈值的行设置 `needsReview=true`，页面 `needsReview` 为任一行的聚合结果。结果按 `top`、`left` 排序。OCR 返回识别数据，不保存新版本，也不会修改原文件。
+
+云端 OCR 默认关闭。部署前需在管理端创建、配置并启用 `scope=OCR` 的默认模型；接口地址必须是 HTTPS 的 OpenAI 兼容 `chat/completions` 端点，模型需支持 `image_url` data URL，并能按约定返回行文字及像素坐标。API Key 继续使用既有 AES-256-GCM 模型密钥存储，不返回前端。启用后会把扫描页和图片发送给该云服务，敏感文档不得启用或必须使用满足组织合规要求的部署。未启用、未配置默认模型、鉴权失败或上游不可用返回 503；超时返回 504；其他上游失败、响应格式错误或超过配置的响应大小上限（默认 16 MiB）返回 502，上游限流返回 429。结果缓存位于存储临时目录，键包含图片摘要、模型配置和语言，不包含明文密钥。
+
 ### 3.12 渲染 PDF 页面预览
 
 `GET /file/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview`
@@ -852,7 +908,7 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 
 `POST /file/{fileId}/versions/{versionNo}/image-edits`
 
-只操作当前用户拥有的明确图片版本，使用本地 Java2D/ImageIO。项目仅保留格式转换、JPEG 质量、缩放、裁剪、直角旋转、亮度和单行文字水印，不规划图片生成、智能修图、背景或对象替换、蒙版编辑；PDF/图片 OCR 是独立的文字识别能力，仍待接入。请求示例：
+只操作当前用户拥有的明确图片版本，使用本地 Java2D/ImageIO。项目仅保留格式转换、JPEG 质量、缩放、裁剪、直角旋转、亮度和单行文字水印，不规划图片生成、智能修图、背景或对象替换、蒙版编辑；PDF/图片 OCR 使用独立的云端识别接口。请求示例：
 
 ```json
 {
@@ -938,7 +994,8 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 ```json
 {
   "mode": "LAYOUT",
-  "instruction": "按版式优先重建"
+  "instruction": "按版式优先重建",
+  "ocrLanguage": "zh+en"
 }
 ```
 
@@ -946,10 +1003,11 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 | --- | --- | --- |
 | `mode` | 是 | `EDITABLE`：按阅读行输出，便于编辑；`LAYOUT`：保留文字横向位置、字号、粗斜体和基础行距 |
 | `instruction` | 否 | 最多 500 字符，写入新版本追溯信息 |
+| `ocrLanguage` | 否 | 例如 `zh+en`；提供后扫描页调用管理端默认云端 OCR，模型不可用返回 503 |
 
 接口读取当前用户拥有的明确 PDF 版本，以路径中的 `versionNo` 同时作为源版本和乐观锁期望版本，生成同一文件的新 `CONVERT` / DOCX 版本并返回 [Version](#64-version)。原 PDF 和其他历史版本不变。
 
-转换只重建原生文字、基础字体、阅读行和无文字页的内嵌 PNG/JPEG；不会将整页渲染图嵌入 DOCX 冒充可编辑文档。目录域、脚注、批注、复杂表格和精确分页可能无法完整还原，结果说明会明确列出该限制。任一页面只有图片、没有原生文字时整次转换返回业务码 `422`，必须先完成后续 OCR。空文档、损坏 PDF、页数/字符/图片像素/输出大小超限分别按 `422`、`413` 返回；源版本已变化返回 `409`。转换产物可继续使用既有 DOCX 结构读取、编辑和 AI 确认接口。
+转换只重建原生文字、基础字体、阅读行和内嵌图片；不会将整页扫描图嵌入 DOCX 冒充可编辑文档。未传 `ocrLanguage` 且存在无原生文字页时保持原行为并返回 `422`；传入后只把扫描页发送到已配置的云端 OCR，再把识别行按基础位置重建为文字。目录域、脚注、批注、复杂表格和精确分页可能无法完整还原，结果说明会明确列出该限制。空文档、损坏 PDF、页数/字符/图片像素/输出大小超限分别按 `422`、`413` 返回；OCR 不可用返回 `503`，源版本已变化返回 `409`。转换产物可继续使用既有 DOCX 结构读取、编辑和 AI 确认接口。
 
 ## 4. DOCX 生成与编辑
 
@@ -2028,10 +2086,10 @@ target 是内部定位形式“原始工作表名称!规范单元格”，单元
 ## 9. 当前实现边界
 
 - 已提供同步及 SSE 流式 AI 回复、来源回显与核验提示、DOCX 文本/图片/基础格式，以及 XLSX 公式、新表格和基础图表的差异、确认和放弃；真实模型效果尚未验收。
-- LangChain4j 工具循环已接入回复 Controller；CONVERT/EXPORT 已接入真实异步任务处理器，OCR/AI_EDIT 不开放新建异步任务。
+- LangChain4j 工具循环已接入回复 Controller；CONVERT/EXPORT 已接入真实异步任务处理器，OCR/AI_EDIT 不开放新建异步任务。OCR 使用独立同步接口和可配置的 OpenAI 兼容云端视觉模型。
 - SSE 用于 AI 回复，不用于异步任务进度；任务进度继续通过 REST 轮询。
 - DOCX 结构块模式使用固定样式；模板模式支持管理员启用的 DOCX 正文/表格纯文本变量，不支持循环、图片变量、主题参数和用户自行上传模板生成。
 - DOCX 块 ID 不是跨版本永久 ID，每次成功编辑后应重新读取结构。
 - 验证码开发配置使用模拟发送，不能直接视为生产短信能力。
 - 管理员可跨用户读取、下载、重命名或软删除文件，并查看、取消或重试任务；尚未提供跨用户 DOCX 内容编辑和版本恢复入口，以免在当前版本模型中错误记录实际操作者。
-- PDF 页面分类是本地启发式检测；原生文字 PDF 可重建为可编辑 DOCX，扫描页和矢量文字仍需 OCR。
+- PDF 页面分类是本地启发式检测；原生文字 PDF 可重建为可编辑 DOCX。扫描页可在显式配置云端 OCR 后识别和重建；真实供应商、中文质量与复杂表格仍待验收。

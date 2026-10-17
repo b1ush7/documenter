@@ -1,6 +1,7 @@
 package com.documenter.service.impl;
 
 import com.documenter.configuration.StorageProperties;
+import com.documenter.configuration.OcrProperties;
 import com.documenter.dto.ConvertPdfToDocxDTO;
 import com.documenter.entity.DocumentVersion;
 import com.documenter.entity.FileAsset;
@@ -9,6 +10,7 @@ import com.documenter.enums.PdfConversionMode;
 import com.documenter.exception.BusinessException;
 import com.documenter.service.DocumentVersionService;
 import com.documenter.service.FileStorage;
+import com.documenter.service.OcrEngine;
 import com.documenter.service.VersionWriter;
 import com.documenter.vo.FileDownload;
 import org.apache.pdfbox.pdmodel.PDDocument;
@@ -26,6 +28,7 @@ import java.awt.Color;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -49,9 +52,12 @@ class PdfToDocxServiceImplTest {
     private final DocumentVersionService versions = mock(DocumentVersionService.class);
     private final FileStorage storage = mock(FileStorage.class);
     private final VersionWriter versionWriter = mock(VersionWriter.class);
+    private final OcrEngine ocrEngine = mock(OcrEngine.class);
     private final StorageProperties properties = properties();
+    private final OcrProperties ocrProperties = new OcrProperties();
     private final PdfToDocxServiceImpl service =
-            new PdfToDocxServiceImpl(versions, storage, versionWriter, properties);
+            new PdfToDocxServiceImpl(versions, storage, versionWriter, properties,
+                    ocrEngine, ocrProperties);
 
     @Test
     void rebuildsNativeTextAsEditableDocxWithPageBreaks() throws Exception {
@@ -129,6 +135,40 @@ class PdfToDocxServiceImplTest {
     }
 
     @Test
+    void rebuildsScannedPageFromConfiguredCloudOcr() throws Exception {
+        byte[] pdf = createPdf(document -> addImagePage(document, false));
+        when(ocrEngine.available()).thenReturn(true);
+        when(ocrEngine.recognize(any(byte[].class), eq("zh+en"))).thenReturn(
+                new OcrEngine.Result(List.of(
+                        new OcrEngine.Line("云端识别标题", 20, 30, 180, 28, 96.5, false),
+                        new OcrEngine.Line("Invoice 42", 20, 70, 130, 24, 91, false)), false));
+
+        byte[] docx = service.rebuild(pdf, PdfConversionMode.EDITABLE, "zh+en");
+
+        try (XWPFDocument reopened = new XWPFDocument(new ByteArrayInputStream(docx))) {
+            String text = reopened.getParagraphs().stream()
+                    .map(paragraph -> paragraph.getText()).toList().toString();
+            assertTrue(text.contains("云端识别标题"));
+            assertTrue(text.contains("Invoice 42"));
+            assertTrue(reopened.getAllPictures().isEmpty());
+        }
+        verify(ocrEngine).recognize(any(byte[].class), eq("zh+en"));
+    }
+
+    @Test
+    void failsClearlyWhenScannedOcrModelIsUnavailable() throws Exception {
+        byte[] pdf = createPdf(document -> addImagePage(document, false));
+        when(ocrEngine.available()).thenReturn(false);
+
+        BusinessException error = assertThrows(BusinessException.class,
+                () -> service.rebuild(pdf, PdfConversionMode.EDITABLE, "auto"));
+
+        assertEquals(503, error.getCode());
+        assertTrue(error.getMessage().contains("云端 OCR"));
+        verify(ocrEngine, never()).recognize(any(byte[].class), anyString());
+    }
+
+    @Test
     void rejectsEmptyTextAndImageBudgetOverflow() throws Exception {
         byte[] empty = createPdf(document -> document.addPage(new PDPage()));
         assertEquals(422, assertThrows(BusinessException.class,
@@ -187,7 +227,7 @@ class PdfToDocxServiceImplTest {
     private static StorageProperties properties() {
         StorageProperties properties = new StorageProperties();
         properties.getUpload().setMaxPdfPages(10);
-        properties.getUpload().setMaxImagePixels(10_000L);
+        properties.getUpload().setMaxImagePixels(10_000_000L);
         properties.getPdf().setMaxExtractedCharsPerPage(100_000);
         properties.getPdf().setMaxExtractedCharsTotal(2_000_000);
         return properties;

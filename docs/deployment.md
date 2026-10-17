@@ -98,9 +98,17 @@ application-service.yaml 是本地维护的部署统一配置，放在 src/main/
 | AI_BASE_URL / AI_API_KEY / AI_MODEL_NAME | 真实兼容协议客户端的地址、密钥和模型；不保证目标服务的工具调用效果，需单独验收 |
 | AI_DAILY_CALL_LIMIT / AI_QUOTA_ZONE | 每 ChatModel 调用尝试计数，含失败和智能体重试；0 不限额，默认 Asia/Shanghai 自然日，不扣余额 |
 | AI_REQUIRE_CONFIRMATION | 当前 HTTP 回复流程要求 true；先查看 changes，再确认保存 |
+| OCR_ENABLED | 默认 false。启用前必须在管理端配置并启用 scope=OCR 的默认 OpenAI 兼容视觉模型；启用后扫描页和图片会上传云端 |
+| OCR_DEFAULT_LANGUAGE / OCR_ALLOWED_LANGUAGES | 默认 `auto`；允许 `zh`、`en` 及 `zh+en` 等已开放组合 |
+| OCR_PDF_DPI / OCR_MAX_PDF_DPI / OCR_MAX_PAGES | 扫描页渲染 DPI、DPI 上限和单次最多页数；调用方可用 pages 分批 |
+| OCR_MAX_WORDS / OCR_MAX_OUTPUT_CHARS / OCR_MAX_IMAGE_BYTES / OCR_MAX_RESPONSE_BYTES | 云端返回行数、单次文字总量、单页上传字节和单次原始响应字节限制 |
+| OCR_LOW_CONFIDENCE_THRESHOLD | 低于该置信度百分比的行标记 needsReview，不会自动篡改文字 |
+| OCR_CACHE_ENABLED / OCR_CACHE_DIRECTORY | 缓存云响应，目录位于 STORAGE_LOCAL_TEMP 下；缓存键包含图片摘要、模型配置、语言和密钥摘要，不保存明文密钥 |
 | PDF_MAX_CONVERSION_IMAGES / PDF_MAX_CONVERSION_IMAGE_PIXELS_TOTAL | PDF 转 DOCX 最多重建的内嵌图片数和累计像素；超出部分跳过图片，文字仍保留，单张图仍受 STORAGE_MAX_IMAGE_PIXELS 约束 |
 
-当前活动模型读取 res.ai 配置；后台模型配置接口持久化配置和密文，并不会自动替换正在使用的客户端。修改模型配置后按当前装配方式重新启动并核对返回的 modelName。
+当前文本模型读取 res.ai 配置；后台模型配置接口持久化配置和密文，并不会自动替换文本模型客户端。修改文本模型配置后按当前装配方式重新启动并核对返回的 modelName。云 OCR 与此不同：它在请求时读取管理端 `scope=OCR` 的默认、已启用模型配置并解密密钥，因此启用 `OCR_ENABLED=true` 后无需把 OCR 密钥再写入环境变量；修改默认 OCR 配置会影响后续请求。
+
+云 OCR 默认关闭。启用前须检查数据能否发送到该服务商，并配置 HTTPS 接口地址、模型名和 API Key。模型必须支持 OpenAI 兼容 `chat/completions` 的 `image_url` data URL，并能返回约定 JSON；不能因为管理员界面“启用”就视为真实模型质量和合规性已验收。未配置默认模型、密钥解密失败或上游鉴权失败时接口返回 503，不会回退到本地假识别。
 
 验证码日发送量和上传日额度使用进程默认时区；AI 日额度使用 AI_QUOTA_ZONE。部署实例应保持时区一致，必要时使用 JVM 参数 `-Duser.timezone=Asia/Shanghai`；不要把三者误认为同一配置项。
 

@@ -1,6 +1,7 @@
 package com.documenter.service.impl;
 
 import com.documenter.configuration.StorageProperties;
+import com.documenter.configuration.OcrProperties;
 import com.documenter.dto.ConvertPdfToDocxDTO;
 import com.documenter.entity.DocumentVersion;
 import com.documenter.enums.ChangeType;
@@ -8,9 +9,11 @@ import com.documenter.enums.PdfConversionMode;
 import com.documenter.exception.BusinessException;
 import com.documenter.service.DocumentVersionService;
 import com.documenter.service.FileStorage;
+import com.documenter.service.OcrEngine;
 import com.documenter.service.PdfToDocxService;
 import com.documenter.service.VersionWriter;
 import com.documenter.util.Digests;
+import com.documenter.util.OcrLanguageUtil;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.VersionVO;
 import lombok.extern.slf4j.Slf4j;
@@ -22,6 +25,8 @@ import org.apache.pdfbox.pdmodel.PDResources;
 import org.apache.pdfbox.pdmodel.graphics.PDXObject;
 import org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
+import org.apache.pdfbox.rendering.ImageType;
+import org.apache.pdfbox.rendering.PDFRenderer;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.apache.pdfbox.text.TextPosition;
 import org.apache.poi.util.Units;
@@ -63,13 +68,18 @@ public class PdfToDocxServiceImpl implements PdfToDocxService {
     private final FileStorage storage;
     private final VersionWriter versionWriter;
     private final StorageProperties properties;
+    private final OcrEngine ocrEngine;
+    private final OcrProperties ocrProperties;
 
     public PdfToDocxServiceImpl(DocumentVersionService versions, FileStorage storage,
-                                VersionWriter versionWriter, StorageProperties properties) {
+                                VersionWriter versionWriter, StorageProperties properties,
+                                OcrEngine ocrEngine, OcrProperties ocrProperties) {
         this.versions = versions;
         this.storage = storage;
         this.versionWriter = versionWriter;
         this.properties = properties;
+        this.ocrEngine = ocrEngine;
+        this.ocrProperties = ocrProperties;
     }
 
     @Override
@@ -95,7 +105,10 @@ public class PdfToDocxServiceImpl implements PdfToDocxService {
             throw new BusinessException(500, "PDF 文件读取失败，请稍后重试");
         }
 
-        byte[] docx = rebuild(pdfBytes, request.getMode());
+        String ocrLanguage = request.getOcrLanguage() == null
+                || request.getOcrLanguage().isBlank()
+                ? null : OcrLanguageUtil.resolve(request.getOcrLanguage(), ocrProperties);
+        byte[] docx = rebuild(pdfBytes, request.getMode(), ocrLanguage);
         long maxSize = properties.getUpload().getMaxSizeBytes();
         if (docx.length > maxSize) {
             throw new BusinessException(413, "转换后的 DOCX 超过文件大小限制");
@@ -113,7 +126,8 @@ public class PdfToDocxServiceImpl implements PdfToDocxService {
                             DOCX_CONTENT_TYPE, "docx"),
                     ChangeType.CONVERT, instruction,
                     "由 PDF 版本 " + sourceVersion + " 重建可编辑 DOCX；" + modeLabel
-                            + "；复杂表格、域、脚注和精确分页需在办公软件中复核",
+                            + "；复杂表格、域、脚注和精确分页需在办公软件中复核"
+                            + (ocrLanguage == null ? "" : "；扫描页 OCR 结果需人工复核"),
                     sourceVersion, taskId, attemptNo);
             if (!storageKey.equals(created.getStorageKey())) {
                 storage.delete(storageKey);
@@ -129,6 +143,10 @@ public class PdfToDocxServiceImpl implements PdfToDocxService {
     }
 
     byte[] rebuild(byte[] pdfBytes, PdfConversionMode mode) {
+        return rebuild(pdfBytes, mode, null);
+    }
+
+    byte[] rebuild(byte[] pdfBytes, PdfConversionMode mode, String ocrLanguage) {
         try (PDDocument pdf = Loader.loadPDF(pdfBytes);
              XWPFDocument docx = new XWPFDocument();
              ByteArrayOutputStream output = new ByteArrayOutputStream()) {
@@ -149,6 +167,7 @@ public class PdfToDocxServiceImpl implements PdfToDocxService {
                             Math.max(0L, properties.getUpload().getMaxImagePixels())));
             List<Integer> scannedPages = new ArrayList<>();
             Set<COSBase> visitedImages = new HashSet<>();
+            boolean wrotePage = false;
             for (int pageIndex = 0; pageIndex < pageCount; pageIndex++) {
                 PDPage page = pdf.getPage(pageIndex);
                 PageText text = extractPage(pdf, pageIndex + 1);
@@ -163,22 +182,45 @@ public class PdfToDocxServiceImpl implements PdfToDocxService {
                 }
                 if (text.lines.isEmpty()) {
                     if (countImages(page.getResources(), new HashSet<>()) > 0) {
-                        scannedPages.add(pageIndex + 1);
+                        if (ocrLanguage == null) {
+                            scannedPages.add(pageIndex + 1);
+                        } else {
+                            PageText recognized = recognizeScannedPage(pdf, pageIndex, ocrLanguage);
+                            int recognizedChars = recognized.text.codePointCount(
+                                    0, recognized.text.length());
+                            totalChars += recognizedChars;
+                            if (totalChars > properties.getPdf().getMaxExtractedCharsTotal()
+                                    || recognizedChars
+                                    > properties.getPdf().getMaxExtractedCharsPerPage()) {
+                                throw new BusinessException(413,
+                                        "PDF 第 " + (pageIndex + 1) + " 页 OCR 文字超过转换限制");
+                            }
+                            if (recognized.lines.isEmpty()) {
+                                scannedPages.add(pageIndex + 1);
+                            } else {
+                                if (wrotePage) {
+                                    docx.createParagraph().setPageBreak(true);
+                                }
+                                totalLines += appendTextPage(docx, recognized.lines, page, mode);
+                                wrotePage = true;
+                            }
+                        }
                     }
                     continue;
                 }
 
-                if (pageIndex > 0) {
+                if (wrotePage) {
                     docx.createParagraph().setPageBreak(true);
                 }
                 totalLines += appendTextPage(docx, text.lines, page, mode);
                 PageImages images = extractImages(page.getResources(), visitedImages);
                 totalImages += appendImages(docx, images, page, imageBudget);
+                wrotePage = true;
             }
 
             if (!scannedPages.isEmpty()) {
                 throw new BusinessException(422, "PDF 第 " + joinedPages(scannedPages)
-                        + " 页没有原生文字，当前没有可复用的 OCR 结果，不能生成可编辑 DOCX");
+                        + " 页没有原生文字；请提供 ocrLanguage 使用已配置的云端 OCR");
             }
             if (totalLines == 0 && totalImages == 0) {
                 throw new BusinessException(422, "PDF 没有可重建的文字或图片");
@@ -203,6 +245,49 @@ public class PdfToDocxServiceImpl implements PdfToDocxService {
         stripper.setEndPage(pageNo);
         stripper.getText(document);
         return new PageText(stripper.text.toString(), List.copyOf(stripper.lines));
+    }
+
+    private PageText recognizeScannedPage(PDDocument document, int pageIndex,
+                                          String language) throws IOException {
+        if (!ocrEngine.available()) {
+            throw new BusinessException(503,
+                    "扫描 PDF 重建需要云端 OCR；请先配置默认 OCR 模型并启用 OCR");
+        }
+        BufferedImage image = new PDFRenderer(document)
+                .renderImageWithDPI(pageIndex, ocrProperties.getDpi(), ImageType.RGB);
+        long pixels = (long) image.getWidth() * image.getHeight();
+        if (pixels <= 0 || pixels > properties.getUpload().getMaxImagePixels()) {
+            throw new BusinessException(413,
+                    "PDF 第 " + (pageIndex + 1) + " 页 OCR 像素数超过限制");
+        }
+        byte[] png;
+        try (ByteArrayOutputStream encoded = new ByteArrayOutputStream()) {
+            if (!ImageIO.write(image, "png", encoded)) {
+                throw new BusinessException(422,
+                        "PDF 第 " + (pageIndex + 1) + " 页无法编码为 OCR 图片");
+            }
+            png = encoded.toByteArray();
+        }
+        OcrEngine.Result recognized = ocrEngine.recognize(png, language);
+        if (recognized.truncated()) {
+            throw new BusinessException(413,
+                    "PDF 第 " + (pageIndex + 1) + " 页 OCR 结果超过转换限制");
+        }
+        PDPage page = document.getPage(pageIndex);
+        float scale = POINTS_PER_INCH / Math.max(1f, ocrProperties.getDpi());
+        float cropHeight = (float) page.getCropBox().getHeight();
+        List<PdfLine> lines = recognized.lines().stream()
+                .map(line -> new PdfLine(
+                        line.text(),
+                        roundPoints(line.left() * scale),
+                        roundPoints(Math.max(0,
+                                cropHeight - line.top() * scale - line.height() * scale)),
+                        Math.max(1f, roundPoints(line.height() * scale)),
+                        false, false, "Arial"))
+                .toList();
+        String text = lines.stream().map(PdfLine::text)
+                .reduce((left, right) -> left + "\n" + right).orElse("");
+        return new PageText(text, lines);
     }
 
     private static int appendTextPage(XWPFDocument docx, List<PdfLine> lines,

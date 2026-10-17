@@ -72,6 +72,22 @@ res:
       max-edit-operations: ${XLSX_MAX_EDIT_OPERATIONS:500}
       max-structural-units: ${XLSX_MAX_STRUCTURAL_UNITS:1000}
       max-sortable-cells: ${XLSX_MAX_SORTABLE_CELLS:10000}
+  # 云端 OCR。模型地址、模型名和加密 API Key 复用管理端 scope=OCR 的默认启用的模型配置。
+  # 启用后扫描页/图片会发送到该云端服务，不适合不能出境或不能上云的文档。
+  ocr:
+    enabled: ${OCR_ENABLED:false}
+    default-language: ${OCR_DEFAULT_LANGUAGE:auto}
+    allowed-languages: ${OCR_ALLOWED_LANGUAGES:auto,zh,en}
+    dpi: ${OCR_PDF_DPI:200}
+    max-dpi: ${OCR_MAX_PDF_DPI:300}
+    max-pages: ${OCR_MAX_PAGES:50}
+    max-words: ${OCR_MAX_WORDS:200000}
+    max-output-chars: ${OCR_MAX_OUTPUT_CHARS:2000000}
+    max-image-bytes: ${OCR_MAX_IMAGE_BYTES:20971520}
+    max-response-bytes: ${OCR_MAX_RESPONSE_BYTES:16777216}
+    low-confidence-threshold: ${OCR_LOW_CONFIDENCE_THRESHOLD:60}
+    cache-enabled: ${OCR_CACHE_ENABLED:true}
+    cache-directory: ${OCR_CACHE_DIRECTORY:ocr-cache}
   # 模型配置的密钥加密（TODO 3.2：模型密钥不得返回前端）
   model-config:
     # 用于加密数据库中的模型 API Key（AES-256-GCM）。
