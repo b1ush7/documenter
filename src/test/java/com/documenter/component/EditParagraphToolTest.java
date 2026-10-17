@@ -19,6 +19,51 @@ class EditParagraphToolTest {
     private final EditParagraphTool tool = new EditParagraphTool();
 
     @Test
+    void paginationIsVisibleAndOnlyGeneratesTypedPlansForTopLevelParagraphs() {
+        var paragraph = new DocxStructureVO.Block("body/p0", "PARAGRAPH", "chapter", null,
+                null, null, null, null, List.of(), null, true);
+        var tableParagraph = new DocxStructureVO.Block("body/t0/r0/c0/p0", "PARAGRAPH", "cell", null,
+                null, null, null, null, List.of());
+        var context = ToolExecutionContext.forVersion(7L, 10L, 1, "DOCX",
+                new DocxStructureVO(10L, 1, List.of(paragraph, tableParagraph)), null);
+        assertTrue(new ReadDocumentTool(new AiModelProperties()).execute(Map.of(), context).text().contains("pageBreakBefore=true"));
+        for (String type : List.of("SET_PAGE_BREAK_BEFORE", "CLEAR_PAGE_BREAK_BEFORE")) {
+            var result = tool.execute(Map.of("operation", "FORMAT_PARAGRAPH", "target", "body/p0", "formatType", type), context);
+            assertEquals(DocumentEditPlan.FormatType.valueOf(type), result.plan().operations().getFirst().format().type());
+            assertNull(result.plan().operations().getFirst().format().level());
+            assertEquals(422, assertThrows(BusinessException.class, () -> tool.execute(Map.of(
+                    "operation", "FORMAT_PARAGRAPH", "target", "body/t0/r0/c0/p0", "formatType", type), context)).getCode());
+            assertEquals(422, assertThrows(BusinessException.class, () -> tool.execute(Map.of(
+                    "operation", "FORMAT_PARAGRAPH", "target", "body/p0", "formatType", type, "level", 2), context)).getCode());
+        }
+    }
+
+    @Test
+    void manualHeaderAndFooterTargetsAreNotAdvertisedOrAcceptedByAiTools() {
+        var body = new DocxStructureVO.Block("body/p0", "PARAGRAPH", "body content", null,
+                null, null, null, null, List.of());
+        var headerParagraph = new DocxStructureVO.Block("header0/p0", "PARAGRAPH", "header content", null,
+                null, null, null, null, List.of());
+        var footerParagraph = new DocxStructureVO.Block("footer0/p0", "PARAGRAPH", "footer content", null,
+                null, null, null, null, List.of());
+        var header = new DocxStructureVO.Block("header0", "HEADER", null, null, null, null, null, null,
+                List.of(headerParagraph));
+        var footer = new DocxStructureVO.Block("footer0", "FOOTER", null, null, null, null, null, null,
+                List.of(footerParagraph));
+        var context = ToolExecutionContext.forVersion(7L, 10L, 1, "DOCX",
+                new DocxStructureVO(10L, 1, List.of(body, header, footer)), null);
+        assertEquals(java.util.Set.of("body/p0"), context.blockIds());
+        var outline = new ReadDocumentTool(new AiModelProperties()).execute(Map.of(), context).text();
+        assertTrue(outline.contains("body content"));
+        assertFalse(outline.contains("header content"));
+        assertFalse(outline.contains("footer content"));
+        for (String target : List.of("header0/p0", "footer0/p0")) {
+            assertEquals(422, assertThrows(BusinessException.class, () -> tool.execute(Map.of(
+                    "operation", "REPLACE_TEXT", "target", target, "content", "unapproved"), context)).getCode());
+        }
+    }
+
+    @Test
     void modelCanReadHeadingStyleAndNumberingBeforePlanningFormatting() {
         var block = new DocxStructureVO.Block("body/p0", "HEADING", "list item", "Heading2",
                 2, null, null, null, List.of(), "decimal");

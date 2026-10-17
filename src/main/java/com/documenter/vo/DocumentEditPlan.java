@@ -73,7 +73,12 @@ public record DocumentEditPlan(
     public record ParagraphFormat(FormatType type, Integer level) { }
 
     public enum FormatType {
-        SET_HEADING, SET_NORMAL, SET_BULLET, SET_NUMBERED, CLEAR_LIST;
+        SET_HEADING, SET_NORMAL, SET_BULLET, SET_NUMBERED, CLEAR_LIST,
+        SET_PAGE_BREAK_BEFORE, CLEAR_PAGE_BREAK_BEFORE;
+
+        public boolean isPageBreakBefore() {
+            return this == SET_PAGE_BREAK_BEFORE || this == CLEAR_PAGE_BREAK_BEFORE;
+        }
 
         public static FormatType parse(String text) {
             if (text == null) return null;
@@ -112,7 +117,7 @@ public record DocumentEditPlan(
         /** 在目标段落中追加内嵌图片，需要 image，不使用 content。 */
         INSERT_IMAGE(false),
 
-        /** 设置标题、正文或列表格式，使用 format，不使用 content。 */
+        /** 设置标题、正文、列表格式或段前分页，使用 format，不使用 content。 */
         FORMAT_PARAGRAPH(false),
 
         /** XLSX 单单元格公式，target 使用原始工作表名称!A1，content 为公式。 */

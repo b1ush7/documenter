@@ -14,6 +14,8 @@ import com.documenter.service.*;
 import com.documenter.vo.*;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.transaction.*;
 import org.springframework.transaction.support.SimpleTransactionStatus;
@@ -306,7 +308,7 @@ class AiReplyServiceImplTest {
         saved.setChangeType("AI_EDIT");
         when(writer.appendVersion(eq(10L), eq(7L), any(),
                 eq(com.documenter.enums.ChangeType.AI_EDIT), any(), any(), eq(1))).thenReturn(saved);
-        var realDocuments = new DocxDocumentServiceImpl(versions, storage, writer, mock(FileService.class));
+        var realDocuments = new DocxDocumentServiceImpl(versions, storage, writer, mock(FileService.class), mock(DocxTemplateGenerationService.class));
         var stub = new com.documenter.component.StubModelProvider(properties);
         var validator = new EditPlanValidator(properties);
         var realAgent = new AgentServiceImpl(properties, stub, realDocuments,
@@ -326,20 +328,30 @@ class AiReplyServiceImplTest {
 
     @Test
     void stubModelToConfirmedDocxProducesReopenableAiVersion() throws Exception {
-        verifyStubModelToConfirmedDocx(false);
+        verifyStubModelToConfirmedDocx(null);
     }
 
     @Test
     void stubFormattingReplyShowsPersistedStyleDiffAndConfirmsOnce() throws Exception {
-        verifyStubModelToConfirmedDocx(true);
+        verifyStubModelToConfirmedDocx("SET_HEADING");
     }
 
-    private void verifyStubModelToConfirmedDocx(boolean formatting) throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"SET_PAGE_BREAK_BEFORE", "CLEAR_PAGE_BREAK_BEFORE"})
+    void stubPaginationReplyShowsDirectPropertyAndConfirmsExactlyOnce(String type) throws Exception {
+        verifyStubModelToConfirmedDocx(type);
+    }
+
+    private void verifyStubModelToConfirmedDocx(String formatType) throws Exception {
+        boolean formatting = formatType != null;
+        boolean pagination = formatting && formatType.endsWith("PAGE_BREAK_BEFORE");
+        Boolean previousPageBreak = pagination ? formatType.startsWith("CLEAR") : null;
         byte[] source;
         try (var document = new org.apache.poi.xwpf.usermodel.XWPFDocument();
              var output = new java.io.ByteArrayOutputStream()) {
             document.createParagraph().createRun().setText("original text");
             document.getParagraphs().getFirst().setStyle("Heading1");
+            if (pagination) document.getParagraphs().getFirst().setPageBreak(previousPageBreak);
             document.write(output);
             source = output.toByteArray();
         }
@@ -358,7 +370,7 @@ class AiReplyServiceImplTest {
         saved.setChangeType("AI_EDIT");
         when(writer.appendVersion(eq(10L), eq(7L), any(),
                 eq(com.documenter.enums.ChangeType.AI_EDIT), any(), any(), eq(1))).thenReturn(saved);
-        var realDocuments = new DocxDocumentServiceImpl(versions, storage, writer, mock(FileService.class));
+        var realDocuments = new DocxDocumentServiceImpl(versions, storage, writer, mock(FileService.class), mock(DocxTemplateGenerationService.class));
         var stub = new com.documenter.component.StubModelProvider(properties);
         var validator = new EditPlanValidator(properties);
         var realAgent = new AgentServiceImpl(properties, stub, realDocuments,
@@ -372,7 +384,8 @@ class AiReplyServiceImplTest {
                 + "\"target\":\"body/p0\",\"content\":\"edited text\"}");
         if (formatting) {
             request.setContent("[stub-tool] edit_paragraph {\"operation\":\"FORMAT_PARAGRAPH\","
-                    + "\"target\":\"body/p0\",\"formatType\":\"SET_HEADING\",\"level\":2}");
+                    + "\"target\":\"body/p0\",\"formatType\":\"" + formatType + "\""
+                    + (pagination ? "}" : ",\"level\":2}"));
         }
 
         var reply = realService.create(7L, 1L, request);
@@ -381,8 +394,9 @@ class AiReplyServiceImplTest {
         if (formatting) {
             assertNull(change.before());
             assertNull(change.after());
-            assertEquals(new AiReplyVO.ParagraphStyle("Heading1", 1, null), change.beforeFormat());
-            assertEquals(new DocumentEditPlan.ParagraphFormat(DocumentEditPlan.FormatType.SET_HEADING, 2), change.format());
+            assertEquals(new AiReplyVO.ParagraphStyle("Heading1", 1, null, previousPageBreak), change.beforeFormat());
+            assertEquals(new DocumentEditPlan.ParagraphFormat(DocumentEditPlan.FormatType.valueOf(formatType),
+                    pagination ? null : 2), change.format());
             assertEquals(change, realService.get(7L, 1L, reply.message().getId()).changes().getFirst());
         } else {
             assertEquals("original text", change.before());
@@ -397,7 +411,8 @@ class AiReplyServiceImplTest {
         try (var document = new org.apache.poi.xwpf.usermodel.XWPFDocument(
                 new java.io.ByteArrayInputStream(content.getValue()))) {
             assertEquals(formatting ? "original text" : "edited text", document.getParagraphs().getFirst().getText());
-            assertEquals(formatting ? "Heading2" : "Heading1", document.getParagraphs().getFirst().getStyle());
+            assertEquals(formatting && !pagination ? "Heading2" : "Heading1", document.getParagraphs().getFirst().getStyle());
+            if (pagination) assertEquals(formatType.startsWith("SET"), document.getParagraphs().getFirst().isPageBreak());
         }
         verify(writer).appendVersion(eq(10L), eq(7L), any(),
                 eq(com.documenter.enums.ChangeType.AI_EDIT), eq(request.getContent()), any(), eq(1));

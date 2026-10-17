@@ -106,7 +106,7 @@ public class FileController {
 
     // ---------------------------------------------------------------- 文件
 
-    /** 根据标题、段落、列表、表格和图片结构在本地生成 DOCX。 */
+    /** 使用结构块或启用的 DOCX 模板生成新文件，两种模式不能混用。 */
     @PostMapping("/docx/generate")
     public ApiResponse<FileAssetVO> generateDocx(@Valid @RequestBody GenerateDocxDTO request) {
         return ApiResponse.success("生成成功", docxDocumentService.generate(
@@ -369,7 +369,7 @@ public class FileController {
                 SecurityUtil.requireUserId(), fileId, versionNo, request));
     }
 
-    /** 设置指定 DOCX 版本中的标题、普通段落或列表格式。 */
+    /** 设置指定 DOCX 版本中的标题、普通段落、列表格式或正文段前分页。 */
     @PostMapping("/{fileId}/versions/{versionNo}/paragraph-formats")
     public ApiResponse<VersionVO> formatDocxParagraphs(@PathVariable Long fileId,
                                                        @PathVariable Integer versionNo,

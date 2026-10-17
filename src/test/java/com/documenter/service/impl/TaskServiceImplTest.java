@@ -7,19 +7,66 @@ import com.documenter.dto.CreateTaskDTO;
 import com.documenter.mapper.ProcessingTaskMapper;
 import com.documenter.mapper.TaskStepMapper;
 import com.documenter.service.FileService;
+import com.documenter.exception.BusinessException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 class TaskServiceImplTest {
 
     private final ProcessingTaskMapper tasks = mock(ProcessingTaskMapper.class);
-    private final TaskServiceImpl service = new TaskServiceImpl(tasks, mock(TaskStepMapper.class),
-            mock(FileService.class), mock(TaskExecutionEngine.class), new TaskExecutorProperties());
+    private final TaskStepMapper steps = mock(TaskStepMapper.class);
+    private final FileService files = mock(FileService.class);
+    private final TaskExecutionEngine engine = mock(TaskExecutionEngine.class);
+    private final TaskServiceImpl service = new TaskServiceImpl(tasks, steps,
+            files, engine, new TaskExecutorProperties());
+
+    @Test
+    void imageGenerationCannotBeSubmittedEvenWhenBeanValidationIsBypassed() {
+        var request = new CreateTaskDTO();
+        request.setTaskType("IMAGE_GEN");
+        assertEquals(400, assertThrows(BusinessException.class, () -> service.submit(7L, request)).getCode());
+        verifyNoInteractions(tasks, steps, files, engine);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"FAILED", "CANCELLED", "PENDING", "SUCCEEDED"})
+    void legacyImageGenerationCannotCreateAnotherTaskThroughRetry(String status) {
+        var legacy = task(status);
+        legacy.setTaskType("IMAGE_GEN");
+        when(tasks.selectById(10L)).thenReturn(legacy);
+        assertEquals(400, assertThrows(BusinessException.class, () -> service.retry(7L, 10L)).getCode());
+        verify(tasks, never()).insert(any(ProcessingTask.class));
+        verifyNoInteractions(files, engine);
+    }
+
+    @Test
+    void legacyImageTaskStillHasReadableDetailsAndSteps() {
+        var legacy = task("FAILED");
+        legacy.setTaskType("IMAGE_GEN");
+        when(tasks.selectById(10L)).thenReturn(legacy);
+        when(steps.selectByTaskId(10L)).thenReturn(List.of());
+        var result = service.detail(7L, 10L);
+        assertEquals("IMAGE_GEN", result.getTask().getTaskType());
+        verifyNoInteractions(files, engine);
+    }
+
+    @Test
+    void legacyImageTaskDoesNotBypassOwnershipChecks() {
+        var legacy = task("FAILED");
+        legacy.setTaskType("IMAGE_GEN");
+        when(tasks.selectById(10L)).thenReturn(legacy);
+        assertEquals(404, assertThrows(BusinessException.class, () -> service.detail(8L, 10L)).getCode());
+        assertEquals(404, assertThrows(BusinessException.class, () -> service.retry(8L, 10L)).getCode());
+        verifyNoInteractions(steps, files, engine);
+    }
 
     @Test
     void submissionReportsImmediateQueueFailure() {

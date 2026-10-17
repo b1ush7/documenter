@@ -5,6 +5,14 @@ import com.auth0.jwt.algorithms.Algorithm;
 import com.documenter.configuration.JwtProperties;
 import com.documenter.configuration.SecurityConfig;
 import com.documenter.entity.User;
+import com.documenter.controller.AdminConfigController;
+import com.documenter.controller.TemplateController;
+import com.documenter.entity.FileAsset;
+import com.documenter.service.DocTemplateService;
+import com.documenter.service.ModelConfigService;
+import com.documenter.vo.DocTemplateVO;
+import com.documenter.vo.FileDownload;
+import com.documenter.vo.PageResult;
 import com.documenter.mapper.UserMapper;
 import com.documenter.util.JwtUtil;
 import org.junit.jupiter.api.BeforeEach;
@@ -49,6 +57,7 @@ class SecurityFilterChainTest {
     @Autowired private JwtUtil jwt;
     @Autowired private StringRedisTemplate redis;
     @Autowired private UserMapper users;
+    @Autowired private DocTemplateService templates;
     private final Map<String, String> sessions = new ConcurrentHashMap<>();
     private MockMvc mvc;
     private User user;
@@ -56,7 +65,7 @@ class SecurityFilterChainTest {
     @BeforeEach
     @SuppressWarnings("unchecked")
     void setUp() {
-        reset(redis, users);
+        reset(redis, users, templates);
         ValueOperations<String, String> values = mock(ValueOperations.class);
         SetOperations<String, String> sets = mock(SetOperations.class);
         when(redis.opsForValue()).thenReturn(values);
@@ -74,6 +83,27 @@ class SecurityFilterChainTest {
         user.setStatus("ENABLED");
         when(users.selectById(7L)).thenReturn(user);
         mvc = MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
+    }
+
+    @Test
+    void enabledTemplateCatalogRequiresLoginAndAllowsOrdinaryUsersWithoutLeakingStorageKeys() throws Exception {
+        mvc.perform(get("/templates")).andExpect(status().isUnauthorized());
+        verifyNoInteractions(templates);
+        var template = new com.documenter.entity.DocTemplate();
+        template.setId(11L);
+        template.setName("周报");
+        template.setVersionNo(3);
+        template.setVariables("[{\"name\":\"title\",\"required\":true}]");
+        template.setStorageKey("private-storage-key.docx");
+        when(templates.listEnabled()).thenReturn(java.util.List.of(DocTemplateVO.from(template)));
+        var tokens = jwt.createTokenPair("7");
+        mvc.perform(get("/templates").header("Authorization", tokens.accessToken()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data[0].id").value(11))
+                .andExpect(jsonPath("$.data[0].versionNo").value(3))
+                .andExpect(jsonPath("$.data[0].variables").value(template.getVariables()))
+                .andExpect(jsonPath("$.data[0].storageKey").doesNotExist());
+        verify(templates).listEnabled();
     }
 
     @Test
@@ -163,6 +193,41 @@ class SecurityFilterChainTest {
         verifyNoInteractions(users);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"LIST", "DOWNLOAD", "RESTORE"})
+    void templateHistoryRoutesRequireAuthenticatedAdministrator(String operation) throws Exception {
+        String route = switch (operation) {
+            case "LIST" -> "/admin/templates/7/versions";
+            case "DOWNLOAD" -> "/admin/templates/7/versions/2/download";
+            default -> "/admin/templates/7/versions/2/restore?expectVersion=4";
+        };
+        var method = operation.equals("RESTORE") ? org.springframework.http.HttpMethod.POST : org.springframework.http.HttpMethod.GET;
+        mvc.perform(request(method, route)).andExpect(status().isUnauthorized());
+        var tokens = jwt.createTokenPair("7");
+        mvc.perform(request(method, route).header("Authorization", tokens.accessToken()))
+                .andExpect(status().isForbidden());
+        verifyNoInteractions(templates);
+
+        user.setRole("ADMIN");
+        switch (operation) {
+            case "LIST" -> when(templates.listVersions(eq(7L), any())).thenReturn(new PageResult<>());
+            case "DOWNLOAD" -> {
+                var carrier = new FileAsset();
+                carrier.setContentType("application/pdf");
+                when(templates.downloadVersion(7L, 2)).thenReturn(FileDownload.of(carrier,
+                        new java.io.ByteArrayInputStream(new byte[]{1}), 1, "history-v2.pdf"));
+            }
+            default -> when(templates.restoreVersion(7L, 2, 4)).thenReturn(new DocTemplateVO());
+        }
+        mvc.perform(request(method, route).header("Authorization", tokens.accessToken()))
+                .andExpect(status().isOk());
+        switch (operation) {
+            case "LIST" -> verify(templates).listVersions(eq(7L), any());
+            case "DOWNLOAD" -> verify(templates).downloadVersion(7L, 2);
+            default -> verify(templates).restoreVersion(7L, 2, 4);
+        }
+    }
+
     private static String signedToken(String key, String issuer, Instant expires) {
         var builder = JWT.create().withIssuer(issuer).withClaim("id", "7").withClaim("sid", "test-session")
                 .withClaim("token_type", "access").withJWTId(UUID.randomUUID().toString());
@@ -172,7 +237,7 @@ class SecurityFilterChainTest {
 
     @Configuration
     @EnableWebMvc
-    @Import(SecurityConfig.class)
+    @Import({SecurityConfig.class, AdminConfigController.class, TemplateController.class})
     static class TestConfig {
         @Bean JwtProperties jwtProperties() {
             var properties = new JwtProperties();
@@ -187,6 +252,8 @@ class SecurityFilterChainTest {
         }
         @Bean ObjectMapper objectMapper() { return new ObjectMapper(); }
         @Bean ProbeController probe() { return new ProbeController(); }
+        @Bean DocTemplateService templates() { return mock(DocTemplateService.class); }
+        @Bean ModelConfigService models() { return mock(ModelConfigService.class); }
     }
 
     @RestController

@@ -14,18 +14,18 @@ import com.documenter.vo.VersionVO;
 /** DOCX 版本的结构化读取能力。 */
 public interface DocxDocumentService {
 
-    /** 根据受限结构块在本地生成一个新的 DOCX 文件。 */
+    /** 根据受限结构块或启用的 DOCX 模板在本地生成新文件。 */
     FileAssetVO generate(Long userId, GenerateDocxDTO request);
 
     /**
-     * 读取用户拥有的一个明确版本。
+     * 读取用户拥有的明确版本，包括正文及页眉页脚部件。
      *
      * @throws com.documenter.exception.BusinessException 文件不是 DOCX、版本不存在或内容损坏时抛出
      */
     DocxStructureVO readStructure(Long userId, Long fileId, Integer versionNo);
 
     /**
-     * 替换指定源版本中的段落文本，并保存为新版本。
+     * 替换指定源版本中正文或页眉页脚的普通段落文本，并保存为新版本。
      *
      * <p>源版本同时作为乐观锁：如果文件已有更新版本，本次编辑会以 409 拒绝。
      */
@@ -44,7 +44,7 @@ public interface DocxDocumentService {
     VersionVO editPlan(Long userId, Long fileId, Integer sourceVersion,
                        DocumentEditPlan plan, String instruction);
 
-    /** 设置标题、普通段落、项目符号或编号列表格式，并保存为新版本。 */
+    /** 设置标题、普通段落、列表格式或正文段前分页，并保存为新版本。 */
     VersionVO formatParagraphs(Long userId, Long fileId, Integer sourceVersion,
                                FormatDocxParagraphsDTO request);
 

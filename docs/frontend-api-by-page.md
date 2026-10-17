@@ -90,7 +90,7 @@ Token 有效期：Access 15 分钟，Refresh 7 天。刷新返回新的双 Token
 | 文件来源 | `UPLOAD` / `GENERATED` / `CONVERTED` |
 | 版本变更类型 | `UPLOAD` / `AI_EDIT` / `MANUAL_EDIT` / `CONVERT` / `RESTORE` |
 | 任务状态 | `PENDING` / `RUNNING` / `SUCCEEDED` / `FAILED` / `CANCELLED` |
-| 任务类型 | `OCR` / `CONVERT` / `AI_EDIT` / `EXPORT` / `IMAGE_GEN` |
+| 任务类型 | 新建：`OCR` / `CONVERT` / `AI_EDIT` / `EXPORT`；`IMAGE_GEN` 仅历史展示/查询 |
 | 步骤状态 | `PENDING` / `RUNNING` / `SUCCEEDED` / `FAILED` / `SKIPPED` |
 | 会话状态 | `ACTIVE` / `ARCHIVED` |
 | 消息角色 | `USER` / `ASSISTANT` / `TOOL` / `SYSTEM` |
@@ -471,7 +471,7 @@ GET /file/{fileId}/versions/{versionNo}/xlsx/formula-results   XLSX 公式计算
 POST /file/{fileId}/versions/{versionNo}/paragraph-text       替换段落文本
 POST /file/{fileId}/versions/{versionNo}/paragraph-edits      插入/删除段落
 POST /file/{fileId}/versions/{versionNo}/table-edits          编辑表格
-POST /file/{fileId}/versions/{versionNo}/paragraph-formats    设置标题/正文/列表格式
+POST /file/{fileId}/versions/{versionNo}/paragraph-formats    设置标题/正文/列表格式或段前分页
 POST /file/{fileId}/versions/{versionNo}/inline-images        插入图片
 ```
 
@@ -481,7 +481,7 @@ POST /file/{fileId}/versions/{versionNo}/inline-images        插入图片
 {
   "instruction": "把第二段改得更正式",
   "operations": [
-    { "blockId": "p-2", "text": "新的段落文本" }
+    { "blockId": "body/p2", "text": "新的段落文本" }
   ]
 }
 ```
@@ -502,6 +502,12 @@ POST /file/{fileId}/versions/{versionNo}/inline-images        插入图片
 | inline-images | `blockId`、`imageFileId`、`imageVersionNo`、`widthPixels`、`heightPixels` |
 
 **响应统一返回新建的版本 `Version`**，前端据此刷新版本列表与预览。
+
+paragraph-formats 新增 SET_PAGE_BREAK_BEFORE / CLEAR_PAGE_BREAK_BEFORE，只用于 body/pN 正文顶层段落，不传 level。清除操作显式关闭段前分页，不移除手工分页符或分节设置；表格内段落返回 422。结构的 pageBreakBefore 为 true/false/null，null 表示未直接设置、可能继承样式，不应显示为确定关闭。插入段落不复制参照段落的直接分页属性，其他样式仍可能影响实际分页；保存后用新版本预览核对。
+
+结构查询的 blocks 末尾现在可能包含 HEADER/FOOTER 容器，children 为页眉页脚中的段落、表格及图片；正文原有 body 路径不变。例如 `header0/p1`、`footer0/t0/r0/c0/p0` 可通过 paragraph-text 替换普通段落。N 是该版本的部件索引，不是页码或节号；跨节共享同一页眉页脚时，修改会作用于所有引用位置，提交前应在界面说明。
+
+页眉页脚的新增、删除、首页/奇偶页引用设置，以及 AI 编辑、格式与插图操作尚未开放。页码域、书签、图片、超链接、内容控件等复杂段落替换返回 422；不能把“能读出文字”当作“可以整段编辑”。段落插入不会复制分节设置，含分节设置的段落不能直接删除。编辑成功后按新版本重新读取结构与预览，既有版本比较也会返回页眉页脚文字差异。详细规则见 [API.md 第 4.3～4.5 节](../API.md#43-读取-docx-结构)。
 
 **约束**：部分操作会被拒绝（如"删除表格中唯一的行"、"替换含图片的段落"），
 返回 `400` 或 `422`，`msg` 会说明原因。前端应把 `msg` 原样展示。
@@ -631,7 +637,9 @@ POST /file/{fileId}/versions/{versionNo}/compatibility-check
 
 **该接口耗时可观**（需要真正排版），建议前端触发时显示进度提示，不要在页面加载时自动调用。
 
-## P10 图片编辑
+## P10 图片基础处理
+
+仅保留本地格式转换、尺寸调整、裁剪、直角旋转、亮度及单行文字水印。图片生成、智能修图、背景/对象替换和蒙版不在范围；PDF/图片 OCR 另行接入。
 
 ```
 POST /file/{fileId}/versions/{versionNo}/image-edits
@@ -695,8 +703,7 @@ POST /file/docx/generate
 
 响应：新建的 `FileAsset`（`source` 为 `GENERATED`）。
 
-**模板生成尚未接通**：当前生成接口只接受结构化 blocks，没有 templateId 或变量填充参数。
-`GET /admin/templates` 仅供管理员管理模板，不能在普通用户生成页调用。未来的变量表单可参考如下定义：
+模板模式先调用登录可用的 `GET /templates`，`data` 是已启用且已有内容版本的 DOCX 模板数组。普通用户使用此入口；`GET /admin/templates` 仍仅供管理员管理。将列表中 `variables` JSON 字符串解析为表单定义：
 
 ```json
 [
@@ -705,6 +712,21 @@ POST /file/docx/generate
 ```
 
 `name` 是占位符标识（只允许字母数字下划线、不能以数字开头），`label` 用于界面显示。
+
+模板正文/表格使用 `{{name}}`。提交同一个生成入口：
+
+```json
+{
+  "templateId": 11,
+  "templateVersion": 3,
+  "fileName": "本周周报.docx",
+  "variables": {"title": "本周进展"}
+}
+```
+
+`templateVersion` 必须使用所选模板当前 versionNo，模板模式不传 title 或 blocks。变量只提交纯文本字符串；必填变量不能省略、null 或全空白，可选未填置空字符串。未知变量拒绝，单值最多 10000 字符。支持跨文字片段占位符，不支持循环、图片变量、页眉页脚等位置或复杂段落中的变量。
+
+成功后得到独立的 GENERATED 文件和版本 1，进入文件页复用已有按版本预览/下载。409 表示模板内容或变量定义发生更新，重新获取列表并让用户确认填写；404 表示模板缺失或停用，422 表示模板结构不支持或损坏，预览后端不可用返回 503。完整限制见 [API.md 第 4.2 节](../API.md#42-按结构生成-docx)。
 
 ---
 
@@ -764,6 +786,7 @@ POST /task/{taskId}/retry        重试
 - 已进入终态的任务 → 幂等返回当前状态，不报错
 
 **重试语义**：只允许重试 `FAILED` 或 `CANCELLED` 的任务；`SUCCEEDED` 会返回 `409`。
+已停用的 IMAGE_GEN 是例外：所有状态都拒绝重试并返回业务码 400，只提供历史查询和取消。
 重试会**新建一个任务**，原任务记录保留（便于排查失败原因）。
 重试次数达上限返回 `429`。
 
@@ -797,11 +820,13 @@ POST /task
 
 | 字段 | 说明 |
 | --- | --- |
-| taskType | `OCR`/`CONVERT`/`AI_EDIT`/`EXPORT`/`IMAGE_GEN` |
+| taskType | `OCR`/`CONVERT`/`AI_EDIT`/`EXPORT`；不再接受 `IMAGE_GEN` |
 | inputVersion | 不传表示使用当前最新版本 |
 | idempotencyKey | **幂等键**：同一用户同一键只会创建一个任务，前端可安全重试提交 |
 | expectVersion | 期望的当前版本，用于并发保护，不符返回 `409` |
 | timeoutSeconds | 10-3600，不传取服务端默认 |
+
+IMAGE_GEN 只保留历史展示和筛选，不展示新建或重试操作；旧排队记录可能以 FAILED / TASK_TYPE_DISABLED 收尾。已有图片通过 P10 的同步基础处理接口操作，不创建图片生成任务。
 
 **幂等键用法**：为"一次用户意图"生成一个 UUID，重试提交时沿用同一个键。
 命中时后端直接返回已有任务，**不会重复执行**。
@@ -877,7 +902,7 @@ POST /ai/sessions/{sessionId}/replies/{messageId}/discard
 
 插图也使用相同确认流程：`changes[].type=INSERT_IMAGE` 时，读取其 `image` 对象中的 `fileId/versionNo/widthPixels/heightPixels`，通过既有按版本图片预览展示所选图片，显示“追加到目标段落”及尺寸。该项 before/after 为 null，不代表删除。图片参数同样持久化在 result.plans 中，客户端不重传计划；确认时服务端再次校验图片归属和版本。完整结构见 [API.md 第 8.3 节](../API.md#83-待确认的-docx-图片插入)。旧文本项的 image 可缺失或为 null。
 
-`changes[].type=FORMAT_PARAGRAPH` 时，使用 `beforeFormat`（原 styleId、headingLevel、numberingFormat）与目标 `format` 展示格式差异；before/after 为 null，不代表删除。仅支持标题 1～9、正文、项目符号、编号和清除列表；客户端不提交格式计划。字段见 [API.md 第 8.4 节](../API.md#84-待确认的-docx-基础格式)。
+`changes[].type=FORMAT_PARAGRAPH` 时，使用 `beforeFormat`（原 styleId、headingLevel、numberingFormat、pageBreakBefore）与目标 `format` 展示格式差异；before/after 为 null，不代表删除。支持标题 1～9、正文、项目符号、编号、清除列表，以及正文顶层段落的段前分页设置/取消。pageBreakBefore 为 null 或旧响应没有该字段时，表示未直接设置、可能继承样式；不能解释为确定关闭。客户端不提交格式计划，确认后用新版本预览核对分页。字段见 [API.md 第 8.4 节](../API.md#84-待确认的-docx-基础格式)。
 
 每日额度按 ChatModel 调用尝试计数，包含智能体重试。生成回复的业务码 429（额度用尽）或 503（无法检查额度）仍可能带 `data=AiReply`，应先保存 message.id 和失败状态，再展示 msg；禁止确认或自动换键重试。GET 查询以业务码 0 返回同一 FAILED 记录；原键重放仍返回原失败结果。额度恢复后由用户用新键发送。规则见 [API.md 第 8.5 节](../API.md#85-每用户每日调用额度)。
 
@@ -1046,6 +1071,9 @@ POST   /admin/templates/{id}/content          multipart：替换内容，version
 PUT    /admin/templates/{id}/enabled?enabled=true
 DELETE /admin/templates/{id}
 GET    /admin/templates/{id}/download
+GET    /admin/templates/{id}/versions?page=&size=
+GET    /admin/templates/{id}/versions/{versionNo}/download
+POST   /admin/templates/{id}/versions/{versionNo}/restore?expectVersion=当前内容版本号
 ```
 
 响应 `data`：`DocTemplateVO`（列表接口为分页包装，不返回内部 storageKey）
@@ -1073,10 +1101,16 @@ GET    /admin/templates/{id}/download
 
 **新建的模板默认 `enabled=false`**，需要显式启用后才对普通用户可见。
 
+元数据 PUT 是完整替换：提交需要保留的全部元数据字段；category、description 为 null、空白或省略时清空，variables 为 null、空白、JSON null 或省略时清空。元数据保存不修改文件、enabled 或 versionNo，启停也不会清空元数据。并发删除/启用或记录变化导致写入失败时返回业务码 `409`，刷新后重试；删除在数据库执行时再次检查模板仍为停用状态。
+
 **`variables` 是字符串形式的 JSON 数组**，前端需要二次 `JSON.parse`。
 格式约束：最多 100 个变量；`name` 必须是字符串，去除首尾空格后保存，1～64 字符、只允许字母数字下划线且不能以数字开头。名称区分大小写，规范化后不得重复。`label`、`description` 可省略或为 null，非 null 时必须是字符串，分别最多 128、255 字符；`required` 可省略，提供时必须是 JSON 布尔值，不能传字符串、数字或 null。非法结构后端返回业务码 `400`。
 
-创建或替换内容后操作失败、事务明确回滚，会清理本次新上传文件；替换内容不删除旧文件。当前仅保存最新模板元数据，尚无历史版本查询、回退、模板生成或模板预览入口。旧文件的正式存储回收尚未实现；现有后台任务只清理临时目录。
+创建或替换内容后操作失败、事务明确回滚，会清理本次新上传文件。文件历史列表按 versionNo 倒序分页（page=1、size=20，最多 100），包含 templateId、versionNo、originalName、contentType、extension、sizeBytes、changeType、restoredFromVersion、createTime，不含 storageKey 或变量定义。changeType 为 BASELINE / CREATE / REPLACE / RESTORE；只有恢复记录的 restoredFromVersion 有值。
+
+恢复前先读取模板当前 versionNo，作为必填 expectVersion 提交。恢复只新增文件版本，原历史保留，变量、分类、名称和启停状态不变；可跨历史格式恢复。成功后使用响应中的新 versionNo 刷新页面；并发变化返回业务码 409，先刷新再处理，不要自动更换 expectVersion 重复恢复。缺失历史返回 404，文件缺失返回 500，不能回退为下载最新内容。历史下载和恢复仅限管理员并记录审计。
+
+V6 仅回填已有模板的当前文件版本（BASELINE），保留原版本号，不补造更早历史；其 createTime 是建立索引时间。删除模板后历史接口不可再访问，底层文件与索引仍保留。启用的 DOCX 模板可由普通用户填变量生成，见 P11；生成文件复用按版本预览，管理端没有直接模板预览入口。正式存储回收尚未实现，现有后台任务只清理临时目录。
 
 ## P22 审计日志页
 
@@ -1193,10 +1227,10 @@ FileDetailPage
 
 | 能力 | 状态 | 对前端的影响 |
 | --- | --- | --- |
-| AI 模型调用 | **未接入**（P1） | 对话只落库用户消息，不要显示 AI 回复或 loading |
+| AI 模型调用 | 同步回复与确认后端已接通，真实模型效果待验收 | 使用 replies 流程展示差异、确认/放弃；识别 stub，旧 messages 仅记录消息 |
 | 任务进度推送 | **仅轮询** | 需自行实现轮询与停止策略 |
 | OCR | 未实现（P2） | 扫描型 PDF 的 `text` 为空 |
 | PDF 转可编辑 DOCX | 未实现（P2） | 无此入口 |
-| 图片模型编辑（去背景等） | 未实现（P2） | 已有本地裁剪/缩放/旋转/亮度/单行文字/压缩/格式转换 |
-| 前端工程 | **不存在** | 技术选型、构建与部署方式均待定 |
+| 图片基础处理 | 已有后端接口 | 格式转换/缩放/裁剪/直角旋转/亮度/单行水印；图片模型不在范围 |
+| 前端工程 | **不存在** | 已有技术与部署建议，工程位置和方案落地仍待确认 |
 | 邮件验证码 | 未实现 | 只有短信渠道（当前为 Mock） |

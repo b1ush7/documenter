@@ -37,7 +37,7 @@ public class EditParagraphTool extends AbstractAiTool {
 
     @Override
     public String description() {
-        return "修改文档中的段落。支持替换文本、在指定段落前后插入、删除，以及标题、正文和列表格式。"
+        return "修改文档中的段落。支持替换文本、在指定段落前后插入、删除，以及标题、正文、列表格式和正文段前分页。"
                 + "target 必须是 read_document 返回的块 ID。"
                 + "本工具只生成待确认的修改计划，不会立即改动文档。";
     }
@@ -50,7 +50,7 @@ public class EditParagraphTool extends AbstractAiTool {
                                 + "INSERT_AFTER（后插）、DELETE（删除）、FORMAT_PARAGRAPH（格式）"),
                 ToolParameter.required("target", "目标块 ID，来自 read_document 的结果"),
                 ToolParameter.optional("content", "新内容；DELETE 和 FORMAT_PARAGRAPH 不使用"),
-                ToolParameter.optional("formatType", "格式操作使用：SET_HEADING / SET_NORMAL / SET_BULLET / SET_NUMBERED / CLEAR_LIST"),
+                ToolParameter.optional("formatType", "格式操作使用：SET_HEADING / SET_NORMAL / SET_BULLET / SET_NUMBERED / CLEAR_LIST / SET_PAGE_BREAK_BEFORE / CLEAR_PAGE_BREAK_BEFORE；分页仅支持 body/pN 正文顶层段落"),
                 ToolParameter.optional("level", "SET_HEADING 必填，1 到 9；其他格式不使用"),
                 ToolParameter.optional("reason", "这么改的理由，会展示给用户帮助判断"));
     }
@@ -104,6 +104,9 @@ public class EditParagraphTool extends AbstractAiTool {
                 throw new com.documenter.exception.BusinessException(422, "格式类型或级别不合法；仅 SET_HEADING 使用 1 到 9 级 level");
             }
             format = new DocumentEditPlan.ParagraphFormat(parsed, level);
+            if (parsed.isPageBreakBefore() && !target.matches("^body/p\\d+$")) {
+                throw new com.documenter.exception.BusinessException(422, "段前分页仅支持正文顶层段落 body/pN");
+            }
         } else if (formatType != null || level != null) {
             throw new com.documenter.exception.BusinessException(422, "非格式操作不能包含 formatType 或 level");
         }

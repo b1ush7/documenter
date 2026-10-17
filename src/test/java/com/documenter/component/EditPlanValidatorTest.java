@@ -16,6 +16,20 @@ class EditPlanValidatorTest {
     private final EditPlanValidator validator = new EditPlanValidator(new AiModelProperties());
 
     @Test
+    void paginationPlansRejectTablesAndExtraneousLevelsBeforeConfirmation() {
+        for (var type : List.of(DocumentEditPlan.FormatType.SET_PAGE_BREAK_BEFORE, DocumentEditPlan.FormatType.CLEAR_PAGE_BREAK_BEFORE)) {
+            var valid = new Operation("FORMAT_PARAGRAPH", "body/p0", null, "pagination", null,
+                    new DocumentEditPlan.ParagraphFormat(type, null));
+            assertDoesNotThrow(() -> validate(valid));
+            var table = new Operation("FORMAT_PARAGRAPH", "body/t0/r0/c0/p0", null, "pagination", null, valid.format());
+            assertEquals(422, assertThrows(BusinessException.class, () -> validator.validate(
+                    new DocumentEditPlan("invalid", List.of(table), null), null)).getCode());
+            assertRejected(new Operation("FORMAT_PARAGRAPH", "body/p0", null, "pagination", null,
+                    new DocumentEditPlan.ParagraphFormat(type, 2)));
+        }
+    }
+
+    @Test
     void supportedParagraphAndCellTargetsAreAccepted() {
         assertDoesNotThrow(() -> validate(
                 new Operation("REPLACE_TEXT", "body/p0", "new", null),

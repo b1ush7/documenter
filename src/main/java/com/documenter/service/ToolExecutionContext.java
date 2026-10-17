@@ -174,6 +174,8 @@ public class ToolExecutionContext {
     private static void collectDocxIds(List<DocxStructureVO.Block> blocks, Set<String> ids) {
         for (DocxStructureVO.Block block : blocks) {
             String type = block.type();
+            // Header/footer replacement is currently available through the manual text endpoint only.
+            if ("HEADER".equals(type) || "FOOTER".equals(type)) continue;
             if ("PARAGRAPH".equals(type) || "HEADING".equals(type) || "CELL".equals(type)) {
                 if (block.blockId() != null && !block.blockId().isBlank()) {
                     ids.add(block.blockId());

@@ -34,7 +34,7 @@ public class DocTemplate implements Serializable {
     private String contentType;
     private String extension;
     private Long sizeBytes;
-    /** 内容版本号，每次更新内容 +1。 */
+    /** 内容版本号，每次替换或恢复文件 +1，元数据修改不递增。 */
     private Integer versionNo;
     /** 变量定义 JSON 数组字符串。 */
     private String variables;

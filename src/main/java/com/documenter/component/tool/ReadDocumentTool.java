@@ -93,6 +93,7 @@ public class ReadDocumentTool extends AbstractAiTool {
         }
         for (DocxStructureVO.Block block : blocks) {
             String type = block.type();
+            if ("HEADER".equals(type) || "FOOTER".equals(type)) continue;
             if ("PARAGRAPH".equals(type) || "HEADING".equals(type) || "CELL".equals(type)) {
                 builder.append("  ".repeat(Math.min(depth, 4)))
                         .append('[').append(block.blockId()).append("] ")
@@ -105,6 +106,9 @@ public class ReadDocumentTool extends AbstractAiTool {
                 }
                 if (block.numberingFormat() != null) {
                     builder.append("(list=").append(block.numberingFormat()).append(')');
+                }
+                if (block.pageBreakBefore() != null) {
+                    builder.append("(pageBreakBefore=").append(block.pageBreakBefore()).append(')');
                 }
                 builder.append(": ")
                         .append(block.text() == null ? "（空）" : abbreviate(block.text()))

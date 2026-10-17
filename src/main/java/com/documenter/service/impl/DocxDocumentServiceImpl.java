@@ -31,6 +31,7 @@ import org.apache.poi.xwpf.usermodel.XWPFRun;
 import org.apache.poi.xwpf.usermodel.XWPFTable;
 import org.apache.poi.xwpf.usermodel.XWPFTableCell;
 import org.apache.poi.xwpf.usermodel.XWPFTableRow;
+import org.w3c.dom.Node;
 import org.apache.poi.xwpf.usermodel.XWPFAbstractNum;
 import org.apache.poi.xwpf.usermodel.XWPFNumbering;
 import org.apache.poi.xwpf.usermodel.ParagraphAlignment;
@@ -68,19 +69,23 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
     private final FileStorage fileStorage;
     private final VersionWriter versionWriter;
     private final FileService fileService;
+    private final DocxTemplateGenerationService templates;
 
     public DocxDocumentServiceImpl(DocumentVersionService versionService,
                                    FileStorage fileStorage,
                                    VersionWriter versionWriter,
-                                   FileService fileService) {
+                                   FileService fileService, DocxTemplateGenerationService templates) {
         this.versionService = versionService;
         this.fileStorage = fileStorage;
         this.versionWriter = versionWriter;
         this.fileService = fileService;
+        this.templates = templates;
     }
 
     @Override
     public FileAssetVO generate(Long userId, GenerateDocxDTO request) {
+        if (request != null && (request.getTemplateId() != null || request.getTemplateVersion() != null
+                || request.getVariables() != null)) return templates.generate(userId, request);
         validateGeneration(request);
         byte[] content;
         try (XWPFDocument document = new XWPFDocument();
@@ -115,6 +120,14 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         try (InputStream input = version.resource().getInputStream();
              XWPFDocument document = new XWPFDocument(input)) {
             List<DocxStructureVO.Block> blocks = readBody(document.getBodyElements(), "body");
+            for (int index = 0; index < document.getHeaderList().size(); index++) {
+                blocks.add(new DocxStructureVO.Block("header" + index, "HEADER", null, null, null,
+                        null, null, null, readBody(document.getHeaderList().get(index).getBodyElements(), "header" + index)));
+            }
+            for (int index = 0; index < document.getFooterList().size(); index++) {
+                blocks.add(new DocxStructureVO.Block("footer" + index, "FOOTER", null, null, null,
+                        null, null, null, readBody(document.getFooterList().get(index).getBodyElements(), "footer" + index)));
+            }
             return new DocxStructureVO(fileId, versionNo, blocks);
         } catch (IOException | RuntimeException e) {
             if (e instanceof BusinessException businessException) {
@@ -132,7 +145,7 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         return editAndSave(userId, fileId, sourceVersion, request.getInstruction(),
                 "替换 " + request.getOperations().size() + " 个段落的文本", document -> {
             for (ReplaceDocxTextDTO.Operation operation : request.getOperations()) {
-                XWPFParagraph paragraph = requireParagraph(document, operation.getBlockId());
+                XWPFParagraph paragraph = requireReplacementParagraph(document, operation.getBlockId());
                 replaceSimpleParagraph(paragraph, operation.getBlockId(), operation.getText());
             }
         });
@@ -195,7 +208,7 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                                       FormatDocxParagraphsDTO request) {
         validateParagraphFormats(request.getOperations());
         return editAndSave(userId, fileId, sourceVersion, request.getInstruction(),
-                "设置 " + request.getOperations().size() + " 个段落的标题或列表格式", document -> {
+                "设置 " + request.getOperations().size() + " 个段落的格式或段前分页", document -> {
             List<ResolvedParagraphFormat> formats = request.getOperations().stream()
                     .map(operation -> new ResolvedParagraphFormat(
                             operation, requireParagraph(document, operation.getBlockId())))
@@ -290,12 +303,17 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                 ? level == null || level < 1 || level > 9 : level != null)) {
             throw new BusinessException(400, "不支持的段落格式或标题级别");
         }
+        if (formatType.isPageBreakBefore() && !(paragraph.getBody() instanceof XWPFDocument)) {
+            throw new BusinessException(422, "段前分页仅支持正文顶层段落，不支持表格或页眉页脚");
+        }
         switch (formatType) {
             case SET_HEADING -> { clearNumbering(paragraph); paragraph.setStyle("Heading" + level); }
             case SET_NORMAL -> { clearNumbering(paragraph); paragraph.setStyle("Normal"); }
             case SET_BULLET -> applyNumbering(paragraph, bulletNumId);
             case SET_NUMBERED -> applyNumbering(paragraph, numberedNumId);
             case CLEAR_LIST -> clearNumbering(paragraph);
+            case SET_PAGE_BREAK_BEFORE -> paragraph.setPageBreak(true);
+            case CLEAR_PAGE_BREAK_BEFORE -> paragraph.setPageBreak(false);
         }
     }
 
@@ -391,7 +409,9 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         }
         return new DocxStructureVO.Block(path, headingLevel == null ? "PARAGRAPH" : "HEADING",
                 paragraph.getText(), paragraph.getStyle(), headingLevel,
-                null, null, null, images, paragraph.getNumFmt());
+                null, null, null, images, paragraph.getNumFmt(),
+                paragraph.getCTP().isSetPPr() && paragraph.getCTP().getPPr().isSetPageBreakBefore()
+                        ? paragraph.isPageBreak() : null);
     }
 
     private static DocxStructureVO.Block readTable(XWPFTable table, String path) {
@@ -432,8 +452,29 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
     }
 
     private static XWPFParagraph requireParagraph(XWPFDocument document, String blockId) {
+        if (blockId == null || !blockId.startsWith("body/")) {
+            throw new BusinessException(400, "此操作仅支持正文段落：" + blockId);
+        }
+        return resolveParagraph(document, blockId);
+    }
+
+    private static XWPFParagraph requireReplacementParagraph(XWPFDocument document, String blockId) {
+        if (blockId == null || !blockId.matches("^(?:body|header\\d+|footer\\d+)(?:/t\\d+/r\\d+/c\\d+)*/p\\d+$")) {
+            throw new BusinessException(400, "段落块 ID 格式错误：" + blockId);
+        }
+        String root = blockId.substring(0, blockId.indexOf('/'));
+        try {
+            IBody body = root.equals("body") ? document
+                    : root.startsWith("header") ? document.getHeaderList().get(Integer.parseInt(root.substring(6)))
+                    : document.getFooterList().get(Integer.parseInt(root.substring(6)));
+            return resolveParagraph(body, blockId);
+        } catch (IndexOutOfBoundsException | NumberFormatException e) {
+            throw new BusinessException(400, "段落块不存在于源版本中：" + blockId);
+        }
+    }
+
+    private static XWPFParagraph resolveParagraph(IBody body, String blockId) {
         String[] segments = blockId.split("/");
-        IBody body = document;
         int index = 1;
         try {
             while (index < segments.length) {
@@ -1008,11 +1049,18 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         if (source.getCTP().isSetPPr()) {
             target.getCTP().setPPr((org.openxmlformats.schemas.wordprocessingml.x2006.main.CTPPr)
                     source.getCTP().getPPr().copy());
+            // A section boundary carries header/footer references; it is not paragraph formatting to duplicate.
+            if (target.getCTP().getPPr().isSetSectPr()) target.getCTP().getPPr().unsetSectPr();
+            // A direct page break belongs to the original paragraph, not each inserted neighbour.
+            if (target.getCTP().getPPr().isSetPageBreakBefore()) target.getCTP().getPPr().unsetPageBreakBefore();
         }
     }
 
     private static void deleteParagraph(XWPFParagraph paragraph, String blockId) {
         assertSimpleParagraph(paragraph, blockId);
+        if (paragraph.getCTP().isSetPPr() && paragraph.getCTP().getPPr().isSetSectPr()) {
+            throw new BusinessException(422, "段落包含分节设置，不能直接删除：" + blockId);
+        }
         IBody body = paragraph.getBody();
         if (body instanceof XWPFDocument document) {
             int position = document.getPosOfParagraph(paragraph);
@@ -1061,6 +1109,22 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         for (IRunElement runElement : paragraph.getIRuns()) {
             if (!(runElement instanceof XWPFRun run) || !run.getEmbeddedPictures().isEmpty()) {
                 throw new BusinessException(422, "段落包含图片或复杂内容，暂不支持直接替换：" + blockId);
+            }
+        }
+        // XWPFRun also represents field instructions, page numbers and drawings without embedded pictures.
+        // Inspect the underlying XML so replacing plain text cannot silently delete those structures.
+        String word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        for (Node child = paragraph.getCTP().getDomNode().getFirstChild(); child != null; child = child.getNextSibling()) {
+            if (child.getNodeType() != Node.ELEMENT_NODE) continue;
+            if (!word.equals(child.getNamespaceURI()) || !Set.of("pPr", "r").contains(child.getLocalName())) {
+                throw new BusinessException(422, "段落包含域、书签或复杂内容，暂不支持直接替换：" + blockId);
+            }
+            if (!"r".equals(child.getLocalName())) continue;
+            for (Node content = child.getFirstChild(); content != null; content = content.getNextSibling()) {
+                if (content.getNodeType() == Node.ELEMENT_NODE
+                        && (!word.equals(content.getNamespaceURI()) || !Set.of("rPr", "t", "br", "tab", "cr").contains(content.getLocalName()))) {
+                    throw new BusinessException(422, "段落包含域或复杂内容，暂不支持直接替换：" + blockId);
+                }
             }
         }
     }

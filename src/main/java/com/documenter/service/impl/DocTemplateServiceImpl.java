@@ -4,15 +4,19 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.documenter.component.StorageWriter;
 import com.documenter.dto.DocTemplateQueryDTO;
 import com.documenter.dto.SaveDocTemplateDTO;
+import com.documenter.dto.TemplateVersionQueryDTO;
 import com.documenter.entity.DocTemplate;
+import com.documenter.entity.DocTemplateVersion;
 import com.documenter.enums.AuditAction;
 import com.documenter.exception.BusinessException;
 import com.documenter.mapper.DocTemplateMapper;
+import com.documenter.mapper.DocTemplateVersionMapper;
 import com.documenter.service.AuditService;
 import com.documenter.service.DocTemplateService;
 import com.documenter.service.FileStorage;
 import com.documenter.util.TemplateVariables;
 import com.documenter.vo.DocTemplateVO;
+import com.documenter.vo.DocTemplateVersionVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.PageResult;
 import lombok.extern.slf4j.Slf4j;
@@ -35,8 +39,8 @@ import java.util.function.Function;
  * 因此类型识别、结构安全检查、大小限制与用户上传完全一致，
  * 不存在「模板上传是绕过校验的后门」这种问题。
  *
- * <p>版本策略：单行保存当前版本，{@code version_no} 在替换内容时由 SQL 原子递增。
- * 旧文件暂时保留，但尚无模板历史版本索引、回退或正式存储回收任务。
+ * <p>版本策略：当前内容与不可变历史索引在同一事务保存，以版本号乐观锁串行化文件写入。
+ * 历史只保存文件内容；变量、分类及启用状态不随恢复而改变。正式存储回收仍待实现。
  * 新上传文件在本次操作失败或事务回滚时清理。
  */
 @Slf4j
@@ -44,13 +48,15 @@ import java.util.function.Function;
 public class DocTemplateServiceImpl implements DocTemplateService {
 
     private final DocTemplateMapper mapper;
+    private final DocTemplateVersionMapper versions;
     private final StorageWriter storageWriter;
     private final FileStorage fileStorage;
     private final AuditService auditService;
 
-    public DocTemplateServiceImpl(DocTemplateMapper mapper, StorageWriter storageWriter,
+    public DocTemplateServiceImpl(DocTemplateMapper mapper, DocTemplateVersionMapper versions, StorageWriter storageWriter,
                                   FileStorage fileStorage, AuditService auditService) {
         this.mapper = mapper;
+        this.versions = versions;
         this.storageWriter = storageWriter;
         this.fileStorage = fileStorage;
         this.auditService = auditService;
@@ -90,6 +96,10 @@ public class DocTemplateServiceImpl implements DocTemplateService {
     public List<DocTemplateVO> listEnabled() {
         return mapper.selectList(Wrappers.<DocTemplate>lambdaQuery()
                         .eq(DocTemplate::getEnabled, true)
+                        .eq(DocTemplate::getContentType, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                        .isNotNull(DocTemplate::getStorageKey)
+                        .ne(DocTemplate::getStorageKey, "")
+                        .gt(DocTemplate::getVersionNo, 0)
                         .orderByAsc(DocTemplate::getCategory)
                         .orderByAsc(DocTemplate::getName))
                 .stream()
@@ -137,6 +147,7 @@ public class DocTemplateServiceImpl implements DocTemplateService {
             if (inserted != 1 || template.getId() == null) {
                 throw new BusinessException(500, "创建模板失败，请稍后重试");
             }
+            appendSnapshot(snapshot(template, "CREATE", null));
 
             auditService.success(AuditAction.ADMIN_TEMPLATE_CREATE, "TEMPLATE", template.getId(),
                     "新建模板 code=" + code + ", 类型=" + stored.extension());
@@ -145,6 +156,7 @@ public class DocTemplateServiceImpl implements DocTemplateService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public DocTemplateVO update(Long id, SaveDocTemplateDTO dto) {
         DocTemplate existing = requireTemplate(id);
         String newCode = dto.getCode().trim();
@@ -161,7 +173,9 @@ public class DocTemplateServiceImpl implements DocTemplateService {
         update.setVariables(TemplateVariables.validateAndNormalize(dto.getVariables()));
 
         try {
-            mapper.updateById(update);
+            if (mapper.updateMetadata(update) != 1) {
+                throw new BusinessException(409, "模板元数据更新失败，请刷新后重试");
+            }
         } catch (DuplicateKeyException e) {
             throw new BusinessException(409, "模板标识「" + newCode + "」已存在");
         }
@@ -175,12 +189,23 @@ public class DocTemplateServiceImpl implements DocTemplateService {
     @Transactional(rollbackFor = Exception.class)
     public DocTemplateVO replaceContent(Long id, MultipartFile file) {
         DocTemplate existing = requireTemplate(id);
+        int next = nextVersion(existing);
+        int expected = existing.getVersionNo();
         return withStoredFile(file, stored -> {
             int updated = mapper.replaceContent(id, stored.storageKey(), stored.originalName(),
-                    stored.contentType(), stored.extension(), stored.sizeBytes());
+                    stored.contentType(), stored.extension(), stored.sizeBytes(), expected);
             if (updated != 1) {
                 throw new BusinessException(409, "模板内容更新失败，请刷新后重试");
             }
+            DocTemplate content = new DocTemplate();
+            content.setId(id);
+            content.setVersionNo(next);
+            content.setStorageKey(stored.storageKey());
+            content.setOriginalName(stored.originalName());
+            content.setContentType(stored.contentType());
+            content.setExtension(stored.extension());
+            content.setSizeBytes(stored.sizeBytes());
+            appendSnapshot(snapshot(content, "REPLACE", null));
 
             log.info("模板内容已替换, templateId={}, 旧 storageKey 保留={}", id, existing.getStorageKey() != null);
             auditService.success(AuditAction.ADMIN_TEMPLATE_CONTENT_REPLACE, "TEMPLATE", id,
@@ -190,6 +215,7 @@ public class DocTemplateServiceImpl implements DocTemplateService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public DocTemplateVO updateEnabled(Long id, boolean enabled) {
         DocTemplate existing = requireTemplate(id);
         if (enabled && (existing.getStorageKey() == null || existing.getStorageKey().isBlank())) {
@@ -197,10 +223,9 @@ public class DocTemplateServiceImpl implements DocTemplateService {
             throw new BusinessException(409, "该模板尚未上传文件，无法启用");
         }
 
-        DocTemplate update = new DocTemplate();
-        update.setId(id);
-        update.setEnabled(enabled);
-        mapper.updateById(update);
+        if (mapper.updateEnabled(id, enabled) != 1) {
+            throw new BusinessException(409, "模板状态更新失败，请刷新后重试");
+        }
 
         auditService.success(AuditAction.ADMIN_TEMPLATE_ENABLE, "TEMPLATE", id,
                 (enabled ? "启用" : "停用") + "模板 code=" + existing.getCode());
@@ -208,13 +233,16 @@ public class DocTemplateServiceImpl implements DocTemplateService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void delete(Long id) {
         DocTemplate existing = requireTemplate(id);
         if (Boolean.TRUE.equals(existing.getEnabled())) {
             // 启用中的模板可能正被使用，要求先停用，避免生成流程中途找不到模板
             throw new BusinessException(409, "请先停用该模板再删除");
         }
-        mapper.deleteById(id);
+        if (mapper.deleteDisabled(id) != 1) {
+            throw new BusinessException(409, "模板已启用或已变更，请刷新后重试");
+        }
         // 磁盘文件暂时保留；正式存储的回收策略仍待实现。
         auditService.success(AuditAction.ADMIN_TEMPLATE_DELETE, "TEMPLATE", id,
                 "删除模板 code=" + existing.getCode());
@@ -239,9 +267,131 @@ public class DocTemplateServiceImpl implements DocTemplateService {
                 template.getSizeBytes() == null ? 0L : template.getSizeBytes());
     }
 
+    @Override
+    public PageResult<DocTemplateVersionVO> listVersions(Long id, TemplateVersionQueryDTO query) {
+        requireTemplate(id);
+        if (query == null || query.getPage() < 1 || query.getSize() < 1 || query.getSize() > 100) {
+            throw new BusinessException(400, "模板历史分页参数不合法");
+        }
+        long offset;
+        try {
+            offset = Math.multiplyExact(query.getPage() - 1, query.getSize());
+        } catch (ArithmeticException e) {
+            throw new BusinessException(400, "模板历史页码过大");
+        }
+        PageResult<DocTemplateVersionVO> result = new PageResult<>();
+        result.setTotal(versions.countVersions(id));
+        result.setRecords(versions.listVersions(id, query.getSize(), offset).stream()
+                .map(DocTemplateVersionVO::from).toList());
+        result.setPage(query.getPage());
+        result.setSize(query.getSize());
+        result.setPages(PageResult.pagesOf(result.getTotal(), query.getSize()));
+        return result;
+    }
+
+    @Override
+    public FileDownload downloadVersion(Long id, Integer versionNo) {
+        DocTemplate template = requireTemplate(id);
+        DocTemplateVersion version = requireVersion(id, versionNo);
+        requireStoredContent(version);
+        com.documenter.entity.FileAsset carrier = new com.documenter.entity.FileAsset();
+        carrier.setDisplayName(template.getName() + "-v" + versionNo);
+        carrier.setOriginalName(version.getOriginalName());
+        carrier.setContentType(version.getContentType());
+        carrier.setExtension(version.getExtension());
+        // Explicit filename preserves dots in template display names while using the historical format.
+        String filename = template.getName() + "-v" + versionNo + "." + version.getExtension();
+        auditService.success(AuditAction.ADMIN_TEMPLATE_VERSION_DOWNLOAD, "TEMPLATE", id, "versionNo=" + versionNo);
+        return FileDownload.of(carrier, fileStorage.read(version.getStorageKey()), version.getSizeBytes(), filename);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public DocTemplateVO restoreVersion(Long id, Integer versionNo, Integer expectVersion) {
+        if (expectVersion == null || expectVersion < 1) {
+            throw new BusinessException(400, "恢复模板必须指定正数 expectVersion");
+        }
+        DocTemplate current = requireTemplate(id);
+        if (!expectVersion.equals(current.getVersionNo())) {
+            throw new BusinessException(409, "模板已更新，请刷新后重试");
+        }
+        int next = nextVersion(current);
+        DocTemplateVersion source = requireVersion(id, versionNo);
+        requireStoredContent(source);
+        if (mapper.replaceContent(id, source.getStorageKey(), source.getOriginalName(), source.getContentType(),
+                source.getExtension(), source.getSizeBytes(), expectVersion) != 1) {
+            throw new BusinessException(409, "模板已更新，请刷新后重试");
+        }
+        DocTemplate content = new DocTemplate();
+        content.setId(id);
+        content.setVersionNo(next);
+        content.setStorageKey(source.getStorageKey());
+        content.setOriginalName(source.getOriginalName());
+        content.setContentType(source.getContentType());
+        content.setExtension(source.getExtension());
+        content.setSizeBytes(source.getSizeBytes());
+        appendSnapshot(snapshot(content, "RESTORE", versionNo));
+        auditService.success(AuditAction.ADMIN_TEMPLATE_RESTORE, "TEMPLATE", id,
+                "restoredFromVersion=" + versionNo + ", versionNo=" + next);
+        return DocTemplateVO.from(requireTemplate(id));
+    }
+
+    private DocTemplateVersion requireVersion(Long id, Integer versionNo) {
+        if (versionNo == null || versionNo < 1) {
+            throw new BusinessException(400, "模板版本号必须为正数");
+        }
+        DocTemplateVersion version = versions.findVersion(id, versionNo);
+        if (version == null) throw new BusinessException(404, "模板版本不存在");
+        return version;
+    }
+
+    private void requireStoredContent(DocTemplateVersion version) {
+        if (version.getStorageKey() == null || version.getStorageKey().isBlank()
+                || version.getContentType() == null || version.getContentType().isBlank()
+                || version.getExtension() == null || version.getExtension().isBlank()
+                || version.getSizeBytes() == null || version.getSizeBytes() < 0) {
+            throw new BusinessException(500, "模板版本元数据不完整，请重新上传");
+        }
+        if (!fileStorage.exists(version.getStorageKey())) {
+            throw new BusinessException(500, "该模板版本文件已丢失，请重新上传");
+        }
+    }
+
+    private static int nextVersion(DocTemplate template) {
+        if (template.getVersionNo() == null || template.getVersionNo() < 0
+                || template.getVersionNo() == Integer.MAX_VALUE) {
+            throw new BusinessException(409, "模板内容版本号异常，无法新增版本");
+        }
+        return template.getVersionNo() + 1;
+    }
+
+    private static DocTemplateVersion snapshot(DocTemplate template, String changeType, Integer restoredFrom) {
+        DocTemplateVersion version = new DocTemplateVersion();
+        version.setTemplateId(template.getId());
+        version.setVersionNo(template.getVersionNo());
+        version.setStorageKey(template.getStorageKey());
+        version.setOriginalName(template.getOriginalName());
+        version.setContentType(template.getContentType());
+        version.setExtension(template.getExtension());
+        version.setSizeBytes(template.getSizeBytes());
+        version.setChangeType(changeType);
+        version.setRestoredFromVersion(restoredFrom);
+        return version;
+    }
+
+    private void appendSnapshot(DocTemplateVersion version) {
+        try {
+            if (versions.insert(version) != 1) {
+                throw new BusinessException(500, "保存模板历史版本失败，请稍后重试");
+            }
+        } catch (DuplicateKeyException e) {
+            throw new BusinessException(409, "模板版本已变化，请刷新后重试");
+        }
+    }
+
     private DocTemplate requireTemplate(Long id) {
-        if (id == null) {
-            throw new BusinessException(400, "模板 ID 不能为空");
+        if (id == null || id < 1) {
+            throw new BusinessException(400, "模板 ID 必须为正数");
         }
         DocTemplate template = mapper.selectById(id);
         if (template == null) {

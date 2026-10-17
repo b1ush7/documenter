@@ -124,7 +124,8 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | 文件 | PUT | `/file/{fileId}/name` | 是 | 文件重命名 |
 | 文件 | DELETE | `/file/{fileId}` | 是 | 软删除文件 |
 | 文件 | GET | `/file/{fileId}/download` | 是 | 下载当前最新版本内容 |
-| DOCX | POST | `/file/docx/generate` | 是 | 按结构生成 DOCX |
+| 模板 | GET | `/templates` | 是 | 获取可生成的已启用 DOCX 模板及变量定义 |
+| DOCX | POST | `/file/docx/generate` | 是 | 按结构块或公共模板变量生成 DOCX |
 | 版本 | GET | `/file/{fileId}/versions` | 是 | 版本列表 |
 | 版本 | GET | `/file/{fileId}/versions/{versionNo}` | 是 | 版本详情 |
 | 版本 | GET | `/file/{fileId}/versions/{versionNo}/download` | 是 | 下载指定版本 |
@@ -144,7 +145,7 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/paragraph-text` | 是 | 替换段落文本 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/paragraph-edits` | 是 | 插入或删除段落 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/table-edits` | 是 | 编辑表格 |
-| DOCX | POST | `/file/{fileId}/versions/{versionNo}/paragraph-formats` | 是 | 设置标题或列表格式 |
+| DOCX | POST | `/file/{fileId}/versions/{versionNo}/paragraph-formats` | 是 | 设置标题、列表格式或正文段前分页 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/inline-images` | 是 | 插入已有图片 |
 | 版本 | POST | `/file/{fileId}/versions/{versionNo}/restore` | 是 | 恢复历史版本 |
 | 任务 | POST | `/task` | 是 | 提交异步任务 |
@@ -227,6 +228,8 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 ```
 
 开发环境目前使用模拟发送器，验证码写入服务端日志。发送间隔、有效期和每日次数由服务端配置控制。
+
+模拟发送器受 `VERIFICATION_MOCK_ENABLED`（res.verification.mock-enabled）控制，默认 true。显式设 false 后不会注册 Mock 发送器；当前尚无真实渠道实现，需先提供 VerificationCodeSender，否则应用启动失败，不会回退为打印验证码。环境变量与部署步骤见 [部署说明](docs/deployment.md)。
 
 发送成功后，摘要、错误计数与有效期在 Redis 中一次原子发布。若验证码已投递但无法确认保存成功，返回业务码 503，不能按发送成功处理；需等重发间隔后重新获取。此时不会生成成功发送审计。日发送尝试计数和既有重发间隔策略保持不变。
 
@@ -841,7 +844,7 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 
 `POST /file/{fileId}/versions/{versionNo}/image-edits`
 
-只操作当前用户拥有的明确图片版本，使用本地 Java2D/ImageIO，不调用图片模型或云服务。请求示例：
+只操作当前用户拥有的明确图片版本，使用本地 Java2D/ImageIO。项目仅保留格式转换、JPEG 质量、缩放、裁剪、直角旋转、亮度和单行文字水印，不规划图片生成、智能修图、背景或对象替换、蒙版编辑；PDF/图片 OCR 是独立的文字识别能力，仍待接入。请求示例：
 
 ```json
 {
@@ -879,9 +882,11 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 
 - 源版本仅支持 PNG/JPEG，解码前校验实际格式和尺寸。源图片与每个中间结果默认最多 4000 万像素（`res.storage.upload.max-image-pixels`），源文件及编码后输出默认最多 50 MiB（`max-size-bytes`）；超限返回 `413`。
 - PNG 输出保留透明通道；JPEG 不支持透明，透明区域合成到白色背景。转换为 JPEG 后再转回 PNG 不会恢复丢失的透明度或有损细节。
-- 输出重新编码，不保留 EXIF、ICC、DPI 等元数据，也不按 EXIF 自动纠正方向；坐标基于实际解码像素。尚不支持任意角度旋转、多行或富文本排版、指定字体及模型编辑。
+- 输出重新编码，不保留 EXIF、ICC、DPI 等元数据，也不按 EXIF 自动纠正方向；坐标基于实际解码像素。不提供任意角度旋转、多行或富文本排版、自选字体；图片模型编辑已移出项目范围。
 - 成功时返回新 [Version](#64-version)，包含 `contentType`、`extension`；跨格式为 `CONVERT`，同格式为 `MANUAL_EDIT`。历史版本保留原内容和原格式，当前文件同步到新版本。
 - `versionNo` 同时为源版本和乐观锁期望值；不是最新版本时返回 `409`，不会覆盖最新内容，并清理已经生成的未入库产物。无权访问按 `404` 处理，字段、裁剪范围或文字范围无效返回 `400`，损坏、格式不符或缺字返回 `422`。所有操作完成后才写入单个新版本，任一操作失败都不保存部分结果。
+
+若图片处理参与外层数据库事务，明确回滚后清理本次新文件；正常提交保留产物。原图片及历史文件不受清理影响。
 
 已有数据库需要执行 Flyway `V2__version_content_types.sql`：为历史版本回填格式，并把当前文件内容指针同步到最新版本。该迁移随应用启动执行，真实 MariaDB 环境迁移验收仍需完成。
 
@@ -993,7 +998,40 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 
 每个块只能携带与自身类型匹配的字段。成功后保存为一个 `source=GENERATED` 的新文件，并建立版本 1；`data` 为 [FileAsset](#63-fileasset)。
 
-当前生成器使用固定的 A4 页面、页边距、宋体、字号和基础表格样式。接口控制内容和块顺序，不接受自定义模板、任意 OOXML 或任意本地路径。
+上述结构块模式使用固定的 A4 页面、页边距、宋体、字号和基础表格样式。接口控制内容和块顺序；按管理员模板填充使用下面的模板模式。两种模式均不接受任意 OOXML 或本地路径。
+
+#### 模板模式
+
+先调用新增的 `GET /templates`。此接口要求登录，普通用户可用；`data` 是 `DocTemplateVO` 数组，仅包含已启用、已有文件且内容版本大于 0 的 DOCX 模板，字段与 7.12 相同，不返回 storageKey。没有可用模板时返回空数组。`variables` 是 JSON 字符串，解析后的数组用于渲染变量表单。
+
+继续使用 `POST /file/docx/generate`：
+
+```json
+{
+  "templateId": 11,
+  "templateVersion": 3,
+  "fileName": "本周周报.docx",
+  "variables": {"title": "本周进展", "summary": "完成接口与测试"},
+  "instruction": "用于周会"
+}
+```
+
+| 字段 | 模板模式规则 |
+| --- | --- |
+| `templateId` | 必填正整数，从普通用户模板列表选择 |
+| `templateVersion` | 必填正整数，使用所选模板的当前 versionNo；不能省略或改用历史版本 |
+| `variables` | 可省略；对象中的键为已定义变量名，值必须是字符串或 null，最多 100 项；未知变量、数字、数组及对象均拒绝 |
+| `fileName` | 可省略，默认模板名称；自动补 `.docx`，沿用文件名清理规则及 200 字符输入上限 |
+| `instruction` | 可省略，最多 2000 字符；版本记录中同时保存模板 ID 与文件内容版本 |
+| `title` / `blocks` | 模板模式不能提交；提交空字符串或空数组也视为混用 |
+
+模板作者在 DOCX 正文或表格的普通文字段落填写 `{{name}}`，例如 `{{title}}`。变量名区分大小写，格式与管理端定义一致；不允许占位符内部空格。支持 Word 将占位符拆成多个文字片段；替换文字沿用占位符起始片段的样式，周围文字、表格、页面设置和无占位符的页眉页脚继续保留。变量值按纯文本写入，支持换行与制表符，XML 特殊字符会转义，不再次展开值中的 `{{...}}`。
+
+定义为 `required=true` 的变量缺失、null 或全空白时返回业务码 `400`；可选变量缺失或 null 时替换为空字符串。单个值最多 10000 个 UTF-16 字符，不允许 XML 不支持的控制字符。模板中的未声明/格式错误占位符返回 `422`；页眉页脚、批注、脚注、文本框、内容控件、超链接、域等位置不支持变量。含占位符的段落仅支持普通文字，不能与图片、域、手工换行或制表符结构混用；其他不含占位符的段落不作替换。不支持循环、条件、图片变量、HTML 或脚本。
+
+模板文件和生成结果沿用上传大小上限，默认 50 MiB；最多 10000 处占位符、正文及表格渲染文字最多 200 万个 UTF-16 字符，超限返回 `413`。缺失或停用模板返回 `404`；所选版本已过期，或生成中复查发现文件版本/变量定义已变更，返回 `409`，刷新模板表单后重新提交。仅文件版本被历史索引固定，变量使用读取时的当前定义；复查不是与管理员写入互斥的数据库锁。非 DOCX 模板返回 `400`，损坏/不支持的结构返回 `422`，文件缺失或元数据异常返回 `500`。
+
+成功后创建当前用户独立的 `source=GENERATED` 文件和版本 1，`data` 仍为 FileAsset。模板原文件及历史不修改。用返回的 fileId 和版本 1 调用既有 `/file/{fileId}/versions/1/preview`、页面图片、下载及兼容性检查接口；预览需要部署 Office 后端，未配置时如实返回 `503`。本次不新增预览路由或 AI 调用，不消耗 AI 日调用额度。
 
 ### 4.3 读取 DOCX 结构
 
@@ -1036,7 +1074,7 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 }
 ```
 
-块类型为 `PARAGRAPH`、`HEADING`、`TABLE`、`ROW`、`CELL` 或 `IMAGE`。常见块路径：
+块类型为 `PARAGRAPH`、`HEADING`、`TABLE`、`ROW`、`CELL`、`IMAGE`、`HEADER` 或 `FOOTER`。常见块路径：
 
 | 块 | 示例 |
 | --- | --- |
@@ -1046,8 +1084,15 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 | 单元格 | `body/t0/r0/c1` |
 | 单元格内段落 | `body/t0/r0/c1/p0` |
 | 段落内图片 | `body/p0/img0` |
+| 页眉部件 | `header0` |
+| 页脚部件内段落 | `footer0/p0` |
+| 页眉表格内段落 | `header0/t0/r0/c0/p0` |
 
-表格、行、单元格和段落通过 `children` 递归嵌套。
+表格、行、单元格和段落通过 `children` 递归嵌套。正文块顺序和原 body 路径不变；之后追加 HEADER 容器，再追加 FOOTER 容器，容器的 children 为该部件的段落及表格。没有页眉页脚时不追加空容器。
+
+`headerN` / `footerN` 的 N 是该明确版本中的部件列表索引，不是页码、节号或首页/奇偶页类型。查询返回已有部件，不创建页眉页脚，也不改变首页、奇偶页或节引用设置；多个节引用同一部件时只返回一个容器，修改会影响所有使用该部件的位置。跨版本必须重新获取结构，不能沿用旧索引。
+
+段落块新增可选 `pageBreakBefore`：true/false 为明确设置/取消段前分页，null 表示没有直接设置，可能继承样式；非段落为 null。此字段不解析完整样式继承，也不代表实际渲染页码、页数或分页位置。文字流中的手工分页符、分节及样式规则可能另外影响分页。
 
 ### 4.4 替换段落文本
 
@@ -1066,11 +1111,15 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 ```
 
 - `instruction` 可选，最长 2000。
-- `operations` 必填，1～100 项。
-- `blockId` 必须指向正文或表格单元格中的段落。
+- `operations` 必填，1～100 项，元素不能为 null。
+- `blockId` 必须使用结构查询返回的正文、页眉页脚或其表格单元格中的段落路径，例如 `body/p2`、`header0/p1`、`footer0/t0/r0/c0/p0`。
 - `text` 必填，最长 100000；允许空字符串以清空段落。
 - 同一段落不能在同一请求中重复替换。
 - 包含图片或复杂内容的段落暂不支持整体文本替换。
+
+页眉页脚仅在本段落文本替换入口开放人工编辑，继续使用明确源版本及归属校验，成功新增一个 MANUAL_EDIT 版本。无效或不存在的段落路径返回 `400`，版本冲突返回 `409` 并清理未入库产物；任一操作失败都不保存整批修改。普通段落的段落属性及首个文字片段样式保留，其他页眉页脚、页码域和节引用保持原样。共享部件的文字替换作用于所有引用该部件的节，不自动复制为独立页眉页脚。
+
+页码域、目录域、图片、超链接、书签、内容控件及其他复杂结构不能通过整段替换处理，返回 `422`，避免删除原有功能。结构查询中的文字不表示该段落一定可以编辑。当前不提供页眉页脚新增/删除、引用切换、人工格式/图片/行列编辑或 AI 编辑计划；这些入口仍仅支持既有正文路径。模板变量生成的范围仍仅限正文和表格，不因本功能扩展到页眉页脚。版本比较会沿 HEADER/FOOTER 子块显示文字差异，页面预览与下载继续使用新版本的既有接口。
 
 成功时 `data` 为新 [Version](#64-version)。
 
@@ -1101,7 +1150,7 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 | `INSERT_AFTER` | 段落 | 必填 |
 | `DELETE` | 段落 | 必须不传 |
 
-单次 1～100 项。同一段落不能同时作为插入参照和删除目标；表格单元格必须保留至少一个段落。
+单次 1～100 项。同一段落不能同时作为插入参照和删除目标；表格单元格必须保留至少一个段落。本入口仍仅支持正文及正文表格中的段落；含分节设置的段落不能直接删除（422）。在分节段落前后插入只继承段落样式，不复制分节设置，以免额外创建节或改变页眉页脚引用。
 
 ### 4.6 编辑表格
 
@@ -1134,7 +1183,7 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 
 单次 1～100 项；每个插入行最多 100 个单元格，每个文本最长 100000。表格必须保留至少一行，包含嵌套表格的单元格暂不支持整体替换。
 
-### 4.7 设置标题、正文或列表格式
+### 4.7 设置标题、正文、列表格式或段前分页
 
 `POST /file/{fileId}/versions/{versionNo}/paragraph-formats`
 
@@ -1162,8 +1211,14 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 | `SET_BULLET` | 必须不传 |
 | `SET_NUMBERED` | 必须不传 |
 | `CLEAR_LIST` | 必须不传 |
+| `SET_PAGE_BREAK_BEFORE` | 必须不传；让正文顶层段落从新页开始 |
+| `CLEAR_PAGE_BREAK_BEFORE` | 必须不传；显式关闭该段落的段前分页 |
 
 单次 1～100 项，同一段落在一次请求中只能设置一种格式。
+
+分页操作只接受 `body/pN` 正文顶层段落；表格内段落返回业务码 422，页眉页脚路径不在本接口范围。它只修改该段落的直接 `pageBreakBefore` 属性，保留原文、字体、标题/列表样式、图片/域及节引用。CLEAR 写入明确的 false，不是删除属性后重新继承样式；不会移除文字中的手工分页符、分节符或改变其他分页规则。新增段落仍继承原有基础段落样式，但不复制参照段落的直接段前分页属性。
+
+例如 `{"operations":[{"type":"SET_PAGE_BREAK_BEFORE","blockId":"body/p2"}]}`。成功返回一个 MANUAL_EDIT 新版本，复用既有版本下载/预览；缺失目标或多余 level 返回 400，版本冲突 409，整批失败不保存部分结果。实际页面数量与版式须用 Office 后端或办公软件验证；内容 compare 不展示纯分页变化。
 
 ### 4.8 插入图片
 
@@ -1194,7 +1249,9 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 
 ## 5. 异步任务
 
-当前任务框架已经支持提交、排队、状态流转、进度、取消、超时和重试，但默认启用的是占位处理器。占位处理器会更新进度和步骤，不会真正执行 OCR、转换、AI 编辑、导出或图片生成，也不会产生输出文件。
+当前任务框架已经支持提交、排队、状态流转、进度、取消、超时和重试，但默认启用的是占位处理器。占位处理器会更新进度和步骤，不会真正执行 OCR、转换、AI 编辑或导出，也不会产生输出文件。
+
+IMAGE_GEN 已停用：不接受新建或重试（业务码 400），历史记录、步骤、列表筛选和取消仍保留。旧排队记录在执行/重启恢复时以 FAILED / TASK_TYPE_DISABLED 收尾，不调用处理器或自动重试，也不改写已终态的记录。图片基础操作直接使用第 3.20 节接口，无需异步生成任务。数据库中的历史枚举和记录继续保留，不做删除迁移。
 
 调度与实际处理使用独立的有界线程池，`res.task` 的线程数和队列容量分别应用于两个池。队列满或执行器关闭时，不在请求线程中执行耗时处理，而是将任务记录为 `FAILED`，`errorCode=QUEUE_FULL`，并提示稍后通过现有重试入口重试。若提交时已发生拒绝，创建任务响应中的任务状态也会反映该失败；接受入队后的状态变化通过任务查询获取。
 
@@ -1218,7 +1275,7 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 
 | 字段 | 必填 | 约束/说明 |
 | --- | --- | --- |
-| `taskType` | 是 | `OCR`、`CONVERT`、`AI_EDIT`、`EXPORT`、`IMAGE_GEN` |
+| `taskType` | 是 | `OCR`、`CONVERT`、`AI_EDIT`、`EXPORT`；不再接受 `IMAGE_GEN` |
 | `fileId` | 否 | 关联当前用户自己的文件；纯生成任务可不传 |
 | `inputVersion` | 否 | 大于等于 1；未传时使用文件当前最新版本；没有 `fileId` 时不得传 |
 | `instruction` | 否 | 最长 2000 |
@@ -1237,7 +1294,7 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 | `page` | `1` | 大于等于 1 |
 | `size` | `20` | 1～100 |
 | `status` | - | `PENDING`、`RUNNING`、`SUCCEEDED`、`FAILED`、`CANCELLED` |
-| `taskType` | - | `OCR`、`CONVERT`、`AI_EDIT`、`EXPORT`、`IMAGE_GEN` |
+| `taskType` | - | `OCR`、`CONVERT`、`AI_EDIT`、`EXPORT`，以及仅供历史查询的 `IMAGE_GEN` |
 | `fileId` | - | 按文件过滤 |
 
 返回 `PageResult<Task>`，按创建时间倒序。目前没有 SSE 进度端点，前端应轮询本接口或任务详情。
@@ -1279,6 +1336,8 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 `POST /task/{taskId}/retry`
 
 请求体为空。只允许重试 `FAILED` 或 `CANCELLED` 任务；成功任务或非终态任务返回 `409`。达到最大重试次数时返回 `429`。重试会创建新任务记录，不复用原幂等键。
+
+已停用的 IMAGE_GEN 在所有状态下均拒绝重试，返回业务码 400；普通用户和管理员重试入口执行相同规则。
 
 ### 5.6 文件处理历史
 
@@ -1558,11 +1617,43 @@ PENDING -> RUNNING -> SUCCEEDED
 
 `code`、`name` 必填，分别最多 64、128 字符；code 只允许字母、数字、下划线和连字符，重复返回 `409`。可选 category、description 分别最多 32、500 字符，variables 原始字符串最多 20,000 字符。
 
+元数据 PUT 按完整替换处理：category、description 传 null、空白或不传时清空；variables 传 null、空白、JSON null 或不传时清空。只修改元数据，不改变模板文件、启用状态或内容版本号；客户端编辑表单应提交所有需要保留的元数据字段。启停接口只修改 enabled。更新或删除时记录已经变化、写入影响行数异常，返回业务码 `409`，不记录成功审计；删除 SQL 会再次检查 enabled=0，防止读出停用状态后被其他请求启用的模板遭删除。
+
 variables 是 **JSON 数组字符串**，null、空白或 JSON null 代表无变量。最多 100 个变量，每个元素必须是对象：name 必须是字符串，去除首尾空格后保存，1～64 字符、以字母或下划线开头，其余只允许字母、数字和下划线；名称区分大小写，规范化后不得重复。label、description 可省略或为 null，否则必须是字符串，分别最多 128、255 字符；required 可省略，提供时必须是 JSON 布尔值。校验失败返回业务码 `400`，创建时在上传落盘前完成变量校验。
 
 `DocTemplateVO` 包含 id、code、name、category、description、originalName、contentType、extension、sizeBytes、versionNo、variables、enabled、createTime、updateTime、hasFile，不含内部 storageKey。文件类型和结构校验复用普通上传规则。创建、替换操作失败或事务明确回滚时清理本次新文件；替换前的旧文件保留。
 
-当前只保存最新模板元数据。尚无模板历史版本查询/回退、变量填充生成或生成预览接口，也没有旧模板文件的正式存储回收任务；临时目录清理任务不处理这些文件。
+### 7.13 公共模板文件历史与恢复
+
+本节三个接口均要求 ADMIN；历史只包含模板文件，变量定义、分类、名称、标识、说明和启停状态不版本化，不随恢复改变。
+
+| 接口 | 请求与结果 |
+| --- | --- |
+| `GET /admin/templates/{id}/versions` | page 默认 1、size 默认 20（1～100）；按 versionNo 倒序返回 `PageResult<DocTemplateVersionVO>` |
+| `GET /admin/templates/{id}/versions/{versionNo}/download` | 下载明确历史版本，使用该版本的 MIME、扩展名和字节数；名称为当前模板名加 `-v版本号.扩展名` |
+| `POST /admin/templates/{id}/versions/{versionNo}/restore?expectVersion=4` | expectVersion 必填且为正数，必须等于当前内容版本号；恢复成功返回更新后的 `DocTemplateVO` |
+
+历史记录示例：
+
+```json
+{
+  "templateId": 7,
+  "versionNo": 5,
+  "originalName": "old-template.docx",
+  "contentType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "extension": "docx",
+  "sizeBytes": 10240,
+  "changeType": "RESTORE",
+  "restoredFromVersion": 2,
+  "createTime": "2026-10-17T16:00:00"
+}
+```
+
+changeType 为 BASELINE（迁移回填）、CREATE、REPLACE 或 RESTORE；只有 RESTORE 的 restoredFromVersion 有值。出参不包含 storageKey 或变量定义。创建/替换文件会在同一事务中写入不可变历史索引；恢复复用被选中历史文件，新增当前版本号加一的 RESTORE 记录，不覆盖原记录、不复制文件。跨格式恢复保留历史格式。恢复与替换都通过 SQL 版本号乐观锁拒绝并发覆盖；冲突返回业务码 `409`，不增加成功历史记录。用旧 expectVersion 重发恢复也会返回 409，不会再追加版本，客户端应先刷新状态。
+
+模板或该模板下的版本不存在返回 `404`，无效版本号/分页/expectVersion 返回 `400`，历史文件缺失或元数据不完整返回 `500`。历史下载和恢复写审计。删除模板后，历史接口也返回 404；当前删除仍保留底层内容和历史索引，不提供已删除模板恢复或正式存储回收。
+
+V6 迁移只为有内容且 versionNo 大于 0 的当前模板回填一条 BASELINE，保留已有版本号，createTime 表示建立索引的时间；版本号小于当前号的旧文件没有可靠索引，不能据磁盘文件推断或补造历史。普通用户的 DOCX 变量填充见第 4.2 节；临时目录清理任务不处理这些正式内容。
 
 ## 8. AI 回复与确认编辑
 
@@ -1686,10 +1777,14 @@ variables 是 **JSON 数组字符串**，null、空白或 JSON null 代表无变
 | `SET_BULLET` | 设置项目符号列表，保留段落样式 |
 | `SET_NUMBERED` | 设置十进制编号列表，保留段落样式 |
 | `CLEAR_LIST` | 仅清除直接列表编号，保留段落样式 |
+| `SET_PAGE_BREAK_BEFORE` | 正文顶层段落显式设置段前分页 |
+| `CLEAR_PAGE_BREAK_BEFORE` | 正文顶层段落显式关闭段前分页 |
 
 除 SET_HEADING 外不能传 level。不接受任意样式名或脚本。格式操作保留段落文本；同一段落允许一次格式与一次 REPLACE_TEXT 或 INSERT_IMAGE 组合，其他重复目标及删除组合会被拒绝。同一计划中新建的同类列表共用编号定义，不接续源文件中其他列表。
 
-`changes[]` 中格式项的 before/after 为 null，前端通过 `type=FORMAT_PARAGRAPH` 区分，展示 `beforeFormat={styleId,headingLevel,numberingFormat}` 与目标 `format`。编号类型可能为 bullet、decimal 或 null；这些字段反映基础段落属性，不展开全部继承样式。DOCX 结构的段落块也增加可选 `numberingFormat` 字段，read_document 工具向模型提供原样式与列表类型。旧计划不含 format 时仍可读取；其他操作不能携带该字段。确认后与其他操作一同生成单个 AI_EDIT 版本，失败不保存部分结果。现有按版本 compare 接口仍只比较内容，纯格式变化应查看回复中的格式差异及保存后的页面预览。
+`changes[]` 中格式项的 before/after 为 null，前端通过 `type=FORMAT_PARAGRAPH` 区分，展示 `beforeFormat={styleId,headingLevel,numberingFormat,pageBreakBefore}` 与目标 `format`。编号类型可能为 bullet、decimal 或 null；pageBreakBefore 为 true/false/null，含义与结构读取一致。这些字段反映基础段落的直接属性，不展开全部继承样式。read_document 向模型提供原样式、列表类型及明确的段前分页状态。旧计划与不含分页字段的响应仍可读取，缺失字段按 null 处理；其他操作不能携带 format 字段。确认后与其他操作一同生成单个 AI_EDIT 版本，失败不保存部分结果。现有按版本 compare 接口仍只比较内容，纯格式或分页变化应查看回复中的格式差异及保存后的页面预览。
+
+段前分页计划只能指向 body/pN，不接受表格或页眉页脚，不传 level、content 或 image；例如 `{"type":"FORMAT_PARAGRAPH","target":"body/p2","format":{"type":"SET_PAGE_BREAK_BEFORE"},"reason":"章节从新页开始"}`。它沿用现有生成、查询、确认和放弃接口，无新增路径；生成计划不写文件，确认前后重新检查归属与明确版本，重复确认只复用原输出版本。
 
 ### 8.5 每用户每日调用额度
 
@@ -1746,7 +1841,7 @@ target 是内部定位形式“原始工作表名称!规范单元格”，单元
 - LangChain4j 工具循环已接入回复 Controller；尚未接入异步任务处理器。
 - 异步任务默认使用占位处理器，不产生真实处理结果。
 - 尚未提供 SSE 或 WebSocket 进度推送。
-- DOCX 生成样式目前固定，尚不支持用户模板、主题配置和自由页面参数。
+- DOCX 结构块模式使用固定样式；模板模式支持管理员启用的 DOCX 正文/表格纯文本变量，不支持循环、图片变量、主题参数和用户自行上传模板生成。
 - DOCX 块 ID 不是跨版本永久 ID，每次成功编辑后应重新读取结构。
 - 验证码开发配置使用模拟发送，不能直接视为生产短信能力。
 - 管理员可跨用户读取、下载、重命名或软删除文件，并查看、取消或重试任务；尚未提供跨用户 DOCX 内容编辑和版本恢复入口，以免在当前版本模型中错误记录实际操作者。

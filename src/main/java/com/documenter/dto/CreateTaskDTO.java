@@ -18,8 +18,8 @@ import lombok.Data;
 public class CreateTaskDTO {
 
     @NotNull(message = "任务类型不能为空")
-    @Pattern(regexp = "^(OCR|CONVERT|AI_EDIT|EXPORT|IMAGE_GEN)$",
-            message = "任务类型不支持，可选值：OCR、CONVERT、AI_EDIT、EXPORT、IMAGE_GEN")
+    @Pattern(regexp = "^(OCR|CONVERT|AI_EDIT|EXPORT)$",
+            message = "任务类型不支持，可选值：OCR、CONVERT、AI_EDIT、EXPORT")
     private String taskType;
 
     /** 关联文件；纯生成类任务可以不传。 */

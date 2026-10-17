@@ -182,6 +182,7 @@ public class TaskServiceImpl implements TaskService {
     @Override
     public TaskVO retry(Long userId, Long taskId) {
         ProcessingTask source = requireOwned(userId, taskId);
+        rejectRetiredType(source.getTaskType());
         TaskStatus status = TaskStatus.valueOf(source.getStatus());
         if (!status.isTerminal() || status == TaskStatus.SUCCEEDED) {
             throw new BusinessException(409, "只有失败或已取消的任务可以重试");
@@ -253,10 +254,17 @@ public class TaskServiceImpl implements TaskService {
     }
 
     private static TaskType parseType(String value) {
+        rejectRetiredType(value);
         try {
             return TaskType.valueOf(value);
         } catch (IllegalArgumentException e) {
             throw new BusinessException(400, "不支持的任务类型：" + value);
+        }
+    }
+
+    private static void rejectRetiredType(String value) {
+        if (TaskType.IMAGE_GEN.name().equals(value)) {
+            throw new BusinessException(400, "图片生成任务已停用，请使用图片基础处理接口");
         }
     }
 

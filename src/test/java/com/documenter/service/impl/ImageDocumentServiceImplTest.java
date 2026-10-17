@@ -17,6 +17,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.core.io.ByteArrayResource;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import javax.imageio.ImageIO;
 import java.awt.Color;
@@ -37,6 +39,48 @@ class ImageDocumentServiceImplTest {
     private final StorageProperties properties = new StorageProperties();
     private final ImageDocumentServiceImpl service = new ImageDocumentServiceImpl(
             versions, storage, writer, properties);
+
+    @ParameterizedTest
+    @ValueSource(strings = {"PNG", "JPEG"})
+    void outerRollbackCleansGeneratedImageAfterVersionWrite(String format) throws Exception {
+        prepare(new BufferedImage(8, 8, BufferedImage.TYPE_INT_ARGB), "png");
+        var request = request();
+        request.setOutputFormat(format);
+        String key = format.equals("PNG") ? "new.png" : "new.jpg";
+        when(storage.delete(key)).thenReturn(true);
+        TransactionSynchronizationManager.initSynchronization();
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        try {
+            service.edit(7L, 10L, 1, request);
+            verify(storage, never()).delete(anyString());
+            var callbacks = TransactionSynchronizationManager.getSynchronizations();
+            assertEquals(1, callbacks.size());
+            callbacks.getFirst().afterCompletion(TransactionSynchronization.STATUS_ROLLED_BACK);
+            verify(storage).delete(key);
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+            TransactionSynchronizationManager.setActualTransactionActive(false);
+        }
+    }
+
+    @Test
+    void committedTransactionKeepsGeneratedImage() throws Exception {
+        prepare(new BufferedImage(8, 8, BufferedImage.TYPE_INT_ARGB), "png");
+        TransactionSynchronizationManager.initSynchronization();
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        try {
+            var request = request();
+            request.setOutputFormat("PNG");
+            service.edit(7L, 10L, 1, request);
+            var callbacks = TransactionSynchronizationManager.getSynchronizations();
+            assertEquals(1, callbacks.size());
+            callbacks.getFirst().afterCompletion(TransactionSynchronization.STATUS_COMMITTED);
+            verify(storage, never()).delete(anyString());
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+            TransactionSynchronizationManager.setActualTransactionActive(false);
+        }
+    }
 
     @ParameterizedTest
     @CsvSource({"0,80000000", "0.5,800a4b6e", "1,801496dc", "2,8028ffff", "4,8050ffff"})

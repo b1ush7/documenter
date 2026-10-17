@@ -379,7 +379,27 @@ class AccessControlTest {
             mapper = mock(DocTemplateMapper.class);
             storageWriter = mock(StorageWriter.class);
             fileStorage = mock(FileStorage.class);
-            service = new DocTemplateServiceImpl(mapper, storageWriter, fileStorage, mock(AuditService.class));
+            service = new DocTemplateServiceImpl(mapper, mock(com.documenter.mapper.DocTemplateVersionMapper.class),
+                    storageWriter, fileStorage, mock(AuditService.class));
+        }
+
+        @Test
+        void publicCatalogQueriesOnlyEnabledDocxWithContentAndPositiveVersion() {
+            when(mapper.selectList(any(Wrapper.class))).thenReturn(java.util.List.of());
+            assertEquals(java.util.List.of(), service.listEnabled());
+            var capture = org.mockito.ArgumentCaptor.forClass(com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper.class);
+            verify(mapper).selectList(capture.capture());
+            var query = capture.getValue();
+            String sql = query.getSqlSegment();
+            org.junit.jupiter.api.Assertions.assertTrue(sql.contains("enabled ="));
+            org.junit.jupiter.api.Assertions.assertTrue(sql.contains("content_type ="));
+            org.junit.jupiter.api.Assertions.assertTrue(sql.contains("storage_key IS NOT NULL"));
+            org.junit.jupiter.api.Assertions.assertTrue(sql.contains("storage_key <>"));
+            org.junit.jupiter.api.Assertions.assertTrue(sql.contains("version_no >"));
+            org.junit.jupiter.api.Assertions.assertTrue(query.getParamNameValuePairs().containsValue(true));
+            org.junit.jupiter.api.Assertions.assertTrue(query.getParamNameValuePairs().containsValue(
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"));
+            org.junit.jupiter.api.Assertions.assertTrue(query.getParamNameValuePairs().containsValue(0));
         }
 
         @Test
@@ -405,6 +425,7 @@ class AccessControlTest {
 
             assertEquals(409, error.getCode());
             verify(mapper, never()).deleteById(anyLong());
+            verify(mapper, never()).deleteDisabled(anyLong());
         }
 
         @Test

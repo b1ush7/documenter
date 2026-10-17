@@ -17,5 +17,9 @@ public record AiReplyVO(AiMessageVO message, String runStatus, String planStatus
             this(type, target, before, after, reason, image, null, null);
         }
     }
-    public record ParagraphStyle(String styleId, Integer headingLevel, String numberingFormat) { }
+    public record ParagraphStyle(String styleId, Integer headingLevel, String numberingFormat, Boolean pageBreakBefore) {
+        public ParagraphStyle(String styleId, Integer headingLevel, String numberingFormat) {
+            this(styleId, headingLevel, numberingFormat, null);
+        }
+    }
 }

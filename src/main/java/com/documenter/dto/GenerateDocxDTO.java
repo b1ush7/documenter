@@ -10,10 +10,21 @@ import jakarta.validation.constraints.Size;
 import lombok.Data;
 
 import java.util.List;
+import java.util.Map;
 
-/** 使用受限结构块在本地生成新的 DOCX 文件。 */
+/** 使用受限结构块或启用的 DOCX 模板在本地生成新文件；两种模式不能混用。 */
 @Data
 public class GenerateDocxDTO {
+
+    @Positive(message = "模板 ID 必须为正数")
+    private Long templateId;
+
+    @Positive(message = "模板版本号必须为正数")
+    private Integer templateVersion;
+
+    /** Template mode only; supplied values must be literal strings, validated by the renderer. */
+    @Size(max = 100, message = "最多填写 100 个模板变量")
+    private Map<String, Object> variables;
 
     @Size(max = 200, message = "文件名过长")
     private String fileName;

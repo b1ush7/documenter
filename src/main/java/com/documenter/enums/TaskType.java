@@ -20,6 +20,10 @@ public enum TaskType {
     /** 导出，例如 DOCX 转 PDF（P1）。 */
     EXPORT,
 
-    /** 图片生成与编辑（P2）。 */
-    IMAGE_GEN
+    /** 仅兼容历史记录；图片生成已移出范围，不再提交、重试或执行。 */
+    IMAGE_GEN;
+
+    public boolean isRetired() {
+        return this == IMAGE_GEN;
+    }
 }

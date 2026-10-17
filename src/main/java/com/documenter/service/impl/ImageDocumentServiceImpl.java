@@ -14,6 +14,8 @@ import com.documenter.vo.FileDownload;
 import com.documenter.vo.VersionVO;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import javax.imageio.IIOImage;
 import javax.imageio.ImageIO;
@@ -97,6 +99,17 @@ public class ImageDocumentServiceImpl implements ImageDocumentService {
                     converted ? ChangeType.CONVERT : ChangeType.MANUAL_EDIT,
                     request.getInstruction(), "图片编辑结果：" + width + "×" + height + "，" + outputFormat,
                     sourceVersion);
+            if (TransactionSynchronizationManager.isSynchronizationActive()
+                    && TransactionSynchronizationManager.isActualTransactionActive()) {
+                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                    @Override
+                    public void afterCompletion(int status) {
+                        if (status == STATUS_ROLLED_BACK && !fileStorage.delete(storageKey)) {
+                            log.warn("外层事务回滚后无法清理图片产物, storageKey={}", storageKey);
+                        }
+                    }
+                });
+            }
             return VersionVO.from(version);
         } catch (RuntimeException e) {
             if (!fileStorage.delete(storageKey)) {

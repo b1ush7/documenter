@@ -255,7 +255,7 @@ public class AiReplyServiceImpl implements AiReplyService {
                         type == DocumentEditPlan.OperationType.DELETE || formatting ? null : operation.content(),
                         operation.reason(), operation.image(), operation.format(),
                         formatting && block != null ? new AiReplyVO.ParagraphStyle(
-                                block.styleId(), block.headingLevel(), block.numberingFormat()) : null));
+                                block.styleId(), block.headingLevel(), block.numberingFormat(), block.pageBreakBefore()) : null));
             }
         }
         return new AiReplyVO(AiMessageVO.from(reply), reply.getRunStatus(), reply.getPlanStatus(),

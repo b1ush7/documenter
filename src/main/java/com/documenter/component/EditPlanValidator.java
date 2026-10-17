@@ -164,6 +164,10 @@ public class EditPlanValidator {
 
             if (type == OperationType.FORMAT_PARAGRAPH) {
                 var format = operation.format();
+                if (format != null && format.type() != null && format.type().isPageBreakBefore()
+                        && (operation.target() == null || !operation.target().matches("^body/p\\d+$"))) {
+                    problems.add(position + "的段前分页仅支持正文顶层段落 body/pN");
+                }
                 if (format == null || format.type() == null) {
                     problems.add(position + "必须提供受支持的 format.type");
                 } else if (format.type() == DocumentEditPlan.FormatType.SET_HEADING) {

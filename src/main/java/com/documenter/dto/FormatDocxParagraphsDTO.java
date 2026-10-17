@@ -11,23 +11,22 @@ import lombok.Data;
 
 import java.util.List;
 
-/** 设置 DOCX 段落的基础标题或列表格式。 */
+/** 设置 DOCX 段落的标题、列表或正文段前分页。 */
 @Data
 public class FormatDocxParagraphsDTO {
 
     @Size(max = 2000, message = "编辑说明过长")
     private String instruction;
 
-    @Valid
     @NotEmpty(message = "至少需要一个段落格式操作")
     @Size(max = 100, message = "单次最多执行 100 个段落格式操作")
-    private List<Operation> operations;
+    private List<@NotNull(message = "段落格式操作不能为空") @Valid Operation> operations;
 
     @Data
     public static class Operation {
 
         @NotNull(message = "格式类型不能为空")
-        @Pattern(regexp = "^(SET_HEADING|SET_NORMAL|SET_BULLET|SET_NUMBERED|CLEAR_LIST)$",
+        @Pattern(regexp = "^(SET_HEADING|SET_NORMAL|SET_BULLET|SET_NUMBERED|CLEAR_LIST|SET_PAGE_BREAK_BEFORE|CLEAR_PAGE_BREAK_BEFORE)$",
                 message = "不支持的段落格式类型")
         private String type;
 

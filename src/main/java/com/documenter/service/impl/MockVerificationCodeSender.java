@@ -3,6 +3,7 @@ package com.documenter.service.impl;
 import com.documenter.enums.VerificationScene;
 import com.documenter.service.VerificationCodeSender;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
@@ -17,6 +18,7 @@ import org.springframework.stereotype.Component;
  */
 @Slf4j
 @Component
+@ConditionalOnProperty(prefix = "res.verification", name = "mock-enabled", havingValue = "true", matchIfMissing = true)
 public class MockVerificationCodeSender implements VerificationCodeSender {
 
     @Override

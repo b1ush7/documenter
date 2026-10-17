@@ -16,13 +16,13 @@ spring:
   # 否则会出现「容器先拒绝」或「通过了容器却被业务层拒绝」两种不一致的报错。
   servlet:
     multipart:
-      max-file-size: 50MB
-      max-request-size: 55MB
+      max-file-size: ${STORAGE_MAX_UPLOAD_BYTES:52428800}
+      max-request-size: ${STORAGE_MAX_REQUEST_BYTES:57671680}
       # 超过 256KB 落到临时文件，避免大文件占用堆内存
       file-size-threshold: 256KB
 
 server:
-  port: 8080
+  port: ${SERVER_PORT:8080}
 
 res:
   jwt:
@@ -35,13 +35,13 @@ res:
     key: id
   # 验证码策略（TODO 3.1）
   verification:
-    code-length: 6
-    ttl: 5m
-    resend-interval: 60s
-    daily-limit: 10
-    max-attempts: 5
+    code-length: ${VERIFICATION_CODE_LENGTH:6}
+    ttl: ${VERIFICATION_TTL:5m}
+    resend-interval: ${VERIFICATION_RESEND_INTERVAL:60s}
+    daily-limit: ${VERIFICATION_DAILY_LIMIT:10}
+    max-attempts: ${VERIFICATION_MAX_ATTEMPTS:5}
     # true 时验证码写入服务端日志而不真正发送；上线前必须改为 false 并接入真实渠道
-    mock-enabled: true
+    mock-enabled: ${VERIFICATION_MOCK_ENABLED:true}
   # 文件存储（TODO 3.3）。各环境只需覆盖 local.root / local.temp 两个路径。
   storage:
     type: local
@@ -52,9 +52,9 @@ res:
       temp-retention: ${STORAGE_TEMP_RETENTION:24h}
       temp-cleanup-interval: ${STORAGE_TEMP_CLEANUP_INTERVAL:1h}
     upload:
-      max-size-bytes: 52428800
+      max-size-bytes: ${STORAGE_MAX_UPLOAD_BYTES:52428800}
       # 同一用户每日上传次数上限（Redis 原子计数）
-      hourly-limit: 60
+      hourly-limit: ${UPLOAD_DAILY_LIMIT:60}
       max-pdf-pages: ${STORAGE_MAX_PDF_PAGES:200}
       max-image-pixels: ${STORAGE_MAX_IMAGE_PIXELS:40000000}
       max-archive-entries: ${STORAGE_MAX_ARCHIVE_ENTRIES:10000}
@@ -80,19 +80,19 @@ res:
   task:
     # 调度与处理使用独立有界线程池；以下容量分别作用于两个池。
     # 队列满或执行器关闭时任务标记为 FAILED / QUEUE_FULL，通过已有重试入口重试。
-    core-pool-size: 2
-    max-pool-size: 4
-    queue-capacity: 50
-    keep-alive: 60s
-    default-timeout: 10m
-    default-max-retry: 2
-    shutdown-await: 30s
+    core-pool-size: ${TASK_CORE_POOL_SIZE:2}
+    max-pool-size: ${TASK_MAX_POOL_SIZE:4}
+    queue-capacity: ${TASK_QUEUE_CAPACITY:50}
+    keep-alive: ${TASK_KEEP_ALIVE:60s}
+    default-timeout: ${TASK_DEFAULT_TIMEOUT:10m}
+    default-max-retry: ${TASK_DEFAULT_MAX_RETRY:2}
+    shutdown-await: ${TASK_SHUTDOWN_AWAIT:30s}
     # 启动时把中断的 RUNNING 任务标记为失败，避免前端永远看到「运行中」
-    recover-on-startup: true
+    recover-on-startup: ${TASK_RECOVER_ON_STARTUP:true}
     # P0 阶段处理器是占位实现，重新入队没有意义；接入真实处理器后改为 true
-    requeue-pending-on-startup: false
+    requeue-pending-on-startup: ${TASK_REQUEUE_PENDING_ON_STARTUP:false}
     # 占位处理器开关：接入真实处理器时必须改为 false，否则会争抢任务类型导致启动失败
-    placeholder-enabled: true
+    placeholder-enabled: ${TASK_PLACEHOLDER_ENABLED:true}
   # 页面版式预览（TODO 3.3）与兼容性验收（TODO 4.1）
   preview:
     # 预览渲染的默认 DPI 与上限

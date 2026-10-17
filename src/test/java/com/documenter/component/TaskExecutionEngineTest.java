@@ -66,6 +66,17 @@ class TaskExecutionEngineTest {
     }
 
     @Test
+    void pendingLegacyImageTaskFailsWithoutStartingAnyHandlerOrRetry() {
+        task.setTaskType("IMAGE_GEN");
+        when(handler.supports(TaskType.IMAGE_GEN)).thenReturn(true);
+        clearInvocations(handler);
+        engine.execute(10L);
+        verify(tasks).finish(eq(10L), eq("FAILED"), eq(35), eq("TASK_TYPE_DISABLED"), anyString(), anyList());
+        verifyNoInteractions(workers, steps, handler);
+        verify(tasks, never()).updateById(any(ProcessingTask.class));
+    }
+
+    @Test
     void timeoutCancelsWorkerAndIsNotRetried() throws Exception {
         Future<?> future = mock(Future.class);
         doReturn(future).when(workers).submit(any(Runnable.class));

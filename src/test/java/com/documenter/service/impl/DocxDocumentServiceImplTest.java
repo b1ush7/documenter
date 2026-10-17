@@ -49,8 +49,22 @@ class DocxDocumentServiceImplTest {
     private final FileStorage fileStorage = mock(FileStorage.class);
     private final VersionWriter versionWriter = mock(VersionWriter.class);
     private final FileService fileService = mock(FileService.class);
+    private final DocxTemplateGenerationService templateGeneration = mock(DocxTemplateGenerationService.class);
     private final DocxDocumentServiceImpl service = new DocxDocumentServiceImpl(
-            versionService, fileStorage, versionWriter, fileService);
+            versionService, fileStorage, versionWriter, fileService, templateGeneration);
+
+    @Test
+    void templateParametersDispatchToTemplateGenerationWithoutCreatingStructuredDocument() {
+        var request = new GenerateDocxDTO();
+        request.setTemplateId(11L);
+        request.setTemplateVersion(3);
+        request.setVariables(java.util.Map.of("title", "周报"));
+        var result = new FileAssetVO();
+        when(templateGeneration.generate(USER_ID, request)).thenReturn(result);
+        assertEquals(result, service.generate(USER_ID, request));
+        verify(templateGeneration).generate(USER_ID, request);
+        verifyNoInteractions(fileService, fileStorage, versionService, versionWriter);
+    }
 
     @Test
     void mixedFormattingAndTextPlanPreservesContentAndListDefinitions() throws Exception {

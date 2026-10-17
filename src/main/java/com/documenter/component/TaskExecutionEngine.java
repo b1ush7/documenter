@@ -108,6 +108,11 @@ public class TaskExecutionEngine {
             finish(taskId, TaskStatus.FAILED, currentProgress(taskId), "INVALID_TASK_TYPE", safeMessage(e));
             return;
         }
+        if (type.isRetired()) {
+            finish(taskId, TaskStatus.FAILED, currentProgress(taskId), "TASK_TYPE_DISABLED",
+                    "图片生成任务已停用，请使用图片基础处理接口");
+            return;
+        }
         Optional<TaskHandler> handler = handlerRegistry.find(type);
         if (handler.isEmpty()) {
             finish(taskId, TaskStatus.FAILED, currentProgress(taskId), "NO_HANDLER",
