@@ -42,5 +42,13 @@ public interface XlsxDocumentService {
     java.util.Map<String, XlsxStructureVO.Cell> validateFormulaPlan(
             Long userId, Long fileId, Integer sourceVersion, DocumentEditPlan plan);
 
+    /** 校验公式、建表和图表计划；返回公式目标修改前内容供差异展示。 */
+    java.util.Map<String, XlsxStructureVO.Cell> validateAiPlan(
+            Long userId, Long fileId, Integer sourceVersion, DocumentEditPlan plan);
+
     VersionVO editFormulaPlan(Long userId, Long fileId, Integer sourceVersion, DocumentEditPlan plan, String instruction);
+
+    /** 执行公式、建表和图表计划，整份计划只写一个新版本。 */
+    VersionVO editAiPlan(Long userId, Long fileId, Integer sourceVersion,
+                         DocumentEditPlan plan, String instruction);
 }

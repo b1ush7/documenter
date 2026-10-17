@@ -122,7 +122,7 @@ public class AiReplyServiceImpl implements AiReplyService {
                     var context = planContext(userId, reservation.session(), request.getVersionNo());
                     validator.validateForContext(merge(result), context);
                     if (context.xlsxStructure() != null) {
-                        spreadsheets.validateFormulaPlan(userId, context.fileId(), context.versionNo(), merge(result));
+                        spreadsheets.validateAiPlan(userId, context.fileId(), context.versionNo(), merge(result));
                     }
                 } catch (BusinessException invalidPlan) {
                     result = new AgentRunResult("本次编辑计划无法整体执行，请调整指令后重试。",
@@ -269,14 +269,20 @@ public class AiReplyServiceImpl implements AiReplyService {
             var context = planContext(userId, session, reply.getSourceVersion());
             validator.validateForContext(merge(result), context);
             if (context.xlsxStructure() != null) {
-                var before = spreadsheets.validateFormulaPlan(userId, session.getFileId(), reply.getSourceVersion(), merge(result));
+                var before = spreadsheets.validateAiPlan(
+                        userId, session.getFileId(), reply.getSourceVersion(), merge(result));
                 for (var operation : merge(result).operations()) {
-                    var target = XlsxFormulaTarget.parse(operation.target());
-                    var cell = before.get(target.key());
-                    changes.add(new AiReplyVO.PlannedChange(operation.type(), operation.target(),
-                            cell == null || "BLANK".equals(cell.type()) ? null
-                                    : cell.formula() == null ? cell.value() : "=" + cell.formula(),
-                            "=" + operation.content().replaceFirst("^=", ""), operation.reason()));
+                    if (operation.operationType() == DocumentEditPlan.OperationType.SET_FORMULA) {
+                        var target = XlsxFormulaTarget.parse(operation.target());
+                        var cell = before.get(target.key());
+                        changes.add(new AiReplyVO.PlannedChange(operation.type(), operation.target(),
+                                cell == null || "BLANK".equals(cell.type()) ? null
+                                        : cell.formula() == null ? cell.value() : "=" + cell.formula(),
+                                "=" + operation.content().replaceFirst("^=", ""), operation.reason()));
+                    } else {
+                        changes.add(new AiReplyVO.PlannedChange(operation.type(), operation.target(),
+                                null, xlsxPlanPreview(operation), operation.reason()));
+                    }
                 }
                 return new AiReplyVO(AiMessageVO.from(reply), reply.getRunStatus(), reply.getPlanStatus(),
                         reply.getSourceVersion(), reply.getOutputVersion(), result, List.copyOf(changes));
@@ -361,6 +367,28 @@ public class AiReplyServiceImpl implements AiReplyService {
             return json.readValue(reply.getResultJson(), AgentRunResult.class);
         } catch (RuntimeException failure) {
             throw new BusinessException(500, "已保存的回复结果无法读取");
+        }
+    }
+
+    private String xlsxPlanPreview(DocumentEditPlan.Operation operation) {
+        try {
+            var content = json.readTree(operation.content());
+            if (operation.operationType() == DocumentEditPlan.OperationType.CREATE_TABLE) {
+                int columns = content.path("headers").size();
+                int rows = content.path("rows").size();
+                var chart = content.path("chart");
+                String chartText = chart.isObject()
+                        ? "，并生成 " + chart.path("type").asText() + " 图表" : "";
+                return "创建 " + columns + " 列 × " + rows + " 行表格" + chartText;
+            }
+            if (operation.operationType() == DocumentEditPlan.OperationType.CREATE_CHART) {
+                return "生成 " + content.path("type").asText() + " 图表："
+                        + content.path("categoriesRange").asText() + " -> "
+                        + content.path("valuesRange").asText();
+            }
+            return "XLSX 操作";
+        } catch (RuntimeException invalid) {
+            return "XLSX 操作";
         }
     }
 

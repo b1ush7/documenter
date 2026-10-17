@@ -427,7 +427,8 @@ public class AgentServiceImpl implements AgentService {
                 2. 根据用户要求，用编辑工具逐个提出修改；
                 3. 修改工具只生成待确认的计划，不会立即改动文档，因此可以放心提出；
                 4. 完成后用简洁的中文说明提出了哪些待确认修改。
-                5. XLSX 首批仅支持 set_formula：根据真实列名、数据和用户目的给出单个目标单元格的公式与说明；
+                5. XLSX 支持 set_formula、create_xlsx_table、create_xlsx_chart：公式必须基于真实列名和数据；
+                   新表 dataJson 必须由用户目标或已读取内容支撑；图表只绑定真实区域和数值。
                    不得虚构工作表或数据。上下文被截断时须说明限制，不能声称已检查整张表。
 
                 硬性约束：

@@ -121,7 +121,13 @@ public record DocumentEditPlan(
         FORMAT_PARAGRAPH(false),
 
         /** XLSX 单单元格公式，target 使用原始工作表名称!A1，content 为公式。 */
-        SET_FORMULA(true);
+        SET_FORMULA(true),
+
+        /** XLSX 新工作表纯值表格；content 为受限 JSON，target 为 工作表!起始单元格。 */
+        CREATE_TABLE(true),
+
+        /** XLSX 基础柱状/折线/饼图；content 为受限 JSON，target 为 工作表!图表左上单元格。 */
+        CREATE_CHART(true);
 
         private final boolean requiresContent;
 

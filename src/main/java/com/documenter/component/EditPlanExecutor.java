@@ -26,13 +26,19 @@ public class EditPlanExecutor {
         if (plan == null || plan.isEmpty()) {
             throw new BusinessException(422, "没有可执行的编辑操作");
         }
-        boolean formula = plan.operations().stream().anyMatch(op -> op.operationType() == DocumentEditPlan.OperationType.SET_FORMULA);
-        if (formula && plan.operations().stream().anyMatch(op -> op.operationType() != DocumentEditPlan.OperationType.SET_FORMULA)) {
+        boolean xlsx = plan.operations().stream().anyMatch(op -> isXlsxOperation(op.operationType()));
+        if (xlsx && plan.operations().stream().anyMatch(op -> !isXlsxOperation(op.operationType()))) {
             throw new BusinessException(422, "同一计划不能混合 DOCX 与 XLSX 操作");
         }
-        VersionVO version = formula ? xlsxDocumentService.editFormulaPlan(userId, fileId, expectVersion, plan, instruction)
+        VersionVO version = xlsx ? xlsxDocumentService.editAiPlan(userId, fileId, expectVersion, plan, instruction)
                 : docxDocumentService.editPlan(userId, fileId, expectVersion, plan, instruction);
         return new ExecutionResult(version, List.of("编辑 " + plan.operations().size() + " 处"));
+    }
+
+    private static boolean isXlsxOperation(DocumentEditPlan.OperationType type) {
+        return type == DocumentEditPlan.OperationType.SET_FORMULA
+                || type == DocumentEditPlan.OperationType.CREATE_TABLE
+                || type == DocumentEditPlan.OperationType.CREATE_CHART;
     }
 
     /** 保留原有服务层结果结构；一次计划现在只产生一个原子批次。 */

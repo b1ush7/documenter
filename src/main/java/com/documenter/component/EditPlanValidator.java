@@ -82,7 +82,7 @@ public class EditPlanValidator {
         int deletions = 0;
         int images = 0;
         Set<String> formulaTargets = new HashSet<>();
-        boolean hasFormula = false;
+        boolean hasXlsx = false;
         boolean hasDocx = false;
 
         for (int index = 0; index < plan.operations().size(); index++) {
@@ -97,16 +97,26 @@ public class EditPlanValidator {
                 continue;
             }
 
-            if (type == OperationType.SET_FORMULA) {
-                hasFormula = true;
-                try {
-                    var target = XlsxFormulaTarget.parse(operation.target());
-                    if (!formulaTargets.add(target.key())) problems.add(position + "重复修改同一个公式目标");
-                } catch (BusinessException invalid) { problems.add(position + invalid.getMessage()); }
-                if (operation.content() == null || operation.content().isBlank() || operation.content().length() > 8192) {
-                    problems.add(position + "公式长度必须为 1 到 8192 字符");
+            if (isXlsxOperation(type)) {
+                hasXlsx = true;
+                if (operation.target() == null || operation.target().isBlank()) {
+                    problems.add(position + "缺少 XLSX 目标");
                 }
-                if (operation.image() != null || operation.format() != null) problems.add(position + "公式操作不能携带图片或段落格式");
+                if (operation.content() == null || operation.content().isBlank()
+                        || operation.content().length() > (type == OperationType.SET_FORMULA ? 8192 : 100_000)) {
+                    problems.add(position + "的 XLSX 操作内容为空或超长");
+                }
+                if (operation.image() != null || operation.format() != null) {
+                    problems.add(position + "的 XLSX 操作不能携带图片或段落格式");
+                }
+                if (type == OperationType.SET_FORMULA) {
+                    try {
+                        var target = XlsxFormulaTarget.parse(operation.target());
+                        if (!formulaTargets.add(target.key())) problems.add(position + "重复修改同一个公式目标");
+                    } catch (BusinessException invalid) {
+                        problems.add(position + invalid.getMessage());
+                    }
+                }
                 continue;
             }
             hasDocx = true;
@@ -189,7 +199,7 @@ public class EditPlanValidator {
         }
 
         if (images > 20) problems.add("单次计划最多插入 20 张图片");
-        if (hasFormula && hasDocx) problems.add("同一计划不能混合 DOCX 与 XLSX 操作");
+        if (hasXlsx && hasDocx) problems.add("同一计划不能混合 DOCX 与 XLSX 操作");
 
         for (Operation operation : plan.operations()) {
             if (operation.operationType() == OperationType.SET_CELL_TEXT && operation.target() != null) {
@@ -221,11 +231,16 @@ public class EditPlanValidator {
     public void validateForContext(DocumentEditPlan plan, ToolExecutionContext context) {
         validate(plan, context.blockIds());
         for (var operation : plan.operations()) {
-            if (operation.operationType() == OperationType.SET_FORMULA) {
-                var target = XlsxFormulaTarget.parse(operation.target());
-                if (!"XLSX".equals(context.format()) || context.xlsxStructure() == null
-                        || context.xlsxStructure().sheets().stream().noneMatch(sheet -> sheet.name().equalsIgnoreCase(target.sheetName()))) {
-                    throw new BusinessException(422, "公式目标工作表不属于当前 XLSX 版本");
+            if (isXlsxOperation(operation.operationType())) {
+                if (!"XLSX".equals(context.format()) || context.xlsxStructure() == null) {
+                    throw new BusinessException(422, "当前文档格式不能执行 XLSX 计划");
+                }
+                if (operation.operationType() == OperationType.SET_FORMULA) {
+                    var target = XlsxFormulaTarget.parse(operation.target());
+                    if (context.xlsxStructure().sheets().stream()
+                            .noneMatch(sheet -> sheet.name().equalsIgnoreCase(target.sheetName()))) {
+                        throw new BusinessException(422, "公式目标工作表不属于当前 XLSX 版本");
+                    }
                 }
             } else if (!"DOCX".equals(context.format())) {
                 throw new BusinessException(422, "当前文档格式不能执行 DOCX 计划");
@@ -243,6 +258,12 @@ public class EditPlanValidator {
             builder.append(type.name());
         }
         return builder.toString();
+    }
+
+    private static boolean isXlsxOperation(OperationType type) {
+        return type == OperationType.SET_FORMULA
+                || type == OperationType.CREATE_TABLE
+                || type == OperationType.CREATE_CHART;
     }
 
     /** 供诊断使用。 */

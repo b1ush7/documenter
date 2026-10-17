@@ -167,6 +167,32 @@ class AiReplyServiceImplTest {
         verifyNoInteractions(workflow.storage(), workflow.writer());
     }
 
+    @Test
+    void tableAndChartReplyPreviewAndConfirmIntoOneWorkbookVersion() throws Exception {
+        var workflow = tableChartWorkflow();
+
+        var pending = workflow.service().create(7L, 1L, workflow.request());
+
+        assertEquals("PENDING", pending.planStatus());
+        assertEquals("CREATE_TABLE", pending.changes().getFirst().type());
+        assertNull(pending.changes().getFirst().before());
+        assertTrue(pending.changes().getFirst().after().contains("2 列 × 2 行"));
+        assertTrue(pending.changes().getFirst().after().contains("BAR"));
+        verifyNoInteractions(workflow.storage(), workflow.writer());
+
+        var confirmed = workflow.service().confirm(7L, 1L, pending.message().getId());
+        assertEquals(2, confirmed.outputVersion());
+        var content = org.mockito.ArgumentCaptor.forClass(byte[].class);
+        verify(workflow.storage()).store(content.capture(), eq("xlsx"));
+        try (var workbook = new org.apache.poi.xssf.usermodel.XSSFWorkbook(
+                new java.io.ByteArrayInputStream(content.getValue()))) {
+            var sheet = workbook.getSheet("汇总");
+            assertEquals("产品 A", sheet.getRow(1).getCell(0).getStringCellValue());
+            assertEquals(120, sheet.getRow(1).getCell(1).getNumericCellValue());
+            assertEquals(1, sheet.getDrawingPatriarch().getCharts().size());
+        }
+    }
+
     private FormulaWorkflow formulaWorkflow(boolean blank, String formula) throws Exception {
         byte[] source;
         try (var workbook = new org.apache.poi.xssf.usermodel.XSSFWorkbook(); var output = new java.io.ByteArrayOutputStream()) {
@@ -214,6 +240,50 @@ class AiReplyServiceImplTest {
 
     private record FormulaWorkflow(AiReplyServiceImpl service, FileStorage storage, VersionWriter writer,
                                    CreateAiReplyDTO request) { }
+
+    private FormulaWorkflow tableChartWorkflow() throws Exception {
+        byte[] source;
+        try (var workbook = new org.apache.poi.xssf.usermodel.XSSFWorkbook();
+             var output = new java.io.ByteArrayOutputStream()) {
+            workbook.createSheet("数据").createRow(0).createCell(0).setCellValue("source");
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        var asset = new FileAsset();
+        asset.setId(10L);
+        asset.setExtension("xlsx");
+        when(versions.downloadVersion(7L, 10L, 1)).thenReturn(new FileDownload(asset,
+                new ByteArrayResource(source), source.length,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "source.xlsx"));
+        var storage = mock(FileStorage.class);
+        var writer = mock(VersionWriter.class);
+        when(storage.store(any(byte[].class), eq("xlsx"))).thenReturn("ai-table-chart.xlsx");
+        var saved = new com.documenter.entity.DocumentVersion();
+        saved.setVersionNo(2);
+        when(writer.appendVersion(eq(10L), eq(7L), any(),
+                eq(com.documenter.enums.ChangeType.AI_EDIT), any(), any(), eq(1))).thenReturn(saved);
+        var spreadsheets = new XlsxDocumentServiceImpl(
+                versions, storage, writer, new com.documenter.configuration.StorageProperties());
+        var stub = new com.documenter.component.StubModelProvider(properties);
+        var validator = new EditPlanValidator(properties);
+        var realAgent = new AgentServiceImpl(properties, stub, documents, spreadsheets, versions, validator,
+                new EditPlanExecutor(documents, spreadsheets),
+                mock(com.documenter.component.AiDailyCallQuota.class),
+                List.of(new com.documenter.component.tool.CreateXlsxTableTool(spreadsheets)));
+        var realService = new AiReplyServiceImpl(chats, sessions, messages, realAgent, documents,
+                spreadsheets, versions, stub, properties, validator, audit, transactions);
+        var request = request();
+        request.setContent("[stub-tool] create_xlsx_table " + json.writeValueAsString(Map.of(
+                "sheetName", "汇总",
+                "dataJson", "{\"headers\":[\"项目\",\"金额\"],"
+                        + "\"rows\":[[\"产品 A\",120],[\"产品 B\",80]]}",
+                "chartType", "BAR",
+                "categoryColumn", "项目",
+                "valueColumn", "金额",
+                "chartTitle", "金额对比",
+                "reason", "生成汇总表和图表")));
+        return new FormulaWorkflow(realService, storage, writer, request);
+    }
 
     @Test
     void imageReplyRoundTripsPreviewAndConfirmationEmbedsPinnedImageOnce() throws Exception {

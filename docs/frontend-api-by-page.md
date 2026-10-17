@@ -901,7 +901,7 @@ POST /ai/sessions/{sessionId}/replies/{messageId}/confirm
 POST /ai/sessions/{sessionId}/replies/{messageId}/discard
 ```
 
-发送体：`{"content":"把第二段改正式一点","versionNo":1,"idempotencyKey":"客户端生成的稳定键","sources":[{"title":"产品说明","url":"https://example.test","excerpt":"待核验摘录"}]}`。`sources` 可有 0～5 条，只能是纯数据文本；服务端会回显来源并给出 `verificationNotice`，不表示已联网核验。绑定文档支持 DOCX 编辑及 XLSX 单元格公式，versionNo 必填；纯对话不传版本。旧会话 CRUD 不变。
+发送体：`{"content":"把第二段改正式一点","versionNo":1,"idempotencyKey":"客户端生成的稳定键","sources":[{"title":"产品说明","url":"https://example.test","excerpt":"待核验摘录"}]}`。`sources` 可有 0～5 条，只能是纯数据文本；服务端会回显来源并给出 `verificationNotice`，不表示已联网核验。绑定文档支持 DOCX 编辑，以及 XLSX 公式、新表格和基础图表，versionNo 必填；纯对话不传版本。旧会话 CRUD 不变。
 
 返回 `AiReply`，包含助手 `message`、`runStatus`、`planStatus`、`sourceVersion`、`outputVersion`、过程与用量 `result`、确认前逐项内容差异 `changes`。完整字段和状态规则见 [API.md 第 8 节](../API.md#8-ai-回复与确认编辑)。
 
@@ -916,6 +916,8 @@ POST /ai/sessions/{sessionId}/replies/{messageId}/discard
 每日额度按 ChatModel 调用尝试计数，包含智能体重试。生成回复的业务码 429（额度用尽）或 503（无法检查额度）仍可能带 `data=AiReply`，应先保存 message.id 和失败状态，再展示 msg；禁止确认或自动换键重试。GET 查询以业务码 0 返回同一 FAILED 记录；原键重放仍返回原失败结果。额度恢复后由用户用新键发送。规则见 [API.md 第 8.5 节](../API.md#85-每用户每日调用额度)。
 
 XLSX 会话通过相同接口提出公式要求。`changes[].type=SET_FORMULA` 时展示目标工作表/单元格、before、after 与 reason；原公式和目标公式带等号，普通原值为文本，空白目标 before 为 null，不表示删除。target 是内部“原始工作表名!A1”定位，最后一个 ! 为分隔符，不额外给工作表名加 Excel 引号。用户确认前不写 XLSX；确认后按 outputVersion 预览或调用公式结果接口，不能把公式文本视为已计算的数值结果。当前不支持 AI 区域填充或行列调整；完整规则见 [API.md 第 8.6 节](../API.md#86-待确认的-xlsx-单元格公式)。
+
+`changes[].type=CREATE_TABLE` 时 `before` 为 null，`after` 展示新表列数、行数以及是否附带图表；`CREATE_CHART` 的 `after` 展示图表类型、分类区域和数值区域。两类计划都只能由服务端工具生成，客户端确认时仍只提交空请求体，不能回传或修改 JSON 计划。确认后一次生成一个 AI_EDIT 版本，可按 versionNo 读取新工作表/图表或预览。限制和协议见 [API.md 第 8.7 节](../API.md#87-待确认的-xlsx-新表格与基础图表)。
 
 ---
 

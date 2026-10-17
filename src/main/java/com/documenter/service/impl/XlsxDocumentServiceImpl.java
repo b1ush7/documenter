@@ -55,6 +55,17 @@ import org.apache.poi.ss.util.CellRangeAddress;
 import org.apache.poi.ss.util.CellReference;
 import org.apache.poi.ss.util.NumberToTextConverter;
 import org.apache.poi.ss.util.WorkbookUtil;
+import org.apache.poi.xddf.usermodel.chart.AxisCrosses;
+import org.apache.poi.xddf.usermodel.chart.AxisPosition;
+import org.apache.poi.xddf.usermodel.chart.BarDirection;
+import org.apache.poi.xddf.usermodel.chart.ChartTypes;
+import org.apache.poi.xddf.usermodel.chart.XDDFBarChartData;
+import org.apache.poi.xddf.usermodel.chart.XDDFCategoryAxis;
+import org.apache.poi.xddf.usermodel.chart.XDDFChartData;
+import org.apache.poi.xddf.usermodel.chart.XDDFDataSource;
+import org.apache.poi.xddf.usermodel.chart.XDDFDataSourcesFactory;
+import org.apache.poi.xddf.usermodel.chart.XDDFNumericalDataSource;
+import org.apache.poi.xddf.usermodel.chart.XDDFValueAxis;
 import org.apache.poi.xssf.usermodel.DefaultIndexedColorMap;
 import org.apache.poi.xssf.usermodel.XSSFChart;
 import org.apache.poi.xssf.usermodel.XSSFCellStyle;
@@ -69,6 +80,8 @@ import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 import javax.imageio.ImageIO;
 import javax.imageio.ImageReader;
@@ -109,6 +122,7 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
     private final FileStorage fileStorage;
     private final VersionWriter versionWriter;
     private final StorageProperties properties;
+    private final ObjectMapper json = new ObjectMapper();
 
     public XlsxDocumentServiceImpl(DocumentVersionService versionService,
                                    FileStorage fileStorage,
@@ -337,55 +351,352 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
     @Override
     public Map<String, XlsxStructureVO.Cell> validateFormulaPlan(Long userId, Long fileId, Integer sourceVersion,
                                                                 DocumentEditPlan plan) {
-        var operations = formulaOperations(plan);
+        requireOnlyFormula(plan);
+        return validateAiPlan(userId, fileId, sourceVersion, plan);
+    }
+
+    @Override
+    public Map<String, XlsxStructureVO.Cell> validateAiPlan(Long userId, Long fileId,
+                                                             Integer sourceVersion,
+                                                             DocumentEditPlan plan) {
+        requireAiPlan(plan);
         var source = versionService.downloadVersion(userId, fileId, sourceVersion);
         if (!isXlsx(source)) throw new BusinessException(400, "当前版本不是 XLSX 文档");
         try (InputStream input = source.resource().getInputStream(); var workbook = new XSSFWorkbook(input)) {
             Map<String, XlsxStructureVO.Cell> before = new HashMap<>();
-            for (var operation : operations) {
-                var sheet = workbook.getSheet(operation.getSheetName());
+            for (var operation : plan.operations()) {
+                if (operation.operationType() != DocumentEditPlan.OperationType.SET_FORMULA) {
+                    continue;
+                }
+                var target = XlsxFormulaTarget.parse(operation.target());
+                var sheet = workbook.getSheet(target.sheetName());
                 if (sheet == null) throw new BusinessException(404, "公式目标工作表不存在");
-                var address = new CellAddress(operation.getCell());
+                var address = new CellAddress(target.cell());
                 var row = sheet.getRow(address.getRow());
                 var cell = row == null ? null : row.getCell(address.getColumn());
-                var target = XlsxFormulaTarget.of(operation.getSheetName(), operation.getCell());
-                before.put(target.key(), cell == null ? emptyCell(address.getRow(), address.getColumn()) : readCell(workbook, cell));
+                before.put(target.key(), cell == null
+                        ? emptyCell(address.getRow(), address.getColumn())
+                        : readCell(workbook, cell));
             }
-            applyOperations(workbook, operations);
+            applyAiOperations(workbook, plan);
             return Map.copyOf(before);
         } catch (BusinessException failure) {
             throw failure;
         } catch (IOException | RuntimeException failure) {
-            throw new BusinessException(422, "XLSX 公式计划无法校验或内容已损坏");
+            throw new BusinessException(422, "XLSX AI 计划无法校验或内容已损坏");
         }
     }
 
     @Override
     public VersionVO editFormulaPlan(Long userId, Long fileId, Integer sourceVersion, DocumentEditPlan plan, String instruction) {
-        var operations = formulaOperations(plan);
-        return editAndSave(userId, fileId, sourceVersion, instruction,
-                "AI 设置 " + operations.size() + " 个 XLSX 公式", ChangeType.AI_EDIT,
-                workbook -> applyOperations(workbook, operations));
+        requireOnlyFormula(plan);
+        return editAiPlan(userId, fileId, sourceVersion, plan, instruction);
     }
 
-    private List<EditXlsxCellsDTO.Operation> formulaOperations(DocumentEditPlan plan) {
+    @Override
+    public VersionVO editAiPlan(Long userId, Long fileId, Integer sourceVersion,
+                                DocumentEditPlan plan, String instruction) {
+        requireAiPlan(plan);
+        return editAndSave(userId, fileId, sourceVersion, instruction,
+                "AI 执行 " + plan.operations().size() + " 个 XLSX 操作", ChangeType.AI_EDIT,
+                workbook -> applyAiOperations(workbook, plan));
+    }
+
+    private void requireAiPlan(DocumentEditPlan plan) {
         if (plan == null || plan.isEmpty() || plan.operations().size() > 50
                 || plan.operations().size() > properties.getXlsx().getMaxEditOperations()) {
-            throw new BusinessException(422, "公式计划必须包含 1 到处理上限以内的操作");
+            throw new BusinessException(422, "XLSX AI 计划必须包含 1 到处理上限以内的操作");
         }
-        return plan.operations().stream().map(item -> {
-            if (item.operationType() != DocumentEditPlan.OperationType.SET_FORMULA || item.content() == null
-                    || item.content().isBlank() || item.content().length() > 8192 || item.image() != null || item.format() != null) {
-                throw new BusinessException(422, "XLSX 计划仅支持受限的 SET_FORMULA 操作");
+        for (var operation : plan.operations()) {
+            var type = operation.operationType();
+            if (type != DocumentEditPlan.OperationType.SET_FORMULA
+                    && type != DocumentEditPlan.OperationType.CREATE_TABLE
+                    && type != DocumentEditPlan.OperationType.CREATE_CHART) {
+                throw new BusinessException(422, "XLSX 计划包含不支持的操作");
             }
-            var target = XlsxFormulaTarget.parse(item.target());
-            var operation = new EditXlsxCellsDTO.Operation();
-            operation.setType("SET_FORMULA");
-            operation.setSheetName(target.sheetName());
-            operation.setCell(target.cell());
-            operation.setFormula(item.content());
-            return operation;
-        }).toList();
+            if (operation.target() == null || operation.target().isBlank()
+                    || operation.content() == null || operation.content().isBlank()
+                    || operation.image() != null || operation.format() != null) {
+                throw new BusinessException(422, "XLSX 操作字段不完整");
+            }
+        }
+    }
+
+    private static void requireOnlyFormula(DocumentEditPlan plan) {
+        requireAiPlanStatic(plan);
+        if (plan.operations().stream().anyMatch(operation ->
+                operation.operationType() != DocumentEditPlan.OperationType.SET_FORMULA)) {
+            throw new BusinessException(422, "该兼容入口仅接受 SET_FORMULA 操作");
+        }
+    }
+
+    private static void requireAiPlanStatic(DocumentEditPlan plan) {
+        if (plan == null || plan.isEmpty()) {
+            throw new BusinessException(422, "XLSX AI 计划不能为空");
+        }
+    }
+
+    private void applyAiOperations(XSSFWorkbook workbook, DocumentEditPlan plan) {
+        for (var operation : plan.operations()) {
+            switch (operation.operationType()) {
+                case SET_FORMULA -> applyAiFormula(workbook, operation);
+                case CREATE_TABLE -> createTable(workbook, operation);
+                case CREATE_CHART -> createChart(workbook, operation);
+                default -> throw new BusinessException(422, "不支持的 XLSX AI 操作");
+            }
+        }
+    }
+
+    private static void applyAiFormula(XSSFWorkbook workbook,
+                                       DocumentEditPlan.Operation operation) {
+        var target = XlsxFormulaTarget.parse(operation.target());
+        XSSFSheet sheet = workbook.getSheet(target.sheetName());
+        if (sheet == null) throw new BusinessException(404, "公式目标工作表不存在");
+        requireWritableSheet(sheet);
+        if (operation.content().length() > 8192) {
+            throw new BusinessException(422, "公式长度超过上限");
+        }
+        var address = new CellAddress(target.cell());
+        requireEditableMergedCell(sheet, address);
+        Row row = sheet.getRow(address.getRow());
+        if (row == null) row = sheet.createRow(address.getRow());
+        Cell cell = row.getCell(address.getColumn());
+        if (cell != null && cell.isPartOfArrayFormulaGroup()) {
+            throw new BusinessException(422, "暂不支持修改数组公式单元格：" + target.target());
+        }
+        if (cell == null) cell = row.createCell(address.getColumn());
+        setFormula(cell, operation.content(), target.target());
+    }
+
+    private void createTable(XSSFWorkbook workbook, DocumentEditPlan.Operation operation) {
+        var target = XlsxFormulaTarget.parse(operation.target());
+        try {
+            WorkbookUtil.validateSheetName(target.sheetName());
+        } catch (IllegalArgumentException invalid) {
+            throw new BusinessException(400, "工作表名称不合法");
+        }
+        if (workbook.getSheet(target.sheetName()) != null) {
+            throw new BusinessException(409, "目标工作表已存在：" + target.sheetName());
+        }
+        JsonNode content = parseJsonContent(operation.content(), "表格");
+        JsonNode headers = content.path("headers");
+        JsonNode rows = content.path("rows");
+        if (!headers.isArray() || headers.isEmpty() || headers.size() > 100) {
+            throw new BusinessException(422, "表格表头必须包含 1 到 100 列");
+        }
+        if (!rows.isArray() || rows.size() > 1000) {
+            throw new BusinessException(422, "表格数据行数超过限制");
+        }
+        long cellCount = (long) (rows.size() + 1) * headers.size();
+        if (cellCount > properties.getXlsx().getMaxEditOperations()) {
+            throw new BusinessException(413, "表格单元格数量超过处理限制");
+        }
+
+        List<String> headerNames = new ArrayList<>();
+        for (JsonNode header : headers) {
+            if (!header.isString() || header.asText().isBlank() || header.asText().length() > 200) {
+                throw new BusinessException(422, "表头必须是非空且不超过 200 字符的文本");
+            }
+            headerNames.add(header.asText());
+        }
+        CellReference start = new CellReference(target.cell());
+        if ((long) start.getRow() + rows.size() + 1 > SpreadsheetVersion.EXCEL2007.getMaxRows()
+                || (long) start.getCol() + headers.size() > SpreadsheetVersion.EXCEL2007.getMaxColumns()) {
+            throw new BusinessException(400, "表格范围超出 XLSX 边界");
+        }
+
+        XSSFSheet sheet = workbook.createSheet(target.sheetName());
+        Row headerRow = sheet.createRow(start.getRow());
+        XSSFCellStyle headerStyle = workbook.createCellStyle();
+        headerStyle.cloneStyleFrom(workbook.getCellStyleAt(0));
+        headerStyle.setFillForegroundColor(new XSSFColor(new byte[]{(byte) 0xDC, (byte) 0xE6, (byte) 0xF1},
+                new DefaultIndexedColorMap()));
+        headerStyle.setFillPattern(FillPatternType.SOLID_FOREGROUND);
+        XSSFFont headerFont = workbook.createFont();
+        headerFont.setBold(true);
+        headerStyle.setFont(headerFont);
+        for (int column = 0; column < headerNames.size(); column++) {
+            Cell cell = headerRow.createCell(start.getCol() + column);
+            cell.setCellValue(headerNames.get(column));
+            cell.setCellStyle(headerStyle);
+            int width = Math.max(12, Math.min(60, headerNames.get(column).length() * 2));
+            sheet.setColumnWidth(start.getCol() + column, Math.min(255, width) * 256);
+        }
+        for (int rowIndex = 0; rowIndex < rows.size(); rowIndex++) {
+            JsonNode values = rows.get(rowIndex);
+            if (!values.isArray() || values.size() != headerNames.size()) {
+                throw new BusinessException(422, "表格第 " + (rowIndex + 1) + " 行列数与表头不一致");
+            }
+            Row row = sheet.createRow(start.getRow() + rowIndex + 1);
+            for (int column = 0; column < values.size(); column++) {
+                writePlainValue(row.createCell(start.getCol() + column), values.get(column));
+            }
+        }
+        sheet.createFreezePane(start.getCol(), start.getRow() + 1);
+
+        JsonNode chart = content.path("chart");
+        if (!chart.isMissingNode() && !chart.isNull()) {
+            if (!chart.isObject()) throw new BusinessException(422, "表格图表配置必须是对象");
+            String type = chart.path("type").asText("").trim().toUpperCase(Locale.ROOT);
+            String categoryColumn = chart.path("categoryColumn").asText("").trim();
+            String valueColumn = chart.path("valueColumn").asText("").trim();
+            int categoryIndex = resolveColumn(headerNames, categoryColumn);
+            int valueIndex = resolveColumn(headerNames, valueColumn);
+            int firstDataRow = start.getRow() + 1;
+            int lastDataRow = firstDataRow + rows.size() - 1;
+            requireNumericChartRange(sheet, firstDataRow, lastDataRow, start.getCol() + valueIndex);
+            int chartColumn = start.getCol() + headerNames.size() + 1;
+            int chartRow = start.getRow();
+            if (chartColumn + 9 > SpreadsheetVersion.EXCEL2007.getMaxColumns()) {
+                chartColumn = start.getCol();
+                chartRow = Math.min(SpreadsheetVersion.EXCEL2007.getMaxRows() - 16,
+                        lastDataRow + 2);
+            }
+            createChartAt(workbook, sheet, chartColumn, chartRow, type,
+                    chart.path("title").asText(""), valueColumn,
+                    new CellRangeAddress(firstDataRow, lastDataRow,
+                            start.getCol() + categoryIndex, start.getCol() + categoryIndex),
+                    new CellRangeAddress(firstDataRow, lastDataRow,
+                            start.getCol() + valueIndex, start.getCol() + valueIndex));
+        }
+    }
+
+    private void createChart(XSSFWorkbook workbook, DocumentEditPlan.Operation operation) {
+        var target = XlsxFormulaTarget.parse(operation.target());
+        XSSFSheet sheet = workbook.getSheet(target.sheetName());
+        if (sheet == null) throw new BusinessException(404, "图表目标工作表不存在");
+        JsonNode content = parseJsonContent(operation.content(), "图表");
+        CellRangeAddress categories;
+        CellRangeAddress values;
+        try {
+            categories = CellRangeAddress.valueOf(content.path("categoriesRange").asText(""));
+            values = CellRangeAddress.valueOf(content.path("valuesRange").asText(""));
+        } catch (RuntimeException invalid) {
+            throw new BusinessException(400, "图表分类或数值区域不合法");
+        }
+        if (categories.getNumberOfCells() != values.getNumberOfCells()
+                || categories.getFirstColumn() != categories.getLastColumn()
+                || values.getFirstColumn() != values.getLastColumn()
+                || categories.getFirstRow() != values.getFirstRow()
+                || categories.getLastRow() != values.getLastRow()) {
+            throw new BusinessException(422, "分类区域和数值区域必须是行数相同的单列");
+        }
+        if (categories.getNumberOfCells() > properties.getXlsx().getMaxEditOperations()) {
+            throw new BusinessException(413, "图表数据点数量超过处理限制");
+        }
+        requireNumericChartRange(sheet, values.getFirstRow(), values.getLastRow(),
+                values.getFirstColumn());
+        CellReference anchor = new CellReference(target.cell());
+        int chartColumn = Math.min(SpreadsheetVersion.EXCEL2007.getMaxColumns() - 10,
+                anchor.getCol());
+        int chartRow = Math.min(SpreadsheetVersion.EXCEL2007.getMaxRows() - 16,
+                anchor.getRow());
+        createChartAt(workbook, sheet, chartColumn, chartRow,
+                content.path("type").asText("").trim().toUpperCase(Locale.ROOT),
+                content.path("title").asText(""),
+                content.path("seriesName").asText(""),
+                categories, values);
+    }
+
+    private JsonNode parseJsonContent(String content, String operation) {
+        try {
+            JsonNode node = json.readTree(content);
+            if (node == null || !node.isObject()) {
+                throw new BusinessException(422, operation + "配置必须是 JSON 对象");
+            }
+            return node;
+        } catch (BusinessException failure) {
+            throw failure;
+        } catch (RuntimeException invalid) {
+            throw new BusinessException(422, operation + "配置不是合法 JSON");
+        }
+    }
+
+    private static void writePlainValue(Cell cell, JsonNode value) {
+        if (value == null || value.isNull() || value.isMissingNode()) {
+            cell.setBlank();
+        } else if (value.isNumber()) {
+            double number = value.asDouble();
+            if (!Double.isFinite(number)) throw new BusinessException(422, "表格数字必须是有限值");
+            cell.setCellValue(number);
+        } else if (value.isBoolean()) {
+            cell.setCellValue(value.asBoolean());
+        } else if (value.isString()) {
+            String text = value.asText();
+            if (text.length() > 10_000) throw new BusinessException(413, "表格单元格文本超过限制");
+            cell.setCellValue(text);
+        } else {
+            throw new BusinessException(422, "表格仅支持文本、数字、布尔值或空值");
+        }
+    }
+
+    private static int resolveColumn(List<String> headers, String requested) {
+        if (requested == null || requested.isBlank()) {
+            throw new BusinessException(422, "表格图表必须指定分类列和数值列");
+        }
+        for (int index = 0; index < headers.size(); index++) {
+            if (headers.get(index).equalsIgnoreCase(requested)) return index;
+        }
+        throw new BusinessException(422, "表格中不存在列：" + requested);
+    }
+
+    private static void requireNumericChartRange(XSSFSheet sheet, int firstRow,
+                                                 int lastRow, int column) {
+        int numeric = 0;
+        for (int rowIndex = firstRow; rowIndex <= lastRow; rowIndex++) {
+            Row row = sheet.getRow(rowIndex);
+            Cell cell = row == null ? null : row.getCell(column);
+            if (cell == null || cell.getCellType() == CellType.BLANK) continue;
+            CellType type = cell.getCellType() == CellType.FORMULA
+                    ? cell.getCachedFormulaResultType() : cell.getCellType();
+            if (type != CellType.NUMERIC) {
+                throw new BusinessException(422, "图表数值区域只能包含数字或空白");
+            }
+            numeric++;
+        }
+        if (numeric == 0) throw new BusinessException(422, "图表数值区域没有可绘制的数字");
+    }
+
+    private static void createChartAt(XSSFWorkbook workbook, XSSFSheet sheet,
+                                      int anchorColumn, int anchorRow, String type,
+                                      String title, String seriesName,
+                                      CellRangeAddress categories, CellRangeAddress values) {
+        XDDFDataSource<String> categorySource =
+                XDDFDataSourcesFactory.fromStringCellRange(sheet, categories);
+        XDDFNumericalDataSource<Double> valueSource =
+                XDDFDataSourcesFactory.fromNumericCellRange(sheet, values);
+        XSSFDrawing drawing = sheet.getDrawingPatriarch() instanceof XSSFDrawing existing
+                ? existing : sheet.createDrawingPatriarch();
+        XSSFClientAnchor anchor = drawing.createAnchor(0, 0, 0, 0,
+                anchorColumn, anchorRow,
+                Math.min(SpreadsheetVersion.EXCEL2007.getMaxColumns() - 1, anchorColumn + 9),
+                Math.min(SpreadsheetVersion.EXCEL2007.getMaxRows() - 1, anchorRow + 16));
+        XSSFChart chart = drawing.createChart(anchor);
+        XDDFChartData data;
+        switch (type) {
+            case "BAR" -> {
+                XDDFCategoryAxis categoryAxis = chart.createCategoryAxis(AxisPosition.BOTTOM);
+                XDDFValueAxis valueAxis = chart.createValueAxis(AxisPosition.LEFT);
+                valueAxis.setCrosses(AxisCrosses.AUTO_ZERO);
+                data = chart.createData(ChartTypes.BAR, categoryAxis, valueAxis);
+                ((XDDFBarChartData) data).setBarDirection(BarDirection.COL);
+            }
+            case "LINE" -> {
+                XDDFCategoryAxis categoryAxis = chart.createCategoryAxis(AxisPosition.BOTTOM);
+                XDDFValueAxis valueAxis = chart.createValueAxis(AxisPosition.LEFT);
+                valueAxis.setCrosses(AxisCrosses.AUTO_ZERO);
+                data = chart.createData(ChartTypes.LINE, categoryAxis, valueAxis);
+            }
+            case "PIE" -> data = chart.createData(ChartTypes.PIE, null, null);
+            default -> throw new BusinessException(422, "图表类型只支持 BAR、LINE、PIE");
+        }
+        XDDFChartData.Series series = data.addSeries(categorySource, valueSource);
+        if (seriesName != null && !seriesName.isBlank()) series.setTitle(seriesName);
+        chart.plot(data);
+        if (title != null && !title.isBlank()) {
+            chart.setTitleText(title);
+            chart.setTitleOverlay(false);
+        }
     }
 
     @Override
