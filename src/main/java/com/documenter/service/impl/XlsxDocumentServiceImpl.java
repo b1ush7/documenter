@@ -117,6 +117,13 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
             "(?i)(?:^|[^A-Z0-9_.])(?:WEBSERVICE|HYPERLINK|RTD|DDE|CALL|REGISTER\\.ID)\\s*\\(");
     private static final Pattern EXTERNAL_WORKBOOK_REFERENCE = Pattern.compile(
             "(?i)\\[[^]\\r\\n]+\\][^!\\r\\n]*!");
+    private static final Pattern DATE_SENSITIVE_FUNCTION = Pattern.compile(
+            "(?i)(?:^|[^A-Z0-9_.])(?:DATE|DATEVALUE|TIME|TIMEVALUE|TODAY|NOW|YEAR|MONTH|DAY|"
+                    + "HOUR|MINUTE|SECOND|EDATE|EOMONTH|WEEKDAY|WEEKNUM|ISOWEEKNUM|WORKDAY|"
+                    + "NETWORKDAYS|DATEDIF|DAYS|YEARFRAC)\\s*\\(");
+    private static final Pattern DYNAMIC_ARRAY_FORMULA = Pattern.compile(
+            "(?i)(?:_xlfn\\.|\\b[A-Z_$][A-Z0-9_.$]*\\[[^\\]\\r\\n]+\\]|"
+                    + "\\b[A-Z_$][A-Z0-9_.$]*![A-Z$]+[0-9]+#|\\b[A-Z$]+[0-9]+#)");
 
     private final DocumentVersionService versionService;
     private final FileStorage fileStorage;
@@ -239,9 +246,11 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
     }
 
     private void requireCalculableWorkbook(XSSFWorkbook workbook) {
-        // POI 部分日期函数按 1900 日期系统计算，1904 工作簿会产生日期偏差。
-        if (workbook.isDate1904()) {
-            throw new BusinessException(422, "当前计算引擎暂不支持 1904 日期系统，请在办公软件中重算");
+        boolean usesDateSemantics = workbook.isDate1904() && usesDateSemantics(workbook);
+        if (usesDateSemantics) {
+            throw new BusinessException(422,
+                    "1904 工作簿包含日期函数或日期格式单元格；当前计算引擎仅支持其纯数值公式，"
+                            + "请在办公软件中重算日期相关公式");
         }
         int cells = 0;
         int formulas = 0;
@@ -273,6 +282,10 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
                                                                Cell cell) {
         String address = cell.getAddress().formatAsString();
         String formula = cell.getCellFormula();
+        if (isDynamicOrStructuredFormula(formula)) {
+            return new XlsxFormulaResultsVO.Result(address, formula, "UNSUPPORTED",
+                    null, null, "当前计算引擎不支持动态数组、溢出引用或结构化表引用，请在办公软件中重算");
+        }
         try {
             CellValue result = evaluator.evaluate(cell);
             if (result == null) {
@@ -324,6 +337,7 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
 
     private void recalculateFormulaCaches(XSSFWorkbook workbook) {
         requireCalculableWorkbook(workbook);
+        rejectDynamicFormulaCaches(workbook);
         FormulaEvaluator evaluator = workbook.getCreationHelper().createFormulaEvaluator();
         for (int sheetIndex = 0; sheetIndex < workbook.getNumberOfSheets(); sheetIndex++) {
             XSSFSheet sheet = workbook.getSheetAt(sheetIndex);
@@ -344,6 +358,57 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
                                 + "；本次编辑未保存，可关闭 recalculateFormulas 后在办公软件中重算");
                     }
                 }
+            }
+        }
+    }
+
+    private static boolean usesDateSemantics(XSSFWorkbook workbook) {
+        for (int sheetIndex = 0; sheetIndex < workbook.getNumberOfSheets(); sheetIndex++) {
+            for (Row row : workbook.getSheetAt(sheetIndex)) {
+                for (Cell cell : row) {
+                    if ((cell.getCellType() == CellType.NUMERIC
+                            || cell.getCellType() == CellType.FORMULA)
+                            && DateUtil.isCellDateFormatted(cell)) {
+                        return true;
+                    }
+                    if (cell.getCellType() == CellType.FORMULA
+                            && DATE_SENSITIVE_FUNCTION.matcher(cell.getCellFormula()).find()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        for (var name : workbook.getAllNames()) {
+            String formula = name.getRefersToFormula();
+            if (formula != null && DATE_SENSITIVE_FUNCTION.matcher(formula).find()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isDynamicOrStructuredFormula(String formula) {
+        return formula != null && DYNAMIC_ARRAY_FORMULA.matcher(formula).find();
+    }
+
+    private static void rejectDynamicFormulaCaches(XSSFWorkbook workbook) {
+        for (int sheetIndex = 0; sheetIndex < workbook.getNumberOfSheets(); sheetIndex++) {
+            XSSFSheet sheet = workbook.getSheetAt(sheetIndex);
+            for (Row row : sheet) {
+                for (Cell cell : row) {
+                    if (cell.getCellType() == CellType.FORMULA
+                            && isDynamicOrStructuredFormula(cell.getCellFormula())) {
+                        throw new BusinessException(422,
+                                "公式缓存重算不支持动态数组、溢出引用或结构化表引用："
+                                        + sheet.getSheetName() + "!" + cell.getAddress().formatAsString()
+                                        + "；本次编辑未保存，可关闭 recalculateFormulas 后在办公软件中重算");
+                    }
+                }
+            }
+        }
+        for (var name : workbook.getAllNames()) {
+            if (isDynamicOrStructuredFormula(name.getRefersToFormula())) {
+                throw new BusinessException(422, "公式缓存重算不支持动态命名公式：" + name.getNameName());
             }
         }
     }
