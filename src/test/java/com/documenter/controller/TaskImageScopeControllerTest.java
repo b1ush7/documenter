@@ -52,7 +52,7 @@ class TaskImageScopeControllerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"OCR", "CONVERT", "AI_EDIT", "EXPORT"})
+    @ValueSource(strings = {"CONVERT", "EXPORT"})
     void remainingTypesStillReachServiceWithAuthenticatedOwner(String type) throws Exception {
         mvc.perform(post("/task").contentType(MediaType.APPLICATION_JSON).content("{\"taskType\":\"" + type + "\"}"))
                 .andExpect(jsonPath("$.code").value(0));
@@ -79,12 +79,13 @@ class TaskImageScopeControllerTest {
     }
 
     @Test
-    void placeholderNeverClaimsLegacyImageTypeButStillSupportsDocumentTasks() {
+    void placeholderOnlyCoversHistoricalTypesThatHaveNoRealHandler() {
         var handler = new PlaceholderTaskHandler();
         assertFalse(handler.supports(TaskType.IMAGE_GEN));
-        for (var type : List.of(TaskType.OCR, TaskType.CONVERT, TaskType.AI_EDIT, TaskType.EXPORT)) {
-            assertTrue(handler.supports(type));
-        }
+        assertTrue(handler.supports(TaskType.OCR));
+        assertTrue(handler.supports(TaskType.AI_EDIT));
+        assertFalse(handler.supports(TaskType.CONVERT));
+        assertFalse(handler.supports(TaskType.EXPORT));
     }
 
     @Test

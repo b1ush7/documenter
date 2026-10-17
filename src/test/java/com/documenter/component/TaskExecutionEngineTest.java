@@ -4,6 +4,7 @@ import com.documenter.configuration.TaskExecutorProperties;
 import com.documenter.entity.ProcessingTask;
 import com.documenter.entity.TaskStep;
 import com.documenter.enums.TaskType;
+import com.documenter.exception.BusinessException;
 import com.documenter.mapper.ProcessingTaskMapper;
 import com.documenter.mapper.TaskStepMapper;
 import com.documenter.service.TaskHandler;
@@ -134,8 +135,10 @@ class TaskExecutionEngineTest {
     void retriesKeepUniqueStepNumbersAndCloseSuccessfulStep() {
         task.setTimeoutSeconds(10);
         AtomicInteger calls = new AtomicInteger();
+        java.util.List<Integer> attempts = new java.util.ArrayList<>();
         doAnswer(invocation -> {
             com.documenter.service.TaskExecutionContext context = invocation.getArgument(1);
+            attempts.add(context.attemptNo());
             context.startStep("work", "attempt " + context.attemptNo());
             if (calls.incrementAndGet() == 1) {
                 throw new IllegalStateException("temporary failure");
@@ -147,10 +150,25 @@ class TaskExecutionEngineTest {
         engine.execute(10L);
 
         assertEquals(2, calls.get());
+        assertEquals(List.of(1, 1), attempts);
         assertEquals(List.of(1, 2), insertedSteps.stream().map(TaskStep::getStepNo).toList());
         verify(steps).updateById(argThat((TaskStep step) ->
                 Long.valueOf(2).equals(step.getId()) && "SUCCEEDED".equals(step.getStatus())));
         verify(tasks).finish(eq(10L), eq("SUCCEEDED"), eq(100), isNull(), isNull(), anyList());
+    }
+
+    @Test
+    void deterministicBusinessFailureIsNotRetried() {
+        task.setTimeoutSeconds(10);
+        doThrow(new BusinessException(422, "扫描页需要 OCR"))
+                .when(handler).handle(eq(task), any());
+        runWorkerInline();
+
+        engine.execute(10L);
+
+        verify(handler, times(1)).handle(eq(task), any());
+        verify(tasks).finish(eq(10L), eq("FAILED"), anyInt(), eq("BUSINESS_ERROR"),
+                eq("扫描页需要 OCR"), anyList());
     }
 
     @Test

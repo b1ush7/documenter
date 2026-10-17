@@ -133,6 +133,7 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | DOCX | GET | `/file/{fileId}/versions/{versionNo}/structure` | 是 | 读取 DOCX 结构 |
 | PDF | GET | `/file/{fileId}/versions/{versionNo}/pdf/content` | 是 | 提取 PDF 原生文本并检测页面类型 |
 | PDF | GET | `/file/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview` | 是 | 渲染 PDF 指定页 PNG 预览 |
+| PDF | POST | `/file/{fileId}/versions/{versionNo}/pdf/convert-to-docx` | 是 | 将原生文字 PDF 重建为可编辑 DOCX 新版本 |
 | XLSX | GET | `/file/{fileId}/versions/{versionNo}/xlsx/structure` | 是 | 读取工作表与单元格结构 |
 | XLSX | GET | `/file/{fileId}/versions/{versionNo}/xlsx/range` | 是 | 读取指定矩形区域 |
 | XLSX | GET | `/file/{fileId}/versions/{versionNo}/xlsx/formula-results` | 是 | 即时计算区域内公式，返回结果或错误 |
@@ -155,6 +156,7 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | 任务 | POST | `/task/{taskId}/retry` | 是 | 重试任务 |
 | 任务 | GET | `/task/by-file/{fileId}` | 是 | 查询文件处理历史 |
 | AI 对话 | POST | `/ai/sessions/{sessionId}/replies` | 是 | 生成并保存回复及待确认计划 |
+| AI 对话 | POST | `/ai/sessions/{sessionId}/replies/stream` | 是 | 通过 SSE 流式生成回复 |
 | AI 对话 | GET | `/ai/sessions/{sessionId}/replies/{messageId}` | 是 | 查询回复和确认前修改预览 |
 | AI 对话 | POST | `/ai/sessions/{sessionId}/replies/{messageId}/confirm` | 是 | 确认计划并保存一个新版本 |
 | AI 对话 | POST | `/ai/sessions/{sessionId}/replies/{messageId}/discard` | 是 | 放弃待确认计划 |
@@ -1247,15 +1249,35 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 
 图片会以内嵌方式追加到目标段落，成功时创建新版本。
 
+### 3.22 将 PDF 转换为可编辑 DOCX
+
+`POST /file/{fileId}/versions/{versionNo}/pdf/convert-to-docx`
+
+```json
+{
+  "mode": "LAYOUT",
+  "instruction": "按版式优先重建"
+}
+```
+
+| 字段 | 必填 | 约束 |
+| --- | --- | --- |
+| `mode` | 是 | `EDITABLE`：按阅读行输出，便于编辑；`LAYOUT`：保留文字横向位置、字号、粗斜体和基础行距 |
+| `instruction` | 否 | 最多 500 字符，写入新版本追溯信息 |
+
+接口读取当前用户拥有的明确 PDF 版本，以路径中的 `versionNo` 同时作为源版本和乐观锁期望版本，生成同一文件的新 `CONVERT` / DOCX 版本并返回 [Version](#64-version)。原 PDF 和其他历史版本不变。
+
+转换只重建原生文字、基础字体、阅读行和无文字页的内嵌 PNG/JPEG；不会将整页渲染图嵌入 DOCX 冒充可编辑文档。目录域、脚注、批注、复杂表格和精确分页可能无法完整还原，结果说明会明确列出该限制。任一页面只有图片、没有原生文字时整次转换返回业务码 `422`，必须先完成后续 OCR。空文档、损坏 PDF、页数/字符/图片像素/输出大小超限分别按 `422`、`413` 返回；源版本已变化返回 `409`。转换产物可继续使用既有 DOCX 结构读取、编辑和 AI 确认接口。
+
 ## 5. 异步任务
 
-当前任务框架已经支持提交、排队、状态流转、进度、取消、超时和重试，但默认启用的是占位处理器。占位处理器会更新进度和步骤，不会真正执行 OCR、转换、AI 编辑或导出，也不会产生输出文件。
+当前仅开放两个有真实处理器的任务类型：`CONVERT` 调用 PDF 转 DOCX 处理链，`EXPORT` 调用既有 Office 渲染后端导出 PDF。两者成功后都把产物写入版本历史，并在任务 `outputVersion` 返回明确版本号。`OCR` 与 `AI_EDIT` 继续使用各自现有同步接口，不接受新建异步任务；历史记录仍可查询。默认不启用占位处理器。
 
 IMAGE_GEN 已停用：不接受新建或重试（业务码 400），历史记录、步骤、列表筛选和取消仍保留。旧排队记录在执行/重启恢复时以 FAILED / TASK_TYPE_DISABLED 收尾，不调用处理器或自动重试，也不改写已终态的记录。图片基础操作直接使用第 3.20 节接口，无需异步生成任务。数据库中的历史枚举和记录继续保留，不做删除迁移。
 
 调度与实际处理使用独立的有界线程池，`res.task` 的线程数和队列容量分别应用于两个池。队列满或执行器关闭时，不在请求线程中执行耗时处理，而是将任务记录为 `FAILED`，`errorCode=QUEUE_FULL`，并提示稍后通过现有重试入口重试。若提交时已发生拒绝，创建任务响应中的任务状态也会反映该失败；接受入队后的状态变化通过任务查询获取。
 
-自动重试仅针对处理器异常，最多重试 `maxRetry` 次；超时、取消、执行线程中断和队列拒绝均不自动重试。自动重试的步骤号接续同一任务的历史步骤，失败现场保留。取消任务保留实际进度，成功任务才以 100% 收尾。超时和取消会关闭该次执行上下文并发送线程中断，真实处理器仍须在耗时边界及保存产物前检查取消或中断状态。
+自动重试仅针对非业务处理异常，最多重试 `maxRetry` 次；扫描页需 OCR、版本冲突、输入非法等 `BusinessException` 以 `BUSINESS_ERROR` 立即终止，超时、取消、执行线程中断和队列拒绝也不自动重试。自动重试沿用同一任务 ID 与尝试序号，已写出的版本会被幂等复用。步骤号接续同一任务的历史步骤，失败现场保留。取消任务保留实际进度，成功任务才以 100% 收尾。
 
 ### 5.1 提交任务
 
@@ -1263,24 +1285,23 @@ IMAGE_GEN 已停用：不接受新建或重试（业务码 400），历史记录
 
 ```json
 {
-  "taskType": "AI_EDIT",
+  "taskType": "CONVERT",
   "fileId": 10,
   "inputVersion": 3,
-  "instruction": "把内容改写得更正式",
+  "instruction": "按版式优先转换为 DOCX",
   "idempotencyKey": "7de4494f-9514-4d31-85dc-4fd72bde54ab",
-  "expectVersion": 3,
   "timeoutSeconds": 600
 }
 ```
 
 | 字段 | 必填 | 约束/说明 |
 | --- | --- | --- |
-| `taskType` | 是 | `OCR`、`CONVERT`、`AI_EDIT`、`EXPORT`；不再接受 `IMAGE_GEN` |
-| `fileId` | 否 | 关联当前用户自己的文件；纯生成任务可不传 |
-| `inputVersion` | 否 | 大于等于 1；未传时使用文件当前最新版本；没有 `fileId` 时不得传 |
-| `instruction` | 否 | 最长 2000 |
+| `taskType` | 是 | `CONVERT` 或 `EXPORT`；`OCR`、`AI_EDIT`、`IMAGE_GEN` 仅保留历史查询 |
+| `fileId` | 是 | 必须关联当前用户自己的文件 |
+| `inputVersion` | 否 | 大于等于 1 且不能超过当前最新版本；未传时使用最新版本 |
+| `instruction` | 否 | 最长 2000；`CONVERT` 中出现“版式/layout”时使用版式优先，否则使用可编辑优先 |
 | `idempotencyKey` | 否 | 最长 128；同一用户使用相同键重试提交时返回已有任务 |
-| `expectVersion` | 否 | 大于等于 0；字段已定义，但当前提交实现尚未使用它做冲突判断 |
+| `expectVersion` | 否 | 兼容字段；真实处理器以 `inputVersion` 作为版本冲突依据 |
 | `timeoutSeconds` | 否 | 10～3600；未传时默认 600 秒 |
 
 成功时 `data` 为 [Task](#65-task)。
@@ -1661,13 +1682,20 @@ V6 迁移只为有内容且 versionNo 大于 0 的当前模板回填一条 BASEL
 
 ### 8.1 生成回复
 
-`POST /ai/sessions/{sessionId}/replies`，需要登录、会话归属及 ACTIVE 状态。新流程要求 `res.ai.require-confirmation=true`，关闭时返回业务码 `503`。支持纯对话、DOCX 编辑，以及 XLSX 单元格公式计划（见 8.6）。绑定文件时均要求明确版本。调用同步返回，尚未提供 SSE。
+`POST /ai/sessions/{sessionId}/replies`，需要登录、会话归属及 ACTIVE 状态。新流程要求 `res.ai.require-confirmation=true`，关闭时返回业务码 `503`。支持纯对话、DOCX 编辑，以及 XLSX 单元格公式计划（见 8.6）。绑定文件时均要求明确版本。同步与 SSE 接口共用相同持久化、额度、确认和幂等语义。
 
 ```json
 {
   "content": "把第二段改得更正式，保留表格和图片",
   "versionNo": 1,
-  "idempotencyKey": "550e8400-e29b-41d4-a716-446655440000"
+  "idempotencyKey": "550e8400-e29b-41d4-a716-446655440000",
+  "sources": [
+    {
+      "title": "产品说明",
+      "url": "https://example.test/product",
+      "excerpt": "用户提供的待核验摘要"
+    }
+  ]
 }
 ```
 
@@ -1676,6 +1704,7 @@ V6 迁移只为有内容且 versionNo 大于 0 的当前模板回填一条 BASEL
 | `content` | 必填，非空，最多 2000 字符；去除首尾空白后保存 |
 | `versionNo` | 绑定文件时必填，必须为明确的正版本号；纯对话不允许传入 |
 | `idempotencyKey` | 必填，非空，最多 128 字符，按会话隔离；一次发送意图对应一个稳定键 |
+| `sources` | 可选，最多 5 条；每项 `title` 必填且不超过 200 字符，`url` 不超过 1000 字符，`excerpt` 不超过 2000 字符 |
 
 同一幂等键与相同内容/版本重放时返回原回复，不再次调用模型；键被用于其他内容或版本时返回业务码 `409`。同一会话已有回复正在生成时，其他键的新请求返回 `409`。请求超时后重发应沿用原键；若返回 `RUNNING`，使用查询接口检查进度，不要自动换键重新调用模型。
 
@@ -1702,7 +1731,9 @@ V6 迁移只为有内容且 versionNo 大于 0 的当前模板回填一条 BASEL
     ], "expected": null}],
     "usage": {"modelCalls": 2, "toolCalls": 1, "inputTokens": 20, "outputTokens": 10,
       "estimatedCost": 0, "costConfigured": false, "elapsedMs": 50},
-    "termination": "COMPLETED", "truncated": false
+    "termination": "COMPLETED", "truncated": false,
+    "sources": [{"title": "产品说明", "url": "https://example.test/product", "excerpt": "用户提供的待核验摘要"}],
+    "verificationNotice": "已回显用户提供的资料来源，服务端未联网核验其真实性。"
   },
   "changes": [{"type": "REPLACE_TEXT", "target": "body/p1",
     "before": "原始段落", "after": "修改后的段落", "reason": "改为正式表述"}]
@@ -1710,6 +1741,21 @@ V6 迁移只为有内容且 versionNo 大于 0 的当前模板回填一条 BASEL
 ```
 
 示例中的 `modelName=stub` 仅为桩模型，不代表真实模型已验收。模型不可用、调用失败或中断时，回复记录为 `runStatus=FAILED`，`planStatus=NONE`，说明保存在回复中；HTTP 成功返回数据不代表模型执行成功，前端必须检查状态。合并计划冲突时 `termination=INVALID_PLAN`，保留已收到的用量，不能确认该结果。未配置计价时 `costConfigured=false`，不能将 `estimatedCost=0` 显示成免费。每日调用额度见 8.5，当前不扣余额。
+
+`sources` 只是用户提供的资料，服务端不会联网验证标题、链接或摘录是否真实。结果会原样回显来源并返回 `verificationNotice`；没有来源时明确提示新增事实需人工核验。涉及外部事实、数字和结论时，客户端必须展示该提示。
+
+### 8.1.1 SSE 流式回复
+
+`POST /ai/sessions/{sessionId}/replies/stream`，请求体与幂等规则同 8.1，响应类型为 `text/event-stream;charset=UTF-8`。事件如下：
+
+| 事件 | data | 说明 |
+| --- | --- | --- |
+| `started` | `{"replyId":123}` | 用户消息和 RUNNING 助手消息已持久化，可立即使用查询接口 |
+| `delta` | `{"text":"增量文本"}` | 真实流式模型的文本增量；多条事件按接收顺序拼接 |
+| `completed` | `AiReply` | 完整结果，状态、计划和确认逻辑与同步接口一致 |
+| `error` | 统一错误对象 | 参数、额度、模型或服务异常；已经创建的 RUNNING 回复按恢复逻辑处理 |
+
+SSE 使用独立虚拟线程执行，不占用任务池。断线或超时会设置取消信号；模型提供者不支持流式能力时退回同步调用并在完成后一次发送完整文本，事件协议不变。客户端仍需以 `completed` 中的 `runStatus`/`planStatus` 为准。
 
 ### 8.2 查询、确认与放弃
 
@@ -1736,7 +1782,7 @@ V6 迁移只为有内容且 versionNo 大于 0 的当前模板回填一条 BASEL
 
 ### 8.3 待确认的 DOCX 图片插入
 
-图片插入复用以上四个回复接口，不新增 HTTP 路径。用户需要提供已上传的 PNG/JPEG 文件 ID 和明确版本；`insert_image` 工具在默认确认模式下只产出计划，不写文档。计划生成时校验图片归属、版本及格式，确认时再次读取同一图片版本校验。即使图片已有更新版本，也不改用最新版本；图片已不可用或不再符合条件时，整次混合编辑失败，不保存部分文本或图片。
+图片插入复用回复生成（同步或 SSE）、查询、确认和放弃接口，不新增编辑专用 HTTP 路径。用户需要提供已上传的 PNG/JPEG 文件 ID 和明确版本；`insert_image` 工具在默认确认模式下只产出计划，不写文档。计划生成时校验图片归属、版本及格式，确认时再次读取同一图片版本校验。即使图片已有更新版本，也不改用最新版本；图片已不可用或不再符合条件时，整次混合编辑失败，不保存部分文本或图片。
 
 服务端返回的 `result.plans[].operations[]` 新增 `INSERT_IMAGE` 类型和可选 `image` 字段；这不是让客户端提交编辑计划的新请求体：
 
@@ -1758,7 +1804,7 @@ V6 迁移只为有内容且 versionNo 大于 0 的当前模板回填一条 BASEL
 
 ### 8.4 待确认的 DOCX 基础格式
 
-基础格式复用现有 `edit_paragraph` 工具和四个回复接口，不新增 HTTP 路径或数据库迁移。工具参数为 `operation=FORMAT_PARAGRAPH`、目标 `target`、`formatType`，标题另传整数 `level`；不使用文本 `content`。服务端保存的计划如下：
+基础格式复用现有 `edit_paragraph` 工具和同步/SSE 回复接口，不新增编辑专用 HTTP 路径或数据库迁移。工具参数为 `operation=FORMAT_PARAGRAPH`、目标 `target`、`formatType`，标题另传整数 `level`；不使用文本 `content`。服务端保存的计划如下：
 
 ```json
 {
@@ -1798,7 +1844,7 @@ V6 迁移只为有内容且 versionNo 大于 0 的当前模板回填一条 BASEL
 
 ### 8.6 待确认的 XLSX 单元格公式
 
-复用回复生成、查询、确认和放弃四个接口，不新增 HTTP 路径或数据库迁移。将会话绑定已有 XLSX 文件，以明确 versionNo 发送自然语言指令；模型通过 read_document 读取当前版本的工作表、列名和实际单元格内容，再调用 set_formula。真实模型的自然语言效果尚未验收，桩模型完整链路已覆盖。
+复用回复生成（同步或 SSE）、查询、确认和放弃接口，不新增公式专用 HTTP 路径或数据库迁移。将会话绑定已有 XLSX 文件，以明确 versionNo 发送自然语言指令；模型通过 read_document 读取当前版本的工作表、列名和实际单元格内容，再调用 set_formula。真实模型的自然语言效果尚未验收，桩模型完整链路已覆盖。
 
 set_formula 工具每次接受一个 sheetName、一个 A1 格式的 cell、formula 和必填说明 reason。工作表必须真实存在，目标可以是空白单元格；公式可带开头等号，保存计划时去除该等号。工具不接收用户 ID、文件 ID 或版本，均由已认证上下文提供。一次回复可收集多个单元格计划，但总操作数不得超过 50 或配置的 XLSX 编辑上限；同一目标不允许重复写入，大小写及绝对引用别名也视为同一目标。
 
@@ -1837,12 +1883,11 @@ target 是内部定位形式“原始工作表名称!规范单元格”，单元
 
 ## 9. 当前实现边界
 
-- 已提供同步 AI 回复、DOCX 文本/图片/基础格式及 XLSX 单元格公式差异、确认与放弃接口，以及可配置的每日调用额度；真实模型效果尚未验收，流式响应和前端页面尚未实现。
-- LangChain4j 工具循环已接入回复 Controller；尚未接入异步任务处理器。
-- 异步任务默认使用占位处理器，不产生真实处理结果。
-- 尚未提供 SSE 或 WebSocket 进度推送。
+- 已提供同步及 SSE 流式 AI 回复、来源回显与核验提示、DOCX 文本/图片/基础格式及 XLSX 单元格公式差异、确认和放弃；真实模型效果尚未验收。
+- LangChain4j 工具循环已接入回复 Controller；CONVERT/EXPORT 已接入真实异步任务处理器，OCR/AI_EDIT 不开放新建异步任务。
+- SSE 用于 AI 回复，不用于异步任务进度；任务进度继续通过 REST 轮询。
 - DOCX 结构块模式使用固定样式；模板模式支持管理员启用的 DOCX 正文/表格纯文本变量，不支持循环、图片变量、主题参数和用户自行上传模板生成。
 - DOCX 块 ID 不是跨版本永久 ID，每次成功编辑后应重新读取结构。
 - 验证码开发配置使用模拟发送，不能直接视为生产短信能力。
 - 管理员可跨用户读取、下载、重命名或软删除文件，并查看、取消或重试任务；尚未提供跨用户 DOCX 内容编辑和版本恢复入口，以免在当前版本模型中错误记录实际操作者。
-- PDF 页面分类是本地启发式检测；扫描页尚未接入 OCR，矢量图形中的文字也不会作为原生文本返回。
+- PDF 页面分类是本地启发式检测；原生文字 PDF 可重建为可编辑 DOCX，扫描页和矢量文字仍需 OCR。

@@ -28,7 +28,9 @@ class AiReplyControllerTest {
 
     @BeforeEach
     void setUp() {
-        mvc = MockMvcBuilders.standaloneSetup(new AiReplyController(service))
+        mvc = MockMvcBuilders.standaloneSetup(
+                        new AiReplyController(service, org.mockito.Mockito.mock(
+                                java.util.concurrent.ExecutorService.class)))
                 .setControllerAdvice(new GlobalExceptionHandler()).build();
         var user = new User();
         user.setId(7L);

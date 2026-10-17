@@ -90,4 +90,23 @@ class TaskExecutionContextImplTest {
 
         verify(tasks, times(2)).updateById(argThat((ProcessingTask task) -> task.getProgress() == 40));
     }
+
+    @Test
+    void outputVersionIsWrittenOnlyForRunningTask() {
+        when(tasks.setOutputVersion(10L, 3)).thenReturn(1);
+
+        context.completeWithVersion(3);
+
+        verify(tasks).setOutputVersion(10L, 3);
+    }
+
+    @Test
+    void outputVersionRejectsInvalidValueAndStoppedTask() {
+        assertThrows(IllegalArgumentException.class, () -> context.completeWithVersion(0));
+        context.failCurrentStep("failed");
+
+        assertThrows(TaskExecutionContextImpl.TaskCancelledException.class,
+                () -> context.completeWithVersion(2));
+        verify(tasks, never()).setOutputVersion(anyLong(), anyInt());
+    }
 }

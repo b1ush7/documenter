@@ -91,6 +91,12 @@ public class StorageProperties {
 
         /** 调用方可请求的最大预览 DPI。 */
         private int maxPreviewDpi = 200;
+
+        /** 单次 PDF 转 DOCX 最多重建的内嵌图片数。 */
+        private int maxConversionImages = 100;
+
+        /** 单次转换中内嵌图片允许累计解码的总像素数。 */
+        private long maxConversionImagePixelsTotal = 100_000_000L;
     }
 
     @Getter

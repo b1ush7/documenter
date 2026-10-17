@@ -7,8 +7,10 @@ import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
+import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import dev.langchain4j.model.output.FinishReason;
 import dev.langchain4j.model.output.TokenUsage;
 import lombok.extern.slf4j.Slf4j;
@@ -44,6 +46,7 @@ public class StubModelProvider implements AiModelProvider {
 
     private final AiModelProperties properties;
     private final ChatModel chatModel = new StubChatModel();
+    private final StreamingChatModel streamingChatModel = new StubStreamingChatModel();
 
     public StubModelProvider(AiModelProperties properties) {
         this.properties = properties;
@@ -74,6 +77,11 @@ public class StubModelProvider implements AiModelProvider {
     @Override
     public ChatModel chatModel() {
         return chatModel;
+    }
+
+    @Override
+    public StreamingChatModel streamingChatModel() {
+        return streamingChatModel;
     }
 
     /**
@@ -215,6 +223,29 @@ public class StubModelProvider implements AiModelProvider {
                 }
             }
             return "{}";
+        }
+    }
+
+    /**
+     * 桩流式模型仍走同一套确定性响应，但按固定片段回放，专门验证 SSE 管道。
+     */
+    private final class StubStreamingChatModel implements StreamingChatModel {
+        @Override
+        public void doChat(ChatRequest request, StreamingChatResponseHandler handler) {
+            try {
+                ChatResponse response = chatModel.chat(request);
+                String text = response.aiMessage() == null ? null : response.aiMessage().text();
+                if (text != null) {
+                    int chunkSize = 24;
+                    for (int index = 0; index < text.length(); index += chunkSize) {
+                        handler.onPartialResponse(text.substring(index,
+                                Math.min(text.length(), index + chunkSize)));
+                    }
+                }
+                handler.onCompleteResponse(response);
+            } catch (Throwable failure) {
+                handler.onError(failure);
+            }
         }
     }
 

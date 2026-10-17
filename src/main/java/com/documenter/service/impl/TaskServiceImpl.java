@@ -64,6 +64,9 @@ public class TaskServiceImpl implements TaskService {
     @Override
     public TaskVO submit(Long userId, CreateTaskDTO dto) {
         TaskType type = parseType(dto.getTaskType());
+        if ((type == TaskType.CONVERT || type == TaskType.EXPORT) && dto.getFileId() == null) {
+            throw new BusinessException(400, "CONVERT 和 EXPORT 任务必须指定文件");
+        }
 
         ProcessingTask task = new ProcessingTask();
         task.setUserId(userId);
@@ -237,11 +240,20 @@ public class TaskServiceImpl implements TaskService {
 
     /** 不指定输入版本时取当前最新版本；文件尚未产生版本时返回 null。 */
     private Integer resolveInputVersion(CreateTaskDTO dto, FileAsset asset) {
+        Integer resolved;
         if (dto.getInputVersion() != null) {
-            return dto.getInputVersion();
+            resolved = dto.getInputVersion();
+        } else {
+            Integer latest = asset.getLatestVersion();
+            resolved = latest != null && latest > 0 ? latest : null;
         }
-        Integer latest = asset.getLatestVersion();
-        return latest != null && latest > 0 ? latest : null;
+        if (resolved == null) {
+            throw new BusinessException(400, "文件没有可用于处理的版本");
+        }
+        if (asset.getLatestVersion() == null || resolved > asset.getLatestVersion()) {
+            throw new BusinessException(404, "输入版本不存在");
+        }
+        return resolved;
     }
 
     private ProcessingTask findByIdempotencyKey(Long userId, String key) {
@@ -256,7 +268,12 @@ public class TaskServiceImpl implements TaskService {
     private static TaskType parseType(String value) {
         rejectRetiredType(value);
         try {
-            return TaskType.valueOf(value);
+            TaskType type = TaskType.valueOf(value);
+            if (type != TaskType.CONVERT && type != TaskType.EXPORT) {
+                throw new BusinessException(400,
+                        "当前只有 CONVERT 和 EXPORT 任务有真实处理器；OCR 与 AI_EDIT 请使用现有同步接口");
+            }
+            return type;
         } catch (IllegalArgumentException e) {
             throw new BusinessException(400, "不支持的任务类型：" + value);
         }

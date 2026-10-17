@@ -1,6 +1,7 @@
 package com.documenter.service;
 
 import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.StreamingChatModel;
 
 /**
  * 文本模型提供者（TODO 4.2「优先沿用已有 LangChain4j 依赖，接入一个选定的文本模型」）。
@@ -32,4 +33,11 @@ public interface AiModelProvider {
      * @throws com.documenter.exception.BusinessException 未就绪时抛出，附 {@link #configurationHint()}
      */
     ChatModel chatModel();
+
+    /**
+     * 取得流式对话模型；返回 null 表示提供者只能同步调用。
+     */
+    default StreamingChatModel streamingChatModel() {
+        return null;
+    }
 }

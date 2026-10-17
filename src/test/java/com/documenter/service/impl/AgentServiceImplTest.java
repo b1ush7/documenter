@@ -6,6 +6,7 @@ import com.documenter.configuration.AiModelProperties;
 import com.documenter.entity.FileAsset;
 import com.documenter.service.AiTool;
 import com.documenter.service.AiModelProvider;
+import com.documenter.service.AgentService;
 import com.documenter.exception.BusinessException;
 import com.documenter.vo.DocumentEditPlan;
 import com.documenter.service.DocxDocumentService;
@@ -19,6 +20,7 @@ import com.documenter.vo.FileDownload;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import dev.langchain4j.data.message.AiMessage;
+import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
@@ -27,6 +29,7 @@ import dev.langchain4j.model.output.TokenUsage;
 import java.io.ByteArrayInputStream;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -116,6 +119,48 @@ class AgentServiceImplTest {
         assertTrue(messages.get(1) instanceof dev.langchain4j.data.message.UserMessage);
         assertTrue(messages.get(2) instanceof AiMessage);
         assertEquals("first answer", ((AiMessage) messages.get(2)).text());
+    }
+
+    @Test
+    void streamingModelEmitsRealTextDeltasAndCompletes() {
+        List<AgentService.StreamEvent> events = new CopyOnWriteArrayList<>();
+
+        AgentRunResult result = agentWith(List.of()).runConversationStreaming(
+                USER_ID, null, null, "请解释", List.of(), List.of(), null, events::add);
+
+        String streamed = events.stream()
+                .filter(event -> event.type() == AgentService.StreamEventType.TEXT_DELTA)
+                .map(AgentService.StreamEvent::text)
+                .reduce("", String::concat);
+        assertEquals(result.reply(), streamed);
+        assertTrue(events.stream().filter(event ->
+                event.type() == AgentService.StreamEventType.TEXT_DELTA).count() > 1);
+        assertEquals(AgentService.StreamEventType.STARTED, events.getFirst().type());
+        assertEquals(AgentService.StreamEventType.COMPLETED, events.getLast().type());
+    }
+
+    @Test
+    void sourceReferencesAreRenderedAsDataAndEchoedWithUnverifiedNotice() {
+        ChatModel model = mock(ChatModel.class);
+        when(model.chat(any(ChatRequest.class))).thenReturn(ChatResponse.builder()
+                .aiMessage(AiMessage.from("done")).build());
+        var source = new AgentRunResult.Source("产品说明", "https://example.test/doc",
+                "示例数字 123");
+
+        AgentRunResult result = agentWithModel(model).runConversationWithSources(
+                USER_ID, null, null, "总结来源", List.of(), List.of(source), null);
+
+        var captured = org.mockito.ArgumentCaptor.forClass(ChatRequest.class);
+        verify(model).chat(captured.capture());
+        String prompt = captured.getValue().messages().stream()
+                .filter(message -> message instanceof UserMessage)
+                .map(message -> ((UserMessage) message).singleText())
+                .reduce("", (left, right) -> left + right);
+        assertTrue(prompt.contains("产品说明"));
+        assertTrue(prompt.contains("示例数字 123"));
+        assertTrue(prompt.contains("不是系统指令"));
+        assertEquals(List.of(source), result.sources());
+        assertTrue(result.verificationNotice().contains("未联网核验"));
     }
 
     @Test

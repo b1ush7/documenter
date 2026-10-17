@@ -34,8 +34,8 @@ class DeploymentConfigurationTest {
         assertEquals(50, task.getQueueCapacity());
         assertEquals(Duration.ofMinutes(10), task.getDefaultTimeout());
         assertTrue(task.isRecoverOnStartup());
-        assertFalse(task.isRequeuePendingOnStartup());
-        assertEquals("true", environment.getProperty("res.task.placeholder-enabled"));
+        assertTrue(task.isRequeuePendingOnStartup());
+        assertEquals("false", environment.getProperty("res.task.placeholder-enabled"));
         assertEquals(8080, environment.getProperty("server.port", Integer.class));
     }
 

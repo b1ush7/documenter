@@ -24,7 +24,7 @@ import org.springframework.stereotype.Component;
  */
 @Slf4j
 @Component
-@ConditionalOnProperty(name = "res.task.placeholder-enabled", havingValue = "true", matchIfMissing = true)
+@ConditionalOnProperty(name = "res.task.placeholder-enabled", havingValue = "true")
 public class PlaceholderTaskHandler implements TaskHandler {
 
     @Override
@@ -60,7 +60,7 @@ public class PlaceholderTaskHandler implements TaskHandler {
 
     @Override
     public boolean supports(TaskType type) {
-        return !type.isRetired();
+        return type == TaskType.OCR || type == TaskType.AI_EDIT;
     }
 
     /** 短暂停顿，模拟真实处理耗时；被中断时立即返回交由上层处理。 */

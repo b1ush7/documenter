@@ -1,6 +1,7 @@
 package com.documenter.controller;
 
 import com.documenter.constant.ApiResponse;
+import com.documenter.dto.ConvertPdfToDocxDTO;
 import com.documenter.dto.FileQueryDTO;
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.EditDocxTableDTO;
@@ -24,6 +25,7 @@ import com.documenter.service.DocxDocumentService;
 import com.documenter.service.FileService;
 import com.documenter.service.PagePreviewService;
 import com.documenter.service.PdfDocumentService;
+import com.documenter.service.PdfToDocxService;
 import com.documenter.service.XlsxDocumentService;
 import com.documenter.service.ImageDocumentService;
 import com.documenter.util.PreviewResponses;
@@ -76,6 +78,7 @@ public class FileController {
     private final DocumentVersionService versionService;
     private final DocxDocumentService docxDocumentService;
     private final PdfDocumentService pdfDocumentService;
+    private final PdfToDocxService pdfToDocxService;
     private final XlsxDocumentService xlsxDocumentService;
     private final ImageDocumentService imageDocumentService;
     private final PagePreviewService pagePreviewService;
@@ -86,6 +89,7 @@ public class FileController {
     public FileController(FileService fileService, DocumentVersionService versionService,
                           DocxDocumentService docxDocumentService,
                           PdfDocumentService pdfDocumentService,
+                          PdfToDocxService pdfToDocxService,
                           XlsxDocumentService xlsxDocumentService,
                           ImageDocumentService imageDocumentService,
                           PagePreviewService pagePreviewService,
@@ -96,6 +100,7 @@ public class FileController {
         this.versionService = versionService;
         this.docxDocumentService = docxDocumentService;
         this.pdfDocumentService = pdfDocumentService;
+        this.pdfToDocxService = pdfToDocxService;
         this.xlsxDocumentService = xlsxDocumentService;
         this.imageDocumentService = imageDocumentService;
         this.pagePreviewService = pagePreviewService;
@@ -190,6 +195,15 @@ public class FileController {
                                                     @PathVariable Integer versionNo) {
         return ApiResponse.success(pdfDocumentService.readContent(
                 SecurityUtil.requireUserId(), fileId, versionNo));
+    }
+
+    /** 将明确 PDF 版本重建为可编辑 DOCX，并保存为同一文件的新版本。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/pdf/convert-to-docx")
+    public ApiResponse<VersionVO> convertPdfToDocx(@PathVariable Long fileId,
+                                                   @PathVariable Integer versionNo,
+                                                   @Valid @RequestBody ConvertPdfToDocxDTO request) {
+        return ApiResponse.success("已生成可编辑 DOCX 版本", pdfToDocxService.convert(
+                SecurityUtil.requireUserId(), fileId, versionNo, request, null, null));
     }
 
     /** 将一个明确 PDF 版本的指定页渲染为 PNG。 */

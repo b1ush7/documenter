@@ -26,11 +26,21 @@ public record AgentRunResult(
         List<DocumentEditPlan> plans,
         Usage usage,
         Termination termination,
-        boolean truncated) {
+        boolean truncated,
+        List<Source> sources,
+        String verificationNotice) {
 
     public AgentRunResult {
         steps = steps == null ? List.of() : List.copyOf(steps);
         plans = plans == null ? List.of() : List.copyOf(plans);
+        sources = sources == null ? List.of() : List.copyOf(sources);
+    }
+
+    /** 兼容不含来源信息的内部构造点。 */
+    public AgentRunResult(String reply, List<Step> steps, List<DocumentEditPlan> plans,
+                          Usage usage, Termination termination, boolean truncated) {
+        this(reply, steps, plans, usage, termination, truncated, List.of(),
+                "未提供资料来源；涉及新增事实、数字或结论时请人工核验。");
     }
 
     /** 本次是否有待用户确认的修改。 */
@@ -49,6 +59,9 @@ public record AgentRunResult(
      */
     public record Step(int index, StepKind kind, String name, String detail, long durationMs) {
     }
+
+    /** 用户为本轮提供的来源，服务端未联网核验其真实性。 */
+    public record Source(String title, String url, String excerpt) { }
 
     /** 步骤类型。 */
     public enum StepKind {

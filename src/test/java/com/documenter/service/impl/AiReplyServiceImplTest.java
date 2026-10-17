@@ -4,6 +4,7 @@ import com.documenter.component.EditPlanExecutor;
 import com.documenter.component.EditPlanValidator;
 import com.documenter.configuration.AiModelProperties;
 import com.documenter.dto.CreateAiReplyDTO;
+import com.documenter.dto.AiSourceDTO;
 import com.documenter.entity.AiMessage;
 import com.documenter.entity.AiSession;
 import com.documenter.entity.FileAsset;
@@ -588,6 +589,53 @@ class AiReplyServiceImplTest {
         verify(agent).runConversation(eq(7L), eq(10L), eq(1), eq("edit"), eq(List.of(
                 new AgentService.ConversationTurn("USER", "previous request"),
                 new AgentService.ConversationTurn("ASSISTANT", "previous answer"))), isNull());
+    }
+
+    @Test
+    void userSourcesArePassedToAgentAndPersistedInReplyResult() {
+        var source = new AiSourceDTO();
+        source.setTitle("产品说明");
+        source.setUrl("https://example.test/doc");
+        source.setExcerpt("示例摘录");
+        CreateAiReplyDTO request = request();
+        request.setSources(List.of(source));
+        var original = result(false);
+        when(agent.runConversationWithSources(eq(7L), eq(10L), eq(1), eq("edit"),
+                anyList(), eq(List.of(new AgentRunResult.Source(
+                        "产品说明", "https://example.test/doc", "示例摘录"))), isNull()))
+                .thenReturn(new AgentRunResult(original.reply(), original.steps(), original.plans(),
+                        original.usage(), original.termination(), false, List.of(
+                        new AgentRunResult.Source("产品说明", "https://example.test/doc", "示例摘录")),
+                        "已回显用户提供的资料来源，服务端未联网核验其真实性。"));
+
+        var reply = service.create(7L, 1L, request);
+
+        assertEquals(1, reply.result().sources().size());
+        assertEquals("产品说明", reply.result().sources().getFirst().title());
+        assertTrue(reply.result().verificationNotice().contains("未联网核验"));
+        assertEquals(reply.result(), service.get(7L, 1L, reply.message().getId()).result());
+    }
+
+    @Test
+    void streamingCreationEmitsStartedAndDeltaBeforeCompleted() {
+        List<AiReplyService.StreamEvent> events = new ArrayList<>();
+        when(agent.runConversationStreaming(eq(7L), eq(10L), eq(1), eq("edit"),
+                anyList(), anyList(), any(), any())).thenAnswer(invocation -> {
+                    @SuppressWarnings("unchecked")
+                    java.util.function.Consumer<AgentService.StreamEvent> callback =
+                            invocation.getArgument(7, java.util.function.Consumer.class);
+                    callback.accept(new AgentService.StreamEvent(
+                            AgentService.StreamEventType.TEXT_DELTA, "流式内容"));
+                    return result(false);
+                });
+
+        service.createStreaming(7L, 1L, request(), events::add, () -> false);
+
+        assertEquals(AiReplyService.StreamEvent.Type.STARTED, events.getFirst().type());
+        assertTrue(events.stream().anyMatch(event ->
+                event.type() == AiReplyService.StreamEvent.Type.TEXT_DELTA
+                        && "流式内容".equals(event.text())));
+        assertEquals(AiReplyService.StreamEvent.Type.COMPLETED, events.getLast().type());
     }
 
     @Test

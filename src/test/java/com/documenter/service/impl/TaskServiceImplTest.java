@@ -3,6 +3,7 @@ package com.documenter.service.impl;
 import com.documenter.component.TaskExecutionEngine;
 import com.documenter.configuration.TaskExecutorProperties;
 import com.documenter.entity.ProcessingTask;
+import com.documenter.entity.FileAsset;
 import com.documenter.dto.CreateTaskDTO;
 import com.documenter.mapper.ProcessingTaskMapper;
 import com.documenter.mapper.TaskStepMapper;
@@ -78,14 +79,44 @@ class TaskServiceImplTest {
             return 1;
         });
         when(tasks.selectById(10L)).thenReturn(failed);
+        when(files.requireOwned(7L, 5L)).thenReturn(file());
         var request = new CreateTaskDTO();
-        request.setTaskType("OCR");
+        request.setTaskType("EXPORT");
+        request.setFileId(5L);
 
         var result = service.submit(7L, request);
 
         assertEquals("FAILED", result.getStatus());
         assertEquals("QUEUE_FULL", result.getErrorCode());
         assertEquals("任务队列已满，请稍后重试", result.getErrorMessage());
+    }
+
+    @Test
+    void realTaskTypesRequireAFileAndAnExistingInputVersion() {
+        var noFile = new CreateTaskDTO();
+        noFile.setTaskType("CONVERT");
+        assertEquals(400, assertThrows(BusinessException.class,
+                () -> service.submit(7L, noFile)).getCode());
+
+        when(files.requireOwned(7L, 5L)).thenReturn(file());
+        var stale = new CreateTaskDTO();
+        stale.setTaskType("EXPORT");
+        stale.setFileId(5L);
+        stale.setInputVersion(3);
+        assertEquals(404, assertThrows(BusinessException.class,
+                () -> service.submit(7L, stale)).getCode());
+        verify(tasks, never()).insert(any(ProcessingTask.class));
+    }
+
+    @Test
+    void historicalTypesCannotBeSubmittedEvenWhenDtoValidationIsBypassed() {
+        for (String type : List.of("OCR", "AI_EDIT")) {
+            var request = new CreateTaskDTO();
+            request.setTaskType(type);
+            assertEquals(400, assertThrows(BusinessException.class,
+                    () -> service.submit(7L, request)).getCode());
+        }
+        verifyNoInteractions(tasks, steps, files, engine);
     }
 
     @Test
@@ -117,5 +148,13 @@ class TaskServiceImplTest {
         task.setUserId(7L);
         task.setStatus(status);
         return task;
+    }
+
+    private static FileAsset file() {
+        FileAsset asset = new FileAsset();
+        asset.setId(5L);
+        asset.setUserId(7L);
+        asset.setLatestVersion(2);
+        return asset;
     }
 }

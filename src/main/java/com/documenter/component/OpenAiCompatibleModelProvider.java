@@ -4,7 +4,9 @@ import com.documenter.configuration.AiModelProperties;
 import com.documenter.exception.BusinessException;
 import com.documenter.service.AiModelProvider;
 import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
+import dev.langchain4j.model.openai.OpenAiStreamingChatModel;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -31,6 +33,7 @@ public class OpenAiCompatibleModelProvider implements AiModelProvider {
 
     /** 惰性构建：未配置时不创建客户端，也不做任何网络相关初始化。 */
     private volatile ChatModel chatModel;
+    private volatile StreamingChatModel streamingChatModel;
 
     public OpenAiCompatibleModelProvider(AiModelProperties properties) {
         this.properties = properties;
@@ -69,6 +72,24 @@ public class OpenAiCompatibleModelProvider implements AiModelProvider {
         return current;
     }
 
+    @Override
+    public StreamingChatModel streamingChatModel() {
+        if (!available()) {
+            throw new BusinessException(503, "文本模型未就绪；" + configurationHint());
+        }
+        StreamingChatModel current = streamingChatModel;
+        if (current == null) {
+            synchronized (this) {
+                current = streamingChatModel;
+                if (current == null) {
+                    current = buildStreaming();
+                    streamingChatModel = current;
+                }
+            }
+        }
+        return current;
+    }
+
     private ChatModel build() {
         Duration timeout = properties.getTimeout();
         log.info("初始化文本模型, provider={}, baseUrl={}, modelName={}, timeout={}, maxOutputTokens={}",
@@ -83,6 +104,20 @@ public class OpenAiCompatibleModelProvider implements AiModelProvider {
                 .maxTokens(properties.getMaxOutputTokens())
                 .timeout(timeout)
                 .maxRetries(properties.getMaxRetries())
+                .build();
+    }
+
+    private StreamingChatModel buildStreaming() {
+        Duration timeout = properties.getTimeout();
+        log.info("初始化流式文本模型, provider={}, baseUrl={}, modelName={}, timeout={}",
+                PROVIDER, properties.getBaseUrl(), properties.getModelName(), timeout);
+        return OpenAiStreamingChatModel.builder()
+                .baseUrl(properties.getBaseUrl())
+                .apiKey(properties.getApiKey())
+                .modelName(properties.getModelName())
+                .temperature(properties.getTemperature())
+                .maxTokens(properties.getMaxOutputTokens())
+                .timeout(timeout)
                 .build();
     }
 

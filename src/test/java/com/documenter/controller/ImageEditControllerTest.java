@@ -32,7 +32,7 @@ class ImageEditControllerTest {
     void setUp() {
         mvc = MockMvcBuilders.standaloneSetup(new FileController(mock(FileService.class),
                         mock(DocumentVersionService.class), mock(DocxDocumentService.class),
-                        mock(PdfDocumentService.class), xlsx, images,
+                        mock(PdfDocumentService.class), mock(PdfToDocxService.class), xlsx, images,
                         mock(PagePreviewService.class), mock(CompatibilityVerificationService.class),
                         mock(DocumentComparisonService.class), mock(DocumentExportService.class)))
                 .setControllerAdvice(new GlobalExceptionHandler()).build();

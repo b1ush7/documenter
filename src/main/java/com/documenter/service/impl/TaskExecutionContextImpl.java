@@ -155,6 +155,17 @@ public class TaskExecutionContextImpl implements TaskExecutionContext {
         }
     }
 
+    @Override
+    public synchronized void completeWithVersion(Integer versionNo) {
+        if (versionNo == null || versionNo < 1) {
+            throw new IllegalArgumentException("任务输出版本号必须为正数");
+        }
+        assertNotCancelled();
+        if (taskMapper.setOutputVersion(taskId, versionNo) != 1) {
+            throw new TaskStateException("记录任务输出版本失败");
+        }
+    }
+
     /** 当前处理中的步骤名，便于日志定位。 */
     public synchronized String currentStepName() {
         return currentStepName;

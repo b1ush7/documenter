@@ -19,8 +19,45 @@ public interface AgentService {
     /** 持久化会话的历史角色与内容；仅 USER / ASSISTANT 参与模型上下文。 */
     record ConversationTurn(String role, String content) { }
 
+    /** SSE 增量事件；TEXT_DELTA 是模型实际产生的增量文本。 */
+    record StreamEvent(StreamEventType type, String text) { }
+
+    enum StreamEventType {
+        STARTED,
+        TEXT_DELTA,
+        COMPLETED
+    }
+
     com.documenter.vo.AgentRunResult runConversation(Long userId, Long fileId, Integer versionNo,
             String instruction, java.util.List<ConversationTurn> history, BooleanSupplier cancelled);
+
+    /**
+     * 带用户来源执行一轮对话。
+     *
+     * <p>来源会作为不可信资料放入模型上下文，并在结果中原样回显。服务端不会把用户提供的资料
+     * 冒充成联网核验结果。
+     */
+    default com.documenter.vo.AgentRunResult runConversationWithSources(
+            Long userId, Long fileId, Integer versionNo, String instruction,
+            java.util.List<ConversationTurn> history, java.util.List<com.documenter.vo.AgentRunResult.Source> sources,
+            BooleanSupplier cancelled) {
+        return runConversation(userId, fileId, versionNo, instruction, history, cancelled);
+    }
+
+    /** 流式执行；默认实现仍返回完整结果，只发出开始与完成事件。 */
+    default com.documenter.vo.AgentRunResult runConversationStreaming(
+            Long userId, Long fileId, Integer versionNo, String instruction,
+            java.util.List<ConversationTurn> history, java.util.List<com.documenter.vo.AgentRunResult.Source> sources,
+            BooleanSupplier cancelled, java.util.function.Consumer<StreamEvent> events) {
+        events.accept(new StreamEvent(StreamEventType.STARTED, null));
+        com.documenter.vo.AgentRunResult result = runConversationWithSources(
+                userId, fileId, versionNo, instruction, history, sources, cancelled);
+        if (result.reply() != null && !result.reply().isBlank()) {
+            events.accept(new StreamEvent(StreamEventType.TEXT_DELTA, result.reply()));
+        }
+        events.accept(new StreamEvent(StreamEventType.COMPLETED, null));
+        return result;
+    }
 
     /**
      * 执行一轮智能体交互。

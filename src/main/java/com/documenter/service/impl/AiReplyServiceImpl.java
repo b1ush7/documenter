@@ -21,6 +21,8 @@ import tools.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 /** 模型调用不持有数据库事务；预留消息、保存结果和确认各使用短事务。 */
 @Slf4j
@@ -61,6 +63,20 @@ public class AiReplyServiceImpl implements AiReplyService {
 
     @Override
     public AiReplyVO create(Long userId, Long sessionId, CreateAiReplyDTO request) {
+        return createInternal(userId, sessionId, request, ignored -> { }, null, false);
+    }
+
+    @Override
+    public AiReplyVO createStreaming(Long userId, Long sessionId, CreateAiReplyDTO request,
+                                     Consumer<StreamEvent> events, BooleanSupplier cancelled) {
+        Consumer<StreamEvent> safeEvents = events == null ? ignored -> { } : events;
+        return createInternal(userId, sessionId, request, safeEvents,
+                cancelled == null ? () -> false : cancelled, true);
+    }
+
+    private AiReplyVO createInternal(Long userId, Long sessionId, CreateAiReplyDTO request,
+                                     Consumer<StreamEvent> events, BooleanSupplier cancelled,
+                                     boolean streaming) {
         validateRequest(request);
         // 新 HTTP 流程始终要求确认，禁止配置关闭后工具在模型循环内直接写版本。
         if (!properties.isRequireConfirmation()) {
@@ -68,13 +84,35 @@ public class AiReplyServiceImpl implements AiReplyService {
         }
         Reservation reservation = transactions.execute(status -> reserve(userId, sessionId, request));
         if (!reservation.created()) {
-            return view(userId, reservation.session(), reservation.reply());
+            AiReplyVO existing = view(userId, reservation.session(), reservation.reply());
+            events.accept(new StreamEvent(StreamEvent.Type.COMPLETED,
+                    reservation.reply().getId(), null));
+            return existing;
         }
+        events.accept(new StreamEvent(StreamEvent.Type.STARTED,
+                reservation.reply().getId(), null));
 
         AgentRunResult result;
         try {
-            result = agent.runConversation(userId, reservation.session().getFileId(), request.getVersionNo(),
-                    request.getContent().trim(), reservation.history(), null);
+            List<AgentRunResult.Source> requestSources = sources(request);
+            if (streaming) {
+                result = agent.runConversationStreaming(userId, reservation.session().getFileId(),
+                        request.getVersionNo(), request.getContent().trim(), reservation.history(),
+                        requestSources, cancelled, event -> {
+                            if (event.type() == AgentService.StreamEventType.TEXT_DELTA) {
+                                events.accept(new StreamEvent(StreamEvent.Type.TEXT_DELTA,
+                                        reservation.reply().getId(), event.text()));
+                            }
+                        });
+            } else {
+                result = requestSources.isEmpty()
+                        ? agent.runConversation(userId, reservation.session().getFileId(),
+                                request.getVersionNo(), request.getContent().trim(),
+                                reservation.history(), null)
+                        : agent.runConversationWithSources(userId, reservation.session().getFileId(),
+                                request.getVersionNo(), request.getContent().trim(),
+                                reservation.history(), requestSources, cancelled);
+            }
             if (result == null) {
                 throw new IllegalStateException("模型没有返回运行结果");
             }
@@ -121,7 +159,9 @@ public class AiReplyServiceImpl implements AiReplyService {
                     "replyId=" + current.getId() + ", runStatus=" + current.getRunStatus());
             return current;
         });
-        return view(userId, reservation.session(), reply);
+        AiReplyVO completedView = view(userId, reservation.session(), reply);
+        events.accept(new StreamEvent(StreamEvent.Type.COMPLETED, reply.getId(), null));
+        return completedView;
     }
 
     private Reservation reserve(Long userId, Long sessionId, CreateAiReplyDTO request) {
@@ -351,9 +391,27 @@ public class AiReplyServiceImpl implements AiReplyService {
         if (request == null || request.getContent() == null || request.getContent().isBlank()
                 || request.getContent().length() > 2000 || request.getIdempotencyKey() == null
                 || request.getIdempotencyKey().isBlank() || request.getIdempotencyKey().length() > 128
-                || (request.getVersionNo() != null && request.getVersionNo() < 1)) {
+                || (request.getVersionNo() != null && request.getVersionNo() < 1)
+                || (request.getSources() != null && request.getSources().size() > 5)) {
             throw new BusinessException(400, "消息、版本号或幂等键不合法");
         }
+        if (request.getSources() != null) {
+            for (var source : request.getSources()) {
+                if (source == null || source.getTitle() == null || source.getTitle().isBlank()
+                        || source.getTitle().length() > 200
+                        || source.getUrl() != null && source.getUrl().length() > 1000
+                        || source.getExcerpt() != null && source.getExcerpt().length() > 2000) {
+                    throw new BusinessException(400, "资料来源字段不合法");
+                }
+            }
+        }
+    }
+
+    private static List<AgentRunResult.Source> sources(CreateAiReplyDTO request) {
+        if (request.getSources() == null || request.getSources().isEmpty()) return List.of();
+        return request.getSources().stream()
+                .map(source -> new AgentRunResult.Source(source.getTitle(), source.getUrl(), source.getExcerpt()))
+                .toList();
     }
 
     private record Reservation(AiSession session, AiMessage reply,

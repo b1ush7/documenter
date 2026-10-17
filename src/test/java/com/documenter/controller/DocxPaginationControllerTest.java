@@ -31,6 +31,7 @@ class DocxPaginationControllerTest {
     void setUp() {
         mvc = MockMvcBuilders.standaloneSetup(new FileController(mock(FileService.class),
                         mock(DocumentVersionService.class), documents, mock(PdfDocumentService.class),
+                        mock(PdfToDocxService.class),
                         mock(XlsxDocumentService.class), mock(ImageDocumentService.class),
                         mock(PagePreviewService.class), mock(CompatibilityVerificationService.class),
                         mock(DocumentComparisonService.class), mock(DocumentExportService.class)))

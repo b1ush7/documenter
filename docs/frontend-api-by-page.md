@@ -90,7 +90,7 @@ Token 有效期：Access 15 分钟，Refresh 7 天。刷新返回新的双 Token
 | 文件来源 | `UPLOAD` / `GENERATED` / `CONVERTED` |
 | 版本变更类型 | `UPLOAD` / `AI_EDIT` / `MANUAL_EDIT` / `CONVERT` / `RESTORE` |
 | 任务状态 | `PENDING` / `RUNNING` / `SUCCEEDED` / `FAILED` / `CANCELLED` |
-| 任务类型 | 新建：`OCR` / `CONVERT` / `AI_EDIT` / `EXPORT`；`IMAGE_GEN` 仅历史展示/查询 |
+| 任务类型 | 新建：`CONVERT` / `EXPORT`；`OCR` / `AI_EDIT` / `IMAGE_GEN` 仅历史展示/查询 |
 | 步骤状态 | `PENDING` / `RUNNING` / `SUCCEEDED` / `FAILED` / `SKIPPED` |
 | 会话状态 | `ACTIVE` / `ARCHIVED` |
 | 消息角色 | `USER` / `ASSISTANT` / `TOOL` / `SYSTEM` |
@@ -458,6 +458,14 @@ GET /file/{fileId}/versions/{versionNo}/xlsx/formula-results   XLSX 公式计算
 **PDF 页面预览**返回**图片字节流**，不是 JSON。前端用 `URL.createObjectURL` 渲染。
 页数有限制，超大 PDF 只会渲染部分页。
 
+文字型 PDF 可调用 `POST /file/{fileId}/versions/{versionNo}/pdf/convert-to-docx` 生成新版本：
+
+```json
+{"mode":"LAYOUT","instruction":"按版式优先重建"}
+```
+
+`EDITABLE` 适合继续编辑，`LAYOUT` 尽量保留文字横向位置、字号、粗斜体和基础行距。路径版本必须是当前版本，成功后返回 `Version`，可用新 versionNo 读取 DOCX 结构、继续人工或 AI 编辑。扫描页、复杂表格/域/脚注和精确分页仍需提示限制；没有原生文字的页面会让整次转换返回 422，不使用整页图片冒充可编辑内容。
+
 **XLSX 结构**包含 `sheets[]`（含 `firstRow`/`lastRow`）、`cells[]`、`styles[]`、`charts[]`。
 单元格含 `address`、`type`、`value` 等；**读取单元格数量有上限**，超大表只返回部分。
 
@@ -792,13 +800,12 @@ POST /task/{taskId}/retry        重试
 
 ### 进度更新方式
 
-目前**只有轮询**：`GET /task/{taskId}`。
+任务进度**只有轮询**：`GET /task/{taskId}`。
 
 建议：任务处于 `PENDING`/`RUNNING` 时每 2 秒轮询一次，进入终态后停止。
 任务列表页同理，但有列表时可放宽到 5 秒。
 
-> 后端 TODO 3.4 里"是否用 SSE 推送进度"尚未定案。若后续改用 SSE，
-> 会在现有服务上**新增**推送端点，不会破坏现有轮询接口。
+AI 回复文本有独立 SSE 接口；异步任务仍不支持 SSE，继续使用轮询。
 
 ### 任务提交（当前主要由后端流程调用）
 
@@ -820,10 +827,11 @@ POST /task
 
 | 字段 | 说明 |
 | --- | --- |
-| taskType | `OCR`/`CONVERT`/`AI_EDIT`/`EXPORT`；不再接受 `IMAGE_GEN` |
-| inputVersion | 不传表示使用当前最新版本 |
+| taskType | `CONVERT`/`EXPORT`；`OCR`、`AI_EDIT`、`IMAGE_GEN` 仅历史展示/查询 |
+| fileId | 必填，必须是自己的文件 |
+| inputVersion | 不传表示使用当前最新版本，不得超过最新版本 |
 | idempotencyKey | **幂等键**：同一用户同一键只会创建一个任务，前端可安全重试提交 |
-| expectVersion | 期望的当前版本，用于并发保护，不符返回 `409` |
+| expectVersion | 兼容字段；真实处理器以 inputVersion 做版本冲突判断 |
 | timeoutSeconds | 10-3600，不传取服务端默认 |
 
 IMAGE_GEN 只保留历史展示和筛选，不展示新建或重试操作；旧排队记录可能以 FAILED / TASK_TYPE_DISABLED 收尾。已有图片通过 P10 的同步基础处理接口操作，不创建图片生成任务。
@@ -887,18 +895,19 @@ POST /ai/sessions/{sessionId}/messages    { "content": "把第二段改正式一
 
 ```text
 POST /ai/sessions/{sessionId}/replies
+POST /ai/sessions/{sessionId}/replies/stream
 GET  /ai/sessions/{sessionId}/replies/{messageId}
 POST /ai/sessions/{sessionId}/replies/{messageId}/confirm
 POST /ai/sessions/{sessionId}/replies/{messageId}/discard
 ```
 
-发送体：`{"content":"把第二段改正式一点","versionNo":1,"idempotencyKey":"客户端生成的稳定键"}`。绑定文档支持 DOCX 编辑及 XLSX 单元格公式，versionNo 必填；纯对话不传版本。旧会话 CRUD 不变。
+发送体：`{"content":"把第二段改正式一点","versionNo":1,"idempotencyKey":"客户端生成的稳定键","sources":[{"title":"产品说明","url":"https://example.test","excerpt":"待核验摘录"}]}`。`sources` 可有 0～5 条，只能是纯数据文本；服务端会回显来源并给出 `verificationNotice`，不表示已联网核验。绑定文档支持 DOCX 编辑及 XLSX 单元格公式，versionNo 必填；纯对话不传版本。旧会话 CRUD 不变。
 
 返回 `AiReply`，包含助手 `message`、`runStatus`、`planStatus`、`sourceVersion`、`outputVersion`、过程与用量 `result`、确认前逐项内容差异 `changes`。完整字段和状态规则见 [API.md 第 8 节](../API.md#8-ai-回复与确认编辑)。
 
 界面流程：发送时显示同步请求状态；超时重发沿用同一幂等键，若返回 RUNNING 则通过 GET 查询。PENDING 时显示 before/after、操作类型和理由，再提供确认/放弃；确认和放弃均无需请求体。CONFIRMED 时按 outputVersion 预览、比较和下载。FAILED 不代表编辑成功；stub 模型和未配置计价必须明确展示，不能显示真实模型完成或免费。放弃后可用新键继续发送调整要求。
 
-当前只有同步返回，没有 SSE。确认前提供内容差异，页面排版预览仍使用已保存版本；真实模型与前端端到端联调待验收。
+`/replies/stream` 返回 `text/event-stream;charset=UTF-8`：`started` 给出 replyId，`delta` 携带真实模型文本增量，`completed` 携带完整 AiReply，`error` 携带统一错误对象。断线可使用 started 中的 replyId 调 GET 恢复最终状态。模型不支持流式时，会在完成后退回一次完整 delta，协议不变。确认前提供内容差异，页面排版预览仍使用已保存版本；真实模型与前端端到端联调待验收。
 
 插图也使用相同确认流程：`changes[].type=INSERT_IMAGE` 时，读取其 `image` 对象中的 `fileId/versionNo/widthPixels/heightPixels`，通过既有按版本图片预览展示所选图片，显示“追加到目标段落”及尺寸。该项 before/after 为 null，不代表删除。图片参数同样持久化在 result.plans 中，客户端不重传计划；确认时服务端再次校验图片归属和版本。完整结构见 [API.md 第 8.3 节](../API.md#83-待确认的-docx-图片插入)。旧文本项的 image 可缺失或为 null。
 

@@ -65,6 +65,8 @@ res:
       max-extracted-chars-total: ${PDF_MAX_EXTRACTED_CHARS_TOTAL:2000000}
       preview-dpi: ${PDF_PREVIEW_DPI:144}
       max-preview-dpi: ${PDF_MAX_PREVIEW_DPI:200}
+      max-conversion-images: ${PDF_MAX_CONVERSION_IMAGES:100}
+      max-conversion-image-pixels-total: ${PDF_MAX_CONVERSION_IMAGE_PIXELS_TOTAL:100000000}
     xlsx:
       max-read-cells: ${XLSX_MAX_READ_CELLS:100000}
       max-edit-operations: ${XLSX_MAX_EDIT_OPERATIONS:500}
@@ -89,10 +91,10 @@ res:
     shutdown-await: ${TASK_SHUTDOWN_AWAIT:30s}
     # 启动时把中断的 RUNNING 任务标记为失败，避免前端永远看到「运行中」
     recover-on-startup: ${TASK_RECOVER_ON_STARTUP:true}
-    # P0 阶段处理器是占位实现，重新入队没有意义；接入真实处理器后改为 true
-    requeue-pending-on-startup: ${TASK_REQUEUE_PENDING_ON_STARTUP:false}
-    # 占位处理器开关：接入真实处理器时必须改为 false，否则会争抢任务类型导致启动失败
-    placeholder-enabled: ${TASK_PLACEHOLDER_ENABLED:true}
+    # CONVERT/EXPORT 已有真实处理器，未开始的 PENDING 任务可在单实例重启后重新入队
+    requeue-pending-on-startup: ${TASK_REQUEUE_PENDING_ON_STARTUP:true}
+    # 仅保留历史任务兼容；CONVERT/EXPORT 已由真实处理器接管
+    placeholder-enabled: ${TASK_PLACEHOLDER_ENABLED:false}
   # 页面版式预览（TODO 3.3）与兼容性验收（TODO 4.1）
   preview:
     # 预览渲染的默认 DPI 与上限

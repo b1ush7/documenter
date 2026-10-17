@@ -92,12 +92,13 @@ application-service.yaml 是本地维护的部署统一配置，放在 src/main/
 | VERIFICATION_CODE_LENGTH / VERIFICATION_TTL / VERIFICATION_RESEND_INTERVAL / VERIFICATION_DAILY_LIMIT / VERIFICATION_MAX_ATTEMPTS | 验证码长度、有效期、重发间隔、日发送尝试上限和错误次数；HTTP 校验允许 4～8 位数字，应保持长度匹配 |
 | TASK_CORE_POOL_SIZE / TASK_MAX_POOL_SIZE / TASK_QUEUE_CAPACITY | 两个独立有界线程池各使用同样容量；队列满返回任务 QUEUE_FULL 失败，通过原有重试接口处理 |
 | TASK_DEFAULT_TIMEOUT / TASK_DEFAULT_MAX_RETRY / TASK_KEEP_ALIVE / TASK_SHUTDOWN_AWAIT | 默认超时、处理重试、线程空闲和停机等待；外部强制终止时间要留足余量 |
-| TASK_PLACEHOLDER_ENABLED | 默认 true，占位任务不产生真实文档结果；未接入真实处理器前不要把占位成功当作业务成功 |
-| TASK_RECOVER_ON_STARTUP / TASK_REQUEUE_PENDING_ON_STARTUP | 默认把中断的运行任务/回复标为失败，不自动重排待处理任务；当前恢复逻辑面向单实例，多实例启动可能影响仍在运行的任务 |
+| TASK_PLACEHOLDER_ENABLED | 默认 false。CONVERT/EXPORT 已有真实处理器；该开关仅用于历史 OCR/AI_EDIT 兼容排查，不应在正常部署中开启 |
+| TASK_RECOVER_ON_STARTUP / TASK_REQUEUE_PENDING_ON_STARTUP | 默认把中断的运行任务/回复标为失败，并把尚未开始的 CONVERT/EXPORT 重新入队；当前恢复逻辑面向单实例，多实例部署必须谨慎启用 |
 | AI_ENABLED / AI_PROVIDER | 默认关闭 AI；本地演示显式设 true/stub。真实调用设 provider=openai，避免 auto 缺配置时回退桩模型 |
 | AI_BASE_URL / AI_API_KEY / AI_MODEL_NAME | 真实兼容协议客户端的地址、密钥和模型；不保证目标服务的工具调用效果，需单独验收 |
 | AI_DAILY_CALL_LIMIT / AI_QUOTA_ZONE | 每 ChatModel 调用尝试计数，含失败和智能体重试；0 不限额，默认 Asia/Shanghai 自然日，不扣余额 |
 | AI_REQUIRE_CONFIRMATION | 当前 HTTP 回复流程要求 true；先查看 changes，再确认保存 |
+| PDF_MAX_CONVERSION_IMAGES / PDF_MAX_CONVERSION_IMAGE_PIXELS_TOTAL | PDF 转 DOCX 最多重建的内嵌图片数和累计像素；超出部分跳过图片，文字仍保留，单张图仍受 STORAGE_MAX_IMAGE_PIXELS 约束 |
 
 当前活动模型读取 res.ai 配置；后台模型配置接口持久化配置和密文，并不会自动替换正在使用的客户端。修改模型配置后按当前装配方式重新启动并核对返回的 modelName。
 

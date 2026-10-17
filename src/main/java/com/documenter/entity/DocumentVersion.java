@@ -51,8 +51,8 @@ public class DocumentVersion implements Serializable {
     /**
      * 任务内的执行尝试序号，从 1 开始；非任务产出为 null。
      *
-     * <p>用「尝试序号」而不是只用 taskId：用户显式重试应当允许产出新版本，
-     * 但同一次尝试内部的失败重入、超时重入不应重复产出。
+     * <p>自动重试沿用同一任务和尝试序号，避免失败重入重复产出；
+     * 用户显式重试会创建新的任务 ID，因此仍可产生新的处理版本。
      */
     private Integer attemptNo;
     private LocalDateTime createTime;

@@ -19,6 +19,7 @@ public interface TaskExecutionContext {
      * 处理器调用 {@code versionWriter.appendVersion(..., taskId, attemptNo)} 后，
      * 同一尝试内部的失败重入不会重复产出内容相同的版本，
      * 同时也不会重复分配版本号。
+     * 自动重试沿用同一序号；用户显式重试会创建新的任务 ID。
      *
      * <p>提供默认实现是为了让既有的处理器实现与测试替身无需立即实现本方法。
      * 返回 0 表示「无尝试上下文」，此时版本写入退化为非幂等的普通追加——
@@ -49,4 +50,16 @@ public interface TaskExecutionContext {
 
     /** 若已请求取消则抛出取消异常，用于在深层调用中快速退出。 */
     void assertNotCancelled();
+
+    /**
+     * 记录本次任务产出的明确版本号。
+     *
+     * <p>真实处理器在追加版本后必须调用本方法，否则任务虽然成功，前端仍无法通过
+     * outputVersion 定位结果。任务状态仍由执行引擎统一收尾。
+     */
+    default void completeWithVersion(Integer versionNo) {
+        if (versionNo == null || versionNo < 1) {
+            throw new IllegalArgumentException("任务输出版本号必须为正数");
+        }
+    }
 }

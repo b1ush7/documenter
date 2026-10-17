@@ -5,6 +5,7 @@ import com.documenter.configuration.TaskExecutorProperties;
 import com.documenter.entity.ProcessingTask;
 import com.documenter.enums.TaskStatus;
 import com.documenter.enums.TaskType;
+import com.documenter.exception.BusinessException;
 import com.documenter.mapper.ProcessingTaskMapper;
 import com.documenter.mapper.TaskStepMapper;
 import com.documenter.service.TaskHandler;
@@ -128,7 +129,10 @@ public class TaskExecutionEngine {
         // 尝试序号从 1 开始，作为「任务级版本幂等键」的一半（TODO 3.4）。
         // 同一次尝试内部若发生失败重入，处理器据此复用已产出的版本，
         // 不会重复分配版本号或重复落盘。
+        // 自动重试仍属于同一任务、同一用户意图，复用同一个尝试序号。
+        // 用户显式“重试”会创建新任务 ID，不需要靠递增序号区分新意图。
         int attemptNo = 1;
+        int retriesDone = 0;
         while (true) {
             TaskExecutionContextImpl context =
                     new TaskExecutionContextImpl(taskMapper, stepMapper, task, attemptNo);
@@ -139,21 +143,19 @@ public class TaskExecutionEngine {
                 return;
             }
 
-            if (!"HANDLER_ERROR".equals(outcome.errorCode()) || attemptNo > maxRetry) {
+            if (!"HANDLER_ERROR".equals(outcome.errorCode()) || retriesDone >= maxRetry) {
                 finish(taskId, TaskStatus.FAILED, currentProgress(taskId),
                         outcome.errorCode(), outcome.errorMessage());
                 return;
             }
 
             log.warn("任务执行失败，准备第 {} 次重试, taskId={}, 原因={}",
-                    attemptNo, taskId, outcome.errorMessage());
-            // 记录已重试次数；下一次循环的 attemptNo 递增，因此新一轮允许产出新版本
+                    retriesDone + 1, taskId, outcome.errorMessage());
+            retriesDone++;
             ProcessingTask update = new ProcessingTask();
             update.setId(taskId);
-            update.setRetryCount(attemptNo);
+            update.setRetryCount(retriesDone);
             taskMapper.updateById(update);
-
-            attemptNo++;
         }
     }
 
@@ -230,7 +232,8 @@ public class TaskExecutionEngine {
             context.failCurrentStep(safeMessage(cause));
             // 只记录异常消息与堆栈到日志，不把堆栈写进数据库回传前端
             log.warn("任务执行异常, taskId={}", task.getId(), cause);
-            return Outcome.failure("HANDLER_ERROR", safeMessage(cause));
+            return Outcome.failure(cause instanceof BusinessException
+                    ? "BUSINESS_ERROR" : "HANDLER_ERROR", safeMessage(cause));
         }
     }
 
