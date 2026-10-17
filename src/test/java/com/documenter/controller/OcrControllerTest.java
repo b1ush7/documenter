@@ -3,6 +3,8 @@ package com.documenter.controller;
 import com.documenter.entity.User;
 import com.documenter.exception.GlobalExceptionHandler;
 import com.documenter.service.OcrService;
+import com.documenter.service.OcrCorrectionService;
+import com.documenter.vo.OcrCorrectionVO;
 import com.documenter.vo.OcrResultVO;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -22,16 +24,19 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 
 class OcrControllerTest {
 
     private final OcrService service = mock(OcrService.class);
+    private final OcrCorrectionService corrections = mock(OcrCorrectionService.class);
     private MockMvc mvc;
 
     @BeforeEach
     void setUp() {
-        mvc = MockMvcBuilders.standaloneSetup(new OcrController(service))
+        mvc = MockMvcBuilders.standaloneSetup(new OcrController(service, corrections))
                 .setControllerAdvice(new GlobalExceptionHandler()).build();
         var user = new User();
         user.setId(7L);
@@ -55,7 +60,7 @@ class OcrControllerTest {
                         List.of(new OcrResultVO.Cell(0, 0, 1, 1, "标题",
                                 10, 12, 30, 16, 93, false)))),
                 List.of(new OcrResultVO.Line("标题", 10, 12, 30, 16, 93, false)),
-                false)));
+                false)), "0".repeat(64));
         when(service.recognize(eq(7L), eq(10L), eq(2), any())).thenReturn(result);
 
         mvc.perform(post("/file/10/versions/2/ocr")
@@ -88,7 +93,7 @@ class OcrControllerTest {
         var result = new OcrResultVO(10L, 2, "cloud-vision", "zh",
                 2, 0, false, List.of(
                 nativePage(1, "第一页"),
-                nativePage(2, "第二页")));
+                nativePage(2, "第二页")), "1".repeat(64));
         when(service.recognize(eq(7L), eq(10L), eq(2), any())).thenReturn(result);
 
         mvc.perform(post("/file/10/versions/2/ocr/text")
@@ -101,6 +106,29 @@ class OcrControllerTest {
                                 org.hamcrest.Matchers.startsWith("text/plain")))
                 .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
                         .content().string(org.hamcrest.Matchers.containsString("\f")));
+    }
+
+    @Test
+    void savesAndReadsCorrectionsByOcrFingerprint() throws Exception {
+        String fingerprint = "a".repeat(64);
+        var corrected = new OcrCorrectionVO(10L, 2, fingerprint,
+                List.of(new OcrCorrectionVO.Page(1, "人工校正")), null);
+        when(corrections.save(eq(7L), eq(10L), eq(2), any())).thenReturn(corrected);
+        when(corrections.get(7L, 10L, 2, fingerprint)).thenReturn(corrected);
+
+        mvc.perform(put("/file/10/versions/2/ocr/corrections")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                 "pages":[{"pageNo":1,"text":"人工校正"}]}
+                                """))
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.pages[0].text").value("人工校正"));
+        mvc.perform(get("/file/10/versions/2/ocr/corrections/" + fingerprint))
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.fingerprint").value(fingerprint));
+        verify(corrections).save(eq(7L), eq(10L), eq(2), any());
+        verify(corrections).get(7L, 10L, 2, fingerprint);
     }
 
     private static OcrResultVO.Page nativePage(int pageNo, String text) {

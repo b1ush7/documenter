@@ -9,6 +9,7 @@ import com.documenter.service.DocumentVersionService;
 import com.documenter.service.OcrEngine;
 import com.documenter.service.OcrService;
 import com.documenter.util.OcrLanguageUtil;
+import com.documenter.util.OcrFingerprint;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.OcrResultVO;
 import lombok.extern.slf4j.Slf4j;
@@ -101,7 +102,7 @@ public class OcrServiceImpl implements OcrService {
         OcrEngine.Result recognized = engine.recognize(png, language);
         OcrResultVO.Page page = toPage(1, "OCR", image.getWidth(), image.getHeight(),
                 recognized, cropped.region(), cropped.offsetX(), cropped.offsetY());
-        return new OcrResultVO(fileId, versionNo, engine.name(), language,
+        return withFingerprint(fileId, versionNo, engine.name(), language,
                 1, 1, recognized.truncated(), List.of(page));
     }
 
@@ -165,7 +166,7 @@ public class OcrServiceImpl implements OcrService {
                         image.getWidth(), image.getHeight(), recognized,
                         cropped.region(), cropped.offsetX(), cropped.offsetY()));
             }
-            return new OcrResultVO(fileId, versionNo, engine.name(), language,
+            return withFingerprint(fileId, versionNo, engine.name(), language,
                     totalPages, renderedPages, truncated, results);
         } catch (BusinessException e) {
             throw e;
@@ -436,4 +437,16 @@ public class OcrServiceImpl implements OcrService {
     private record NativeText(String text, boolean truncated) { }
     private record CroppedImage(BufferedImage image, OcrResultVO.Region region,
                                 int offsetX, int offsetY) { }
+
+    private static OcrResultVO withFingerprint(Long fileId, Integer versionNo,
+                                               String engine, String language,
+                                               int totalPages, int renderedPages,
+                                               boolean truncated,
+                                               List<OcrResultVO.Page> pages) {
+        OcrResultVO withoutFingerprint = new OcrResultVO(fileId, versionNo, engine, language,
+                totalPages, renderedPages, truncated, pages, null);
+        return new OcrResultVO(fileId, versionNo, engine, language,
+                totalPages, renderedPages, truncated, pages,
+                OcrFingerprint.of(withoutFingerprint));
+    }
 }

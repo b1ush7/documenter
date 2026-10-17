@@ -72,6 +72,7 @@ class OcrServiceImplTest {
         var result = service.recognize(USER_ID, FILE_ID, VERSION, request);
 
         assertEquals("cloud-vision", result.engine());
+        assertTrue(result.fingerprint().matches("^[a-f0-9]{64}$"));
         assertEquals(1, result.pages().size());
         assertEquals("OCR", result.pages().getFirst().source());
         assertEquals(42, result.pages().getFirst().confidence());

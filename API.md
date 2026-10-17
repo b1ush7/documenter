@@ -135,6 +135,8 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | PDF | GET | `/file/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview` | 是 | 渲染 PDF 指定页 PNG 预览 |
 | PDF/图片 | POST | `/file/{fileId}/versions/{versionNo}/ocr` | 是 | 云端识别 PDF 扫描页或 PNG/JPEG |
 | PDF/图片 | POST | `/file/{fileId}/versions/{versionNo}/ocr/text` | 是 | 云端识别并下载 UTF-8 纯文本 |
+| PDF/图片 | PUT | `/file/{fileId}/versions/{versionNo}/ocr/corrections` | 是 | 按 OCR 结果指纹保存逐页人工校正 |
+| PDF/图片 | GET | `/file/{fileId}/versions/{versionNo}/ocr/corrections/{fingerprint}` | 是 | 读取已保存的逐页人工校正 |
 | PDF | POST | `/file/{fileId}/versions/{versionNo}/pdf/convert-to-docx` | 是 | 将原生文字或已启用 OCR 的 PDF 重建为 DOCX 新版本 |
 | XLSX | GET | `/file/{fileId}/versions/{versionNo}/xlsx/structure` | 是 | 读取工作表与单元格结构 |
 | XLSX | GET | `/file/{fileId}/versions/{versionNo}/xlsx/range` | 是 | 读取指定矩形区域 |
@@ -576,6 +578,7 @@ POST /file/10/versions/2/restore?expectVersion=5
   "totalPages": 3,
   "renderedPages": 1,
   "truncated": false,
+  "fingerprint": "64 位小写十六进制 SHA-256",
   "pages": [{
     "pageNo": 2,
     "source": "OCR",
@@ -631,6 +634,21 @@ POST /file/10/versions/2/restore?expectVersion=5
 坐标单位是完整渲染图或原始图片的像素；传入 `region` 时服务端只把裁剪区域发送云端，返回行和表格单元格坐标会加回区域偏移，页面 `region` 仍映射到完整页面。指定区域时，即使 PDF 页有原生文字也不复用整页文字。低置信度阈值默认 60；低于阈值的行设置 `needsReview=true`，页面 `needsReview` 为任一行的聚合结果。结果按 `top`、`left` 排序。`paragraphs` 是按纵向间距做的启发式分组，只用于复制和纯文本导出。`tables` 只接受云端模型显式返回的结构，服务端校验行列边界、合并跨度、完整覆盖且不能重叠；结构不完整或重叠返回 502，不会猜测表格。默认最多 200 行、100 列、每页合计 5000 个单元格。OCR 返回识别数据，不保存新版本，也不会修改原文件。
 
 `POST /file/{fileId}/versions/{versionNo}/ocr/text` 接受与上述完全相同的 JSON，并以 `text/plain;charset=UTF-8` 附件返回识别文字。页间使用换页符 `\f`，文件名形如 `ocr-10-v2.txt`；不生成新版本。
+
+人工校正使用 OCR 结果顶层的 `fingerprint` 标识同一份识别内容。保存不会覆盖 PDF/图片，也不创建文件版本：
+
+```json
+PUT /file/10/versions/2/ocr/corrections
+{
+  "fingerprint": "64 位小写十六进制 SHA-256",
+  "pages": [
+    {"pageNo": 1, "text": "人工确认后的第一页文字"},
+    {"pageNo": 2, "text": ""}
+  ]
+}
+```
+
+单次 1～100 页，页码不能重复；空字符串表示用户确认该页无文字，总字符数沿用 OCR 输出上限。同一用户、文件版本和指纹重复保存时覆盖校正内容；并发首次保存冲突返回 `409`。`GET .../ocr/corrections/{fingerprint}` 返回 `fileId/versionNo/fingerprint/pages/updatedAt`，不存在返回 `404`。校正记录使用迁移 V7，当前测试未连接真实 MariaDB。指纹只标识 OCR 结果，不包含云端 API Key。
 
 云端 OCR 默认关闭。部署前需在管理端创建、配置并启用 `scope=OCR` 的默认模型；接口地址必须是 HTTPS 的 OpenAI 兼容 `chat/completions` 端点，模型需支持 `image_url` data URL，并能按约定返回行文字及像素坐标。API Key 继续使用既有 AES-256-GCM 模型密钥存储，不返回前端。启用后会把扫描页和图片发送给该云服务，敏感文档不得启用或必须使用满足组织合规要求的部署。未启用、未配置默认模型、鉴权失败或上游不可用返回 503；超时返回 504；其他上游失败、响应格式错误或超过配置的响应大小上限（默认 16 MiB）返回 502，上游限流返回 429。结果缓存位于存储临时目录，键包含图片摘要、模型配置和语言，不包含明文密钥。
 

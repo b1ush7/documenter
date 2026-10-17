@@ -5,7 +5,7 @@ import java.util.List;
 /** PDF 或图片 OCR 的统一结果。 */
 public record OcrResultVO(Long fileId, Integer versionNo, String engine, String language,
                           int totalPages, int renderedPages, boolean truncated,
-                          List<Page> pages) {
+                          List<Page> pages, String fingerprint) {
 
     public OcrResultVO {
         pages = pages == null ? List.of() : List.copyOf(pages);
