@@ -111,7 +111,8 @@ public class CloudVisionOcrEngine implements OcrEngine {
         if (cachedResponse != null) {
             return parseResponse(cachedResponse, image.getWidth(), image.getHeight(),
                     properties.getLowConfidenceThreshold(), properties.getMaxWords(),
-                    properties.getMaxOutputChars());
+                    properties.getMaxOutputChars(), properties.getMaxTableRows(),
+                    properties.getMaxTableColumns(), properties.getMaxTableCells());
         }
         URI endpoint = endpoint(config.baseUrl());
         String payload = requestPayload(pngBytes, language, config);
@@ -154,22 +155,25 @@ public class CloudVisionOcrEngine implements OcrEngine {
 
         Result result = parseResponse(responseBody, image.getWidth(), image.getHeight(),
                 properties.getLowConfidenceThreshold(), properties.getMaxWords(),
-                properties.getMaxOutputChars());
+                properties.getMaxOutputChars(), properties.getMaxTableRows(),
+                properties.getMaxTableColumns(), properties.getMaxTableCells());
         writeCache(pngBytes, language, config, responseBody);
         return result;
     }
 
     static Result parseResponse(byte[] responseBody, int imageWidth, int imageHeight,
                                 double lowConfidenceThreshold, int maxWords,
-                                int maxOutputChars) {
+                                int maxOutputChars, int maxTableRows,
+                                int maxTableColumns, int maxTableCells) {
         try {
             JsonNode root = new com.fasterxml.jackson.databind.ObjectMapper()
                     .readTree(responseBody);
             String content = messageContent(root.path("choices").path(0)
                     .path("message").path("content"));
             String json = extractJson(content);
-            JsonNode linesNode = new com.fasterxml.jackson.databind.ObjectMapper()
-                    .readTree(json).path("lines");
+            JsonNode contentRoot = new com.fasterxml.jackson.databind.ObjectMapper()
+                    .readTree(json);
+            JsonNode linesNode = contentRoot.path("lines");
             if (!linesNode.isArray()) {
                 throw new BusinessException(502, "云端 OCR 未返回 lines 数组");
             }
@@ -202,12 +206,101 @@ public class CloudVisionOcrEngine implements OcrEngine {
                         confidence < lowConfidenceThreshold));
             }
             lines.sort(Comparator.comparingInt(Line::top).thenComparingInt(Line::left));
-            return new Result(lines, truncated);
+            List<Table> tables = parseTables(contentRoot.path("tables"),
+                    imageWidth, imageHeight, lowConfidenceThreshold,
+                    maxTableRows, maxTableColumns, maxTableCells);
+            return new Result(lines, tables, truncated);
         } catch (BusinessException e) {
             throw e;
         } catch (IOException | RuntimeException invalid) {
             throw new BusinessException(502, "云端 OCR 返回格式不合法");
         }
+    }
+
+    private static List<Table> parseTables(JsonNode tablesNode, int imageWidth,
+                                           int imageHeight, double reviewThreshold,
+                                           int maxRows, int maxColumns,
+                                           int maxCells) {
+        if (tablesNode == null || tablesNode.isMissingNode() || tablesNode.isNull()) {
+            return List.of();
+        }
+        if (!tablesNode.isArray()) {
+            throw new BusinessException(502, "云端 OCR tables 必须是数组");
+        }
+        List<Table> tables = new ArrayList<>();
+        int totalCells = 0;
+        for (JsonNode tableNode : tablesNode) {
+            int rows = tableNode.path("rows").asInt(0);
+            int columns = tableNode.path("columns").asInt(0);
+            if (rows < 1 || rows > maxRows || columns < 1 || columns > maxColumns) {
+                throw new BusinessException(422, "云端 OCR 表格行列数超出允许范围");
+            }
+            JsonNode cellsNode = tableNode.path("cells");
+            if (!cellsNode.isArray()) {
+                throw new BusinessException(502, "云端 OCR 表格缺少 cells 数组");
+            }
+            totalCells += cellsNode.size();
+            if (totalCells > maxCells) {
+                throw new BusinessException(413, "云端 OCR 表格单元格总数超过限制");
+            }
+            boolean[][] covered = new boolean[rows][columns];
+            List<Cell> cells = new ArrayList<>();
+            double confidenceSum = 0;
+            boolean needsReview = false;
+            for (JsonNode cellNode : cellsNode) {
+                int row = cellNode.path("row").asInt(-1);
+                int column = cellNode.path("column").asInt(-1);
+                int rowSpan = cellNode.path("rowSpan").asInt(1);
+                int columnSpan = cellNode.path("columnSpan").asInt(1);
+                if (row < 0 || column < 0 || rowSpan < 1 || columnSpan < 1
+                        || row + rowSpan > rows || column + columnSpan > columns) {
+                    throw new BusinessException(502, "云端 OCR 表格单元格跨度超出范围");
+                }
+                for (int rowIndex = row; rowIndex < row + rowSpan; rowIndex++) {
+                    for (int columnIndex = column;
+                         columnIndex < column + columnSpan; columnIndex++) {
+                        if (covered[rowIndex][columnIndex]) {
+                            throw new BusinessException(502, "云端 OCR 表格单元格区域重叠");
+                        }
+                        covered[rowIndex][columnIndex] = true;
+                    }
+                }
+                int left = bounded(cellNode.path("left").asInt(0), 0, imageWidth);
+                int top = bounded(cellNode.path("top").asInt(0), 0, imageHeight);
+                int width = bounded(cellNode.path("width").asInt(0), 0,
+                        Math.max(0, imageWidth - left));
+                int height = bounded(cellNode.path("height").asInt(0), 0,
+                        Math.max(0, imageHeight - top));
+                double confidence = normalizeConfidence(
+                        cellNode.path("confidence").asDouble(0));
+                boolean cellNeedsReview = confidence < reviewThreshold;
+                needsReview |= cellNeedsReview;
+                confidenceSum += confidence;
+                cells.add(new Cell(row, column, rowSpan, columnSpan,
+                        cellNode.path("text").asText("").replace("\u0000", "").trim(),
+                        left, top, width, height, confidence, cellNeedsReview));
+            }
+            for (boolean[] row : covered) {
+                for (boolean value : row) {
+                    if (!value) {
+                        throw new BusinessException(502,
+                                "云端 OCR 表格存在未覆盖单元格，无法验证结构");
+                    }
+                }
+            }
+            cells.sort(Comparator.comparingInt(Cell::row)
+                    .thenComparingInt(Cell::column));
+            tables.add(new Table(rows, columns,
+                    cells.isEmpty() ? 0 : Math.round(
+                            confidenceSum / cells.size() * 100d) / 100d,
+                    needsReview, cells));
+        }
+        return List.copyOf(tables);
+    }
+
+    private static double normalizeConfidence(double confidence) {
+        if (confidence > 0 && confidence <= 1) confidence *= 100;
+        return Math.max(0, Math.min(100, Math.round(confidence * 100d) / 100d));
     }
 
     private String requestPayload(byte[] pngBytes, String language,
@@ -239,9 +332,15 @@ public class CloudVisionOcrEngine implements OcrEngine {
         return """
                 识别图片中的所有文字，保持从上到下、从左到右的阅读顺序。
                 目标语言：%s。只返回严格 JSON，不要 Markdown 或解释：
-                {"lines":[{"text":"原始文字","left":0,"top":0,"width":0,"height":0,"confidence":95}]}
+                {"lines":[{"text":"原始文字","left":0,"top":0,"width":0,"height":0,"confidence":95}],
+                 "tables":[{"rows":2,"columns":2,"cells":[
+                   {"row":0,"column":0,"rowSpan":1,"columnSpan":1,"text":"表头",
+                    "left":0,"top":0,"width":100,"height":30,"confidence":95}
+                 ]}]}
                 left/top/width/height 使用输入图片像素坐标；confidence 使用 0 到 100。
                 每个可见文字行一个对象，不翻译、不总结、不补写看不清的内容。
+                只有能明确识别完整矩形表格时才返回 tables；没有表格或无法验证时返回空数组。
+                cells 必须完整覆盖 rows×columns，合并单元格用 rowSpan/columnSpan，不能重叠。
                 """.formatted(language);
     }
 

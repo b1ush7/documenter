@@ -14,10 +14,12 @@ public record OcrResultVO(Long fileId, Integer versionNo, String engine, String 
     /** source 为 NATIVE / OCR / EMPTY。 */
     public record Page(int pageNo, String source, int width, int height, String text,
                        Double confidence, boolean needsReview, Region region,
-                       List<Paragraph> paragraphs, List<Line> lines, boolean truncated) {
+                       List<Paragraph> paragraphs, List<Table> tables,
+                       List<Line> lines, boolean truncated) {
 
         public Page {
             paragraphs = paragraphs == null ? List.of() : List.copyOf(paragraphs);
+            tables = tables == null ? List.of() : List.copyOf(tables);
             lines = lines == null ? List.of() : List.copyOf(lines);
         }
     }
@@ -38,5 +40,18 @@ public record OcrResultVO(Long fileId, Integer versionNo, String engine, String 
 
     /** 本次识别区域；坐标相对完整页面或原图。 */
     public record Region(int x, int y, int width, int height) {
+    }
+
+    /** 行列下标从 0 开始，合并单元格通过 rowSpan/columnSpan 表示。 */
+    public record Table(int rows, int columns, double confidence,
+                        boolean needsReview, List<Cell> cells) {
+        public Table {
+            cells = cells == null ? List.of() : List.copyOf(cells);
+        }
+    }
+
+    public record Cell(int row, int column, int rowSpan, int columnSpan,
+                       String text, int left, int top, int width, int height,
+                       double confidence, boolean needsReview) {
     }
 }

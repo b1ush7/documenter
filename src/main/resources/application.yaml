@@ -83,6 +83,9 @@ res:
     max-pages: ${OCR_MAX_PAGES:50}
     max-words: ${OCR_MAX_WORDS:200000}
     max-output-chars: ${OCR_MAX_OUTPUT_CHARS:2000000}
+    max-table-rows: ${OCR_MAX_TABLE_ROWS:200}
+    max-table-columns: ${OCR_MAX_TABLE_COLUMNS:100}
+    max-table-cells: ${OCR_MAX_TABLE_CELLS:5000}
     max-image-bytes: ${OCR_MAX_IMAGE_BYTES:20971520}
     max-response-bytes: ${OCR_MAX_RESPONSE_BYTES:16777216}
     low-confidence-threshold: ${OCR_LOW_CONFIDENCE_THRESHOLD:60}

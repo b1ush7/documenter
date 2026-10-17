@@ -37,6 +37,12 @@ public class OcrProperties {
 
     private int maxOutputChars = 2_000_000;
 
+    private int maxTableRows = 200;
+
+    private int maxTableColumns = 100;
+
+    private int maxTableCells = 5000;
+
     /** 发送到云端的单页 PNG 最大字节数。 */
     private long maxImageBytes = 20L * 1024 * 1024;
 

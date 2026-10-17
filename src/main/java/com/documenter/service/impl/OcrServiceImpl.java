@@ -136,7 +136,7 @@ public class OcrServiceImpl implements OcrService {
                             100, false);
                     results.add(new OcrResultVO.Page(pageNo, "NATIVE", 0, 0,
                             nativeText.text(), 100d, false, null,
-                            List.of(),
+                            List.of(), List.of(),
                             nativeLine == null ? List.of() : List.of(nativeLine),
                             nativeText.truncated()));
                     truncated |= nativeText.truncated();
@@ -189,8 +189,25 @@ public class OcrServiceImpl implements OcrService {
                 .average().orElse(0) * 100d) / 100d;
         boolean needsReview = lines.stream().anyMatch(OcrResultVO.Line::needsReview);
         List<OcrResultVO.Paragraph> paragraphs = paragraphs(lines);
+        List<OcrResultVO.Table> tables = result.tables().stream()
+                .map(table -> toTable(table, offsetX, offsetY))
+                .toList();
         return new OcrResultVO.Page(pageNo, source, width, height, text,
-                confidence, needsReview, region, paragraphs, lines, result.truncated());
+                confidence, needsReview, region, paragraphs, tables,
+                lines, result.truncated());
+    }
+
+    private static OcrResultVO.Table toTable(OcrEngine.Table table,
+                                             int offsetX, int offsetY) {
+        return new OcrResultVO.Table(table.rows(), table.columns(),
+                table.confidence(), table.needsReview(),
+                table.cells().stream()
+                        .map(cell -> new OcrResultVO.Cell(
+                                cell.row(), cell.column(), cell.rowSpan(), cell.columnSpan(),
+                                cell.text(), cell.left() + offsetX, cell.top() + offsetY,
+                                cell.width(), cell.height(), cell.confidence(),
+                                cell.needsReview()))
+                        .toList());
     }
 
     private static List<OcrResultVO.Paragraph> paragraphs(List<OcrResultVO.Line> lines) {

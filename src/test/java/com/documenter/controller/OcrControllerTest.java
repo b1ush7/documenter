@@ -51,6 +51,9 @@ class OcrControllerTest {
                 2, "OCR", 100, 80, "标题", 93d, false,
                 new OcrResultVO.Region(5, 8, 40, 30),
                 List.of(),
+                List.of(new OcrResultVO.Table(1, 1, 93, false,
+                        List.of(new OcrResultVO.Cell(0, 0, 1, 1, "标题",
+                                10, 12, 30, 16, 93, false)))),
                 List.of(new OcrResultVO.Line("标题", 10, 12, 30, 16, 93, false)),
                 false)));
         when(service.recognize(eq(7L), eq(10L), eq(2), any())).thenReturn(result);
@@ -64,6 +67,7 @@ class OcrControllerTest {
                 .andExpect(jsonPath("$.code").value(0))
                 .andExpect(jsonPath("$.data.pages[0].source").value("OCR"))
                 .andExpect(jsonPath("$.data.pages[0].region.x").value(5))
+                .andExpect(jsonPath("$.data.pages[0].tables[0].rows").value(1))
                 .andExpect(jsonPath("$.data.pages[0].lines[0].confidence").value(93));
     }
 
@@ -101,6 +105,6 @@ class OcrControllerTest {
 
     private static OcrResultVO.Page nativePage(int pageNo, String text) {
         return new OcrResultVO.Page(pageNo, "NATIVE", 0, 0, text,
-                100d, false, null, List.of(), List.of(), false);
+                100d, false, null, List.of(), List.of(), List.of(), false);
     }
 }

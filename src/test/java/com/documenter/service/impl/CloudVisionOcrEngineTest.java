@@ -44,7 +44,13 @@ class CloudVisionOcrEngineTest {
                 {"lines":[
                   {"text":"第二行","left":10,"top":30,"width":80,"height":20,"confidence":0.55},
                   {"text":"First line","left":10,"top":10,"width":120,"height":18,"confidence":0.96}
-                ]}
+                ],
+                 "tables":[{"rows":2,"columns":2,"cells":[
+                   {"row":0,"column":0,"rowSpan":1,"columnSpan":1,"text":"表头","left":0,"top":0,"width":50,"height":20,"confidence":0.95},
+                   {"row":0,"column":1,"rowSpan":1,"columnSpan":1,"text":"值","left":50,"top":0,"width":50,"height":20,"confidence":0.94},
+                   {"row":1,"column":0,"rowSpan":1,"columnSpan":1,"text":"A","left":0,"top":20,"width":50,"height":20,"confidence":0.93},
+                   {"row":1,"column":1,"rowSpan":1,"columnSpan":1,"text":"1","left":50,"top":20,"width":50,"height":20,"confidence":0.92}
+                 ]}]}
                 ```
                 """;
         String responseBody = new ObjectMapper().writeValueAsString(
@@ -95,6 +101,9 @@ class CloudVisionOcrEngineTest {
         assertEquals("第二行", first.lines().get(1).text());
         assertEquals(55, first.lines().get(1).confidence());
         assertTrue(first.lines().get(1).needsReview());
+        assertEquals(1, first.tables().size());
+        assertEquals(2, first.tables().getFirst().rows());
+        assertEquals(4, first.tables().getFirst().cells().size());
         assertEquals(first, cached);
     }
 
@@ -104,9 +113,36 @@ class CloudVisionOcrEngineTest {
                 () -> CloudVisionOcrEngine.parseResponse(
                         "{\"choices\":[{\"message\":{\"content\":\"not json\"}}]}"
                                 .getBytes(StandardCharsets.UTF_8),
-                        100, 100, 60, 100, 1000));
+                        100, 100, 60, 100, 1000, 200, 100, 5000));
 
         assertEquals(502, error.getCode());
+    }
+
+    @Test
+    void rejectsOverlappingTableCells() {
+        String content = """
+                {"lines":[],"tables":[{"rows":2,"columns":2,"cells":[
+                {"row":0,"column":0,"rowSpan":1,"columnSpan":2,"text":"A"},
+                {"row":0,"column":1,"rowSpan":1,"columnSpan":1,"text":"B"},
+                {"row":1,"column":0,"rowSpan":1,"columnSpan":1,"text":"C"},
+                {"row":1,"column":1,"rowSpan":1,"columnSpan":1,"text":"D"}
+                ]}]}
+                """;
+        String response;
+        try {
+            response = new ObjectMapper().writeValueAsString(
+                    Map.of("choices", List.of(Map.of("message", Map.of("content", content)))));
+        } catch (Exception impossible) {
+            throw new AssertionError(impossible);
+        }
+
+        BusinessException error = assertThrows(BusinessException.class,
+                () -> CloudVisionOcrEngine.parseResponse(
+                        response.getBytes(StandardCharsets.UTF_8),
+                        100, 100, 60, 100, 1000, 200, 100, 5000));
+
+        assertEquals(502, error.getCode());
+        assertTrue(error.getMessage().contains("重叠"));
     }
 
     private static byte[] png() throws Exception {

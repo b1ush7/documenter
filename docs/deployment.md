@@ -102,6 +102,7 @@ application-service.yaml 是本地维护的部署统一配置，放在 src/main/
 | OCR_DEFAULT_LANGUAGE / OCR_ALLOWED_LANGUAGES | 默认 `auto`；允许 `zh`、`en` 及 `zh+en` 等已开放组合 |
 | OCR_PDF_DPI / OCR_MAX_PDF_DPI / OCR_MAX_PAGES | 扫描页渲染 DPI、DPI 上限和单次最多页数；调用方可用 pages 分批 |
 | OCR_MAX_WORDS / OCR_MAX_OUTPUT_CHARS / OCR_MAX_IMAGE_BYTES / OCR_MAX_RESPONSE_BYTES | 云端返回行数、单次文字总量、单页上传字节和单次原始响应字节限制 |
+| OCR_MAX_TABLE_ROWS / OCR_MAX_TABLE_COLUMNS / OCR_MAX_TABLE_CELLS | 云端可选表格结构的行列和单元格上限；超限拒绝整次响应，不保存部分表格 |
 | OCR_LOW_CONFIDENCE_THRESHOLD | 低于该置信度百分比的行标记 needsReview，不会自动篡改文字 |
 | OCR_CACHE_ENABLED / OCR_CACHE_DIRECTORY | 缓存云响应，目录位于 STORAGE_LOCAL_TEMP 下；缓存键包含图片摘要、模型配置、语言和密钥摘要，不保存明文密钥 |
 | PDF_MAX_CONVERSION_IMAGES / PDF_MAX_CONVERSION_IMAGE_PIXELS_TOTAL | PDF 转 DOCX 最多重建的内嵌图片数和累计像素；超出部分跳过图片，文字仍保留，单张图仍受 STORAGE_MAX_IMAGE_PIXELS 约束 |

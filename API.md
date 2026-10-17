@@ -596,6 +596,25 @@ POST /file/10/versions/2/restore?expectVersion=5
       "needsReview": false,
       "lines": []
     }],
+    "tables": [{
+      "rows": 2,
+      "columns": 2,
+      "confidence": 93.5,
+      "needsReview": false,
+      "cells": [{
+        "row": 0,
+        "column": 0,
+        "rowSpan": 1,
+        "columnSpan": 1,
+        "text": "项目",
+        "left": 120,
+        "top": 180,
+        "width": 100,
+        "height": 30,
+        "confidence": 96,
+        "needsReview": false
+      }]
+    }],
     "lines": [{
       "text": "标题",
       "left": 120,
@@ -609,7 +628,7 @@ POST /file/10/versions/2/restore?expectVersion=5
 }
 ```
 
-坐标单位是完整渲染图或原始图片的像素；传入 `region` 时服务端只把裁剪区域发送云端，返回行的坐标会加回区域偏移，页面 `region` 仍映射到完整页面。指定区域时，即使 PDF 页有原生文字也不复用整页文字。低置信度阈值默认 60；低于阈值的行设置 `needsReview=true`，页面 `needsReview` 为任一行的聚合结果。结果按 `top`、`left` 排序。`paragraphs` 是按纵向间距做的启发式分组，只用于复制和纯文本导出，不表示已经恢复完整表格结构。OCR 返回识别数据，不保存新版本，也不会修改原文件。
+坐标单位是完整渲染图或原始图片的像素；传入 `region` 时服务端只把裁剪区域发送云端，返回行和表格单元格坐标会加回区域偏移，页面 `region` 仍映射到完整页面。指定区域时，即使 PDF 页有原生文字也不复用整页文字。低置信度阈值默认 60；低于阈值的行设置 `needsReview=true`，页面 `needsReview` 为任一行的聚合结果。结果按 `top`、`left` 排序。`paragraphs` 是按纵向间距做的启发式分组，只用于复制和纯文本导出。`tables` 只接受云端模型显式返回的结构，服务端校验行列边界、合并跨度、完整覆盖且不能重叠；结构不完整或重叠返回 502，不会猜测表格。默认最多 200 行、100 列、每页合计 5000 个单元格。OCR 返回识别数据，不保存新版本，也不会修改原文件。
 
 `POST /file/{fileId}/versions/{versionNo}/ocr/text` 接受与上述完全相同的 JSON，并以 `text/plain;charset=UTF-8` 附件返回识别文字。页间使用换页符 `\f`，文件名形如 `ocr-10-v2.txt`；不生成新版本。
 

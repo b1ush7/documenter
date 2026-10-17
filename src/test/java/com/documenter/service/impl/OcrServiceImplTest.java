@@ -55,7 +55,10 @@ class OcrServiceImplTest {
         when(engine.name()).thenReturn("cloud-vision");
         when(engine.recognize(any(byte[].class), eq("zh"))).thenReturn(
                 new OcrEngine.Result(List.of(
-                        new OcrEngine.Line("待复核", 3, 4, 20, 10, 42, true)), false));
+                        new OcrEngine.Line("待复核", 3, 4, 20, 10, 42, true)),
+                        List.of(new OcrEngine.Table(1, 1, 42, true,
+                                List.of(new OcrEngine.Cell(0, 0, 1, 1,
+                                        "待复核", 3, 4, 20, 10, 42, true)))), false));
         var request = new OcrRequestDTO();
         request.setLanguage("zh");
         request.setPages(List.of(1));
@@ -78,6 +81,11 @@ class OcrServiceImplTest {
         assertEquals(8, result.pages().getFirst().lines().getFirst().left());
         assertEquals(8, result.pages().getFirst().lines().getFirst().top());
         assertEquals(1, result.pages().getFirst().paragraphs().size());
+        assertEquals(1, result.pages().getFirst().tables().size());
+        assertEquals(8, result.pages().getFirst().tables().getFirst()
+                .cells().getFirst().left());
+        assertEquals(8, result.pages().getFirst().tables().getFirst()
+                .cells().getFirst().top());
     }
 
     @Test
