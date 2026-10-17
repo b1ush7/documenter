@@ -81,4 +81,28 @@ class DocxTableFormattingControllerTest {
                 .andExpect(jsonPath("$.code").value(400));
         verify(documents, never()).editTable(any(), any(), any(), any());
     }
+
+    @Test
+    void acceptsMergeCellsInsideExistingTableEditContract() throws Exception {
+        var version = new VersionVO();
+        version.setVersionNo(2);
+        when(documents.editTable(eq(7L), eq(10L), eq(1), any())).thenReturn(version);
+
+        mvc.perform(post("/file/10/versions/1/table-edits")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"operations":[{
+                                  "type":"MERGE_CELLS",
+                                  "blockId":"body/t0/r0/c0",
+                                  "endBlockId":"body/t0/r1/c1"
+                                }]}
+                                """))
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.versionNo").value(2));
+        verify(documents).editTable(eq(7L), eq(10L), eq(1),
+                argThat((EditDocxTableDTO request) ->
+                        "MERGE_CELLS".equals(request.getOperations().getFirst().getType())
+                                && "body/t0/r1/c1".equals(request.getOperations()
+                                .getFirst().getEndBlockId())));
+    }
 }

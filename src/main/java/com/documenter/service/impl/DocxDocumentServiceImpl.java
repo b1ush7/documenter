@@ -54,8 +54,11 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.apache.xmlbeans.XmlCursor;
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTSectPr;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTTc;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTTcPr;
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.STHdrFtr;
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.STFldCharType;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STMerge;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -605,6 +608,11 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                             Boolean.TRUE.equals(edit.operation().getRepeatHeader()));
                     case "SET_COLUMN_WIDTH" -> setColumnWidth(edit.table(), edit.cell(),
                             edit.operation().getDimensionTwips());
+                    case "MERGE_CELLS" -> mergeCells(edit.table(), edit.cell(),
+                            requireCell(document, edit.operation().getEndBlockId()),
+                            edit.operation().getBlockId(), edit.operation().getEndBlockId());
+                    case "SPLIT_CELL" -> splitCell(edit.table(), edit.cell(),
+                            edit.operation().getBlockId());
                     default -> throw new BusinessException(400, "不支持的表格操作");
                 }
             }
@@ -1139,25 +1147,31 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         Set<String> operationKeys = new HashSet<>();
         Set<String> deletedRows = new HashSet<>();
         Set<String> insertedRows = new HashSet<>();
+        Set<String> mergeOrSplitTables = new HashSet<>();
+        Map<String, Integer> operationsByTable = new LinkedHashMap<>();
         for (EditDocxTableDTO.Operation operation : operations) {
             if (!operationKeys.add(operation.getType() + ":" + operation.getBlockId())) {
                 throw new BusinessException(400, "同一表格块不能重复执行相同操作：" + operation.getBlockId());
             }
             boolean setCell = "SET_CELL_TEXT".equals(operation.getType());
             boolean setColumnWidth = "SET_COLUMN_WIDTH".equals(operation.getType());
+            boolean mergeCells = "MERGE_CELLS".equals(operation.getType());
+            boolean splitCell = "SPLIT_CELL".equals(operation.getType());
             boolean insert = operation.getType().startsWith("INSERT_ROW_");
             boolean delete = "DELETE_ROW".equals(operation.getType());
             boolean setRowHeight = "SET_ROW_HEIGHT".equals(operation.getType());
             boolean repeatHeader = "REPEAT_HEADER_ROW".equals(operation.getType());
-            if (setCell || setColumnWidth) {
+            if (setCell || setColumnWidth || mergeCells || splitCell) {
                 if (!cellPattern.matcher(operation.getBlockId()).matches()
                         || operation.getValues() != null || operation.getRepeatHeader() != null) {
                     throw new BusinessException(400, "单元格操作必须指向单元格");
                 }
-                if (setCell && (operation.getText() == null || operation.getDimensionTwips() != null)) {
+                if (setCell && (operation.getText() == null || operation.getEndBlockId() != null
+                        || operation.getDimensionTwips() != null)) {
                     throw new BusinessException(400, "SET_CELL_TEXT 必须且只能包含 text");
                 }
-                if (setColumnWidth && (operation.getText() != null || operation.getDimensionTwips() == null)) {
+                if (setColumnWidth && (operation.getText() != null || operation.getEndBlockId() != null
+                        || operation.getDimensionTwips() == null)) {
                     throw new BusinessException(400, "SET_COLUMN_WIDTH 必须包含 dimensionTwips");
                 }
                 for (String deletedRow : deletedRows) {
@@ -1165,8 +1179,35 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                         throw new BusinessException(400, "不能修改同一请求中将被删除的行");
                     }
                 }
+                String table = tablePath(operation.getBlockId());
+                operationsByTable.merge(table, 1, Integer::sum);
+                if (mergeCells || splitCell) {
+                    if (operation.getText() != null || operation.getDimensionTwips() != null) {
+                        throw new BusinessException(400,
+                                operation.getType() + " 不能包含 text 或 dimensionTwips");
+                    }
+                    if (mergeCells) {
+                        if (operation.getEndBlockId() == null
+                                || !cellPattern.matcher(operation.getEndBlockId()).matches()) {
+                            throw new BusinessException(400,
+                                    "MERGE_CELLS 必须指向同一表格的另一个单元格");
+                        }
+                        if (!table.equals(tablePath(operation.getEndBlockId()))) {
+                            throw new BusinessException(400,
+                                    "MERGE_CELLS 的起止单元格必须属于同一表格");
+                        }
+                        if (operation.getBlockId().equals(operation.getEndBlockId())) {
+                            throw new BusinessException(400,
+                                    "MERGE_CELLS 必须覆盖至少两个单元格");
+                        }
+                    } else if (operation.getEndBlockId() != null) {
+                        throw new BusinessException(400, "SPLIT_CELL 不能包含 endBlockId");
+                    }
+                    mergeOrSplitTables.add(table);
+                }
             } else {
-                if (!rowPattern.matcher(operation.getBlockId()).matches() || operation.getText() != null) {
+                if (!rowPattern.matcher(operation.getBlockId()).matches()
+                        || operation.getText() != null || operation.getEndBlockId() != null) {
                     throw new BusinessException(400, "行操作必须指向表格行且不能包含 text");
                 }
                 if (insert && (operation.getValues() == null || operation.getValues().isEmpty()
@@ -1200,6 +1241,13 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                         throw new BusinessException(400, "REPEAT_HEADER_ROW 字段不合法或目标行将被删除");
                     }
                 }
+                operationsByTable.merge(tablePath(operation.getBlockId()), 1, Integer::sum);
+            }
+        }
+        for (String table : mergeOrSplitTables) {
+            if (operationsByTable.getOrDefault(table, 0) != 1) {
+                throw new BusinessException(400,
+                        "合并或拆分必须作为该表格在本次请求中的单独结构操作");
             }
         }
         for (EditDocxTableDTO.Operation operation : operations) {
@@ -1211,6 +1259,14 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                 }
             }
         }
+    }
+
+    private static String tablePath(String blockId) {
+        int rowSeparator = blockId.lastIndexOf("/r");
+        if (rowSeparator < 0) {
+            throw new BusinessException(400, "表格块 ID 格式错误：" + blockId);
+        }
+        return blockId.substring(0, rowSeparator);
     }
 
     private static void validateParagraphFormats(List<FormatDocxParagraphsDTO.Operation> operations) {
@@ -1503,7 +1559,9 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
     private static ResolvedTableEdit resolveTableEdit(XWPFDocument document,
                                                        EditDocxTableDTO.Operation operation) {
         if ("SET_CELL_TEXT".equals(operation.getType())
-                || "SET_COLUMN_WIDTH".equals(operation.getType())) {
+                || "SET_COLUMN_WIDTH".equals(operation.getType())
+                || "MERGE_CELLS".equals(operation.getType())
+                || "SPLIT_CELL".equals(operation.getType())) {
             XWPFTableCell cell = requireCell(document, operation.getBlockId());
             return new ResolvedTableEdit(operation, cell.getTableRow().getTable(),
                     cell.getTableRow(), cell);
@@ -1606,6 +1664,299 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
             cell.setWidth(String.valueOf(widthTwips));
             cell.setWidthType(TableWidthType.DXA);
         }
+    }
+
+    /**
+     * 合并无既有合并的矩形单元格区域。只保留简单文本，合并后的文字写入左上单元格。
+     */
+    private static void mergeCells(XWPFTable table, XWPFTableCell topLeft,
+                                   XWPFTableCell bottomRight, String startBlockId,
+                                   String endBlockId) {
+        int startRow = table.getRows().indexOf(topLeft.getTableRow());
+        int endRow = table.getRows().indexOf(bottomRight.getTableRow());
+        int startColumn = topLeft.getTableRow().getTableCells().indexOf(topLeft);
+        int endColumn = bottomRight.getTableRow().getTableCells().indexOf(bottomRight);
+        if (startRow < 0 || endRow < 0 || startColumn < 0 || endColumn < 0
+                || startRow > endRow || startColumn > endColumn) {
+            throw new BusinessException(400, "合并区域必须按左上到右下顺序指定");
+        }
+        if (startRow == endRow && startColumn == endColumn) {
+            throw new BusinessException(400, "合并区域必须包含至少两个单元格");
+        }
+
+        int columnCount = table.getRow(0).getTableCells().size();
+        for (XWPFTableRow row : table.getRows()) {
+            if (row.getTableCells().size() != columnCount) {
+                throw new BusinessException(422,
+                        "目标表格已有合并单元格或非规则网格，暂不支持再次合并");
+            }
+            for (XWPFTableCell cell : row.getTableCells()) {
+                if (hasMergeProperties(cell)) {
+                    throw new BusinessException(422,
+                            "目标表格已有合并单元格，暂不支持再次合并");
+                }
+            }
+        }
+
+        List<String> textLines = new ArrayList<>();
+        for (int rowIndex = startRow; rowIndex <= endRow; rowIndex++) {
+            for (int columnIndex = startColumn; columnIndex <= endColumn; columnIndex++) {
+                XWPFTableCell cell = table.getRow(rowIndex).getTableCells().get(columnIndex);
+                validateMergeCell(cell, blockCellId(startBlockId, rowIndex - startRow,
+                        columnIndex - startColumn));
+                for (XWPFParagraph paragraph : cell.getParagraphs()) {
+                    if (!paragraph.getText().isBlank()) {
+                        textLines.add(paragraph.getText().trim());
+                    }
+                }
+            }
+        }
+        replaceMergedCellText(topLeft, startBlockId, textLines);
+
+        int width = endColumn - startColumn + 1;
+        int height = endRow - startRow + 1;
+        for (int rowIndex = startRow; rowIndex <= endRow; rowIndex++) {
+            XWPFTableRow row = table.getRow(rowIndex);
+            if (width > 1) {
+                setGridSpan(row.getTableCells().get(startColumn), width);
+                for (int columnIndex = endColumn; columnIndex > startColumn; columnIndex--) {
+                    row.removeCell(columnIndex);
+                }
+            }
+            if (height > 1) {
+                setVMerge(row.getTableCells().get(startColumn),
+                        rowIndex == startRow ? STMerge.RESTART : STMerge.CONTINUE);
+            }
+        }
+    }
+
+    /**
+     * 拆分本接口形成的完整合并区域；新增单元格为空，并沿用左上单元格的基础属性。
+     */
+    private static void splitCell(XWPFTable table, XWPFTableCell target, String blockId) {
+        int startRow = table.getRows().indexOf(target.getTableRow());
+        int startColumn = target.getTableRow().getTableCells().indexOf(target);
+        if (startRow < 0 || startColumn < 0) {
+            throw new BusinessException(400, "无法确定待拆分的单元格");
+        }
+        int width = gridSpan(target);
+        STMerge.Enum verticalMerge = vMerge(target);
+        if (verticalMerge == STMerge.CONTINUE) {
+            throw new BusinessException(422, "请从纵向合并区域的左上单元格执行拆分");
+        }
+        if (width <= 1 && verticalMerge == null) {
+            throw new BusinessException(422, "目标单元格不是可拆分的合并区域");
+        }
+
+        List<XWPFTableCell> mergeGroup = new ArrayList<>();
+        mergeGroup.add(target);
+        if (verticalMerge == STMerge.RESTART) {
+            for (int rowIndex = startRow + 1; rowIndex < table.getRows().size(); rowIndex++) {
+                List<XWPFTableCell> cells = table.getRow(rowIndex).getTableCells();
+                if (startColumn >= cells.size()) {
+                    break;
+                }
+                XWPFTableCell continuation = cells.get(startColumn);
+                STMerge.Enum value = vMerge(continuation);
+                if (value == null) {
+                    break;
+                }
+                if (value != STMerge.CONTINUE || gridSpan(continuation) != width) {
+                    throw new BusinessException(422, "纵向合并区域结构不一致，无法安全拆分");
+                }
+                mergeGroup.add(continuation);
+            }
+        }
+
+        Set<XWPFTableCell> relatedCells = new HashSet<>(mergeGroup);
+        for (XWPFTableRow row : table.getRows()) {
+            for (XWPFTableCell cell : row.getTableCells()) {
+                if (hasMergeProperties(cell) && !relatedCells.contains(cell)) {
+                    throw new BusinessException(422,
+                            "目标表格还包含其他合并区域，暂不支持拆分");
+                }
+            }
+        }
+        for (int index = 0; index < mergeGroup.size(); index++) {
+            XWPFTableCell cell = mergeGroup.get(index);
+            if (hasHorizontalMerge(cell)) {
+                throw new BusinessException(422, "旧式横向合并单元格暂不支持拆分");
+            }
+            validateMergeCell(cell, index == 0 ? blockId : blockId + "/continued" + index);
+            if (index > 0 && !cell.getText().isBlank()) {
+                throw new BusinessException(422,
+                        "纵向合并的后续单元格包含文字，无法安全拆分");
+            }
+        }
+
+        for (XWPFTableCell cell : mergeGroup) {
+            XWPFTableRow row = cell.getTableRow();
+            TableWidthType widthType = safeCellWidthType(cell);
+            int cellWidth = safeCellWidth(cell);
+            clearMergeProperties(cell);
+            if (width > 1 && cellWidth > 0) {
+                cell.setWidth(String.valueOf(Math.max(1, cellWidth / width)));
+                if (widthType != null) cell.setWidthType(widthType);
+            }
+            for (int offset = 1; offset < width; offset++) {
+                insertSplitCell(row, startColumn + offset, cell, widthType, cellWidth, width);
+            }
+        }
+    }
+
+    private static int safeCellWidth(XWPFTableCell cell) {
+        if (!cell.getCTTc().isSetTcPr() || !cell.getCTTc().getTcPr().isSetTcW()
+                || !cell.getCTTc().getTcPr().getTcW().isSetW()) {
+            return 0;
+        }
+        try {
+            return cell.getWidth();
+        } catch (RuntimeException invalidWidth) {
+            return 0;
+        }
+    }
+
+    private static TableWidthType safeCellWidthType(XWPFTableCell cell) {
+        if (!cell.getCTTc().isSetTcPr() || !cell.getCTTc().getTcPr().isSetTcW()) {
+            return null;
+        }
+        try {
+            return cell.getWidthType();
+        } catch (RuntimeException invalidWidth) {
+            return null;
+        }
+    }
+
+    private static String blockCellId(String startBlockId, int rowOffset, int columnOffset) {
+        int rowSeparator = startBlockId.lastIndexOf("/r");
+        int columnSeparator = startBlockId.lastIndexOf("/c");
+        String tablePath = startBlockId.substring(0, rowSeparator);
+        int startRow = Integer.parseInt(startBlockId.substring(
+                rowSeparator + 2, columnSeparator));
+        int startColumn = Integer.parseInt(startBlockId.substring(columnSeparator + 2));
+        return tablePath + "/r" + (startRow + rowOffset)
+                + "/c" + (startColumn + columnOffset);
+    }
+
+    private static void validateMergeCell(XWPFTableCell cell, String blockId) {
+        if (!cell.getTables().isEmpty()) {
+            throw new BusinessException(422,
+                    "包含嵌套表格的单元格暂不支持合并或拆分：" + blockId);
+        }
+        String word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        for (Node child = cell.getCTTc().getDomNode().getFirstChild();
+             child != null; child = child.getNextSibling()) {
+            if (child.getNodeType() != Node.ELEMENT_NODE) continue;
+            if (!word.equals(child.getNamespaceURI())
+                    || !Set.of("tcPr", "p").contains(child.getLocalName())) {
+                throw new BusinessException(422,
+                        "单元格包含复杂内容，暂不支持合并或拆分：" + blockId);
+            }
+        }
+        if (cell.getParagraphs().isEmpty()) {
+            throw new BusinessException(422, "单元格缺少必要段落：" + blockId);
+        }
+        for (XWPFParagraph paragraph : cell.getParagraphs()) {
+            assertSimpleParagraph(paragraph, blockId);
+        }
+    }
+
+    private static void replaceMergedCellText(XWPFTableCell cell, String blockId,
+                                               List<String> lines) {
+        XWPFParagraph paragraph = cell.getParagraphs().getFirst();
+        org.openxmlformats.schemas.wordprocessingml.x2006.main.CTRPr runProperties = null;
+        if (!paragraph.getRuns().isEmpty() && paragraph.getRuns().getFirst().getCTR().isSetRPr()) {
+            runProperties = (org.openxmlformats.schemas.wordprocessingml.x2006.main.CTRPr)
+                    paragraph.getRuns().getFirst().getCTR().getRPr().copy();
+        }
+        for (int index = paragraph.getRuns().size() - 1; index >= 0; index--) {
+            paragraph.removeRun(index);
+        }
+        XWPFRun run = paragraph.createRun();
+        if (runProperties != null) run.getCTR().setRPr(runProperties);
+        for (int index = 0; index < lines.size(); index++) {
+            if (index > 0) run.addBreak();
+            run.setText(lines.get(index));
+        }
+        for (int index = cell.getParagraphs().size() - 1; index >= 1; index--) {
+            cell.removeParagraph(index);
+        }
+    }
+
+    private static void insertSplitCell(XWPFTableRow row, int position,
+                                        XWPFTableCell source, TableWidthType widthType,
+                                        int cellWidth, int span) {
+        CTTc inserted = row.getCtRow().insertNewTc(position);
+        if (source.getCTTc().isSetTcPr()) {
+            inserted.setTcPr((CTTcPr) source.getCTTc().getTcPr().copy());
+        }
+        clearMergeProperties(inserted);
+        XWPFTableCell created = new XWPFTableCell(inserted, row, row.getTable().getBody());
+        created.addParagraph();
+        if (cellWidth > 0) {
+            created.setWidth(String.valueOf(Math.max(1, cellWidth / span)));
+            if (widthType != null) created.setWidthType(widthType);
+        }
+    }
+
+    private static boolean hasMergeProperties(XWPFTableCell cell) {
+        return gridSpan(cell) > 1 || vMerge(cell) != null || hasHorizontalMerge(cell);
+    }
+
+    private static boolean hasHorizontalMerge(XWPFTableCell cell) {
+        return cell.getCTTc().isSetTcPr() && cell.getCTTc().getTcPr().isSetHMerge();
+    }
+
+    private static int gridSpan(XWPFTableCell cell) {
+        if (!cell.getCTTc().isSetTcPr() || !cell.getCTTc().getTcPr().isSetGridSpan()
+                || cell.getCTTc().getTcPr().getGridSpan().getVal() == null) {
+            return 1;
+        }
+        return Math.max(1,
+                cell.getCTTc().getTcPr().getGridSpan().getVal().intValue());
+    }
+
+    private static STMerge.Enum vMerge(XWPFTableCell cell) {
+        if (!cell.getCTTc().isSetTcPr() || !cell.getCTTc().getTcPr().isSetVMerge()) {
+            return null;
+        }
+        var merge = cell.getCTTc().getTcPr().getVMerge();
+        return merge.isSetVal() ? merge.getVal() : STMerge.CONTINUE;
+    }
+
+    private static void setGridSpan(XWPFTableCell cell, int width) {
+        CTTcPr properties = cellProperties(cell);
+        if (properties.isSetGridSpan()) {
+            properties.getGridSpan().setVal(BigInteger.valueOf(width));
+        } else {
+            properties.addNewGridSpan().setVal(BigInteger.valueOf(width));
+        }
+    }
+
+    private static void setVMerge(XWPFTableCell cell, STMerge.Enum value) {
+        CTTcPr properties = cellProperties(cell);
+        if (properties.isSetVMerge()) {
+            properties.getVMerge().setVal(value);
+        } else {
+            properties.addNewVMerge().setVal(value);
+        }
+    }
+
+    private static CTTcPr cellProperties(XWPFTableCell cell) {
+        return cell.getCTTc().isSetTcPr()
+                ? cell.getCTTc().getTcPr() : cell.getCTTc().addNewTcPr();
+    }
+
+    private static void clearMergeProperties(XWPFTableCell cell) {
+        clearMergeProperties(cell.getCTTc());
+    }
+
+    private static void clearMergeProperties(CTTc cell) {
+        if (!cell.isSetTcPr()) return;
+        CTTcPr properties = cell.getTcPr();
+        if (properties.isSetGridSpan()) properties.unsetGridSpan();
+        if (properties.isSetVMerge()) properties.unsetVMerge();
+        if (properties.isSetHMerge()) properties.unsetHMerge();
     }
 
     private static void insertParagraph(XWPFParagraph reference, String text, boolean after) {
