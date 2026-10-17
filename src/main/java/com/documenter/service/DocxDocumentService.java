@@ -6,7 +6,9 @@ import com.documenter.dto.FormatDocxParagraphsDTO;
 import com.documenter.dto.GenerateDocxDTO;
 import com.documenter.dto.InsertDocxImagesDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
+import com.documenter.dto.UpdateDocxHeaderFooterLinkDTO;
 import com.documenter.vo.DocxStructureVO;
+import com.documenter.vo.DocxHeaderFooterLinksVO;
 import com.documenter.vo.DocumentEditPlan;
 import com.documenter.vo.FileAssetVO;
 import com.documenter.vo.VersionVO;
@@ -51,4 +53,11 @@ public interface DocxDocumentService {
     /** 将已有 PNG/JPEG 文件版本以内嵌方式追加到段落，并保存为新版本。 */
     VersionVO insertImages(Long userId, Long fileId, Integer sourceVersion,
                            InsertDocxImagesDTO request);
+
+    /** 设置指定分节的页眉或页脚是否链接到上一节。 */
+    VersionVO updateHeaderFooterLink(Long userId, Long fileId, Integer sourceVersion,
+                                     UpdateDocxHeaderFooterLinkDTO request);
+
+    /** 查询明确 DOCX 版本各分节的页眉页脚链接状态。 */
+    DocxHeaderFooterLinksVO readHeaderFooterLinks(Long userId, Long fileId, Integer versionNo);
 }

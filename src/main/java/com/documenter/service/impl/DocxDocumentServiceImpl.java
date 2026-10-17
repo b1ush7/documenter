@@ -6,6 +6,7 @@ import com.documenter.dto.FormatDocxParagraphsDTO;
 import com.documenter.dto.GenerateDocxDTO;
 import com.documenter.dto.InsertDocxImagesDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
+import com.documenter.dto.UpdateDocxHeaderFooterLinkDTO;
 import com.documenter.entity.DocumentVersion;
 import com.documenter.enums.ChangeType;
 import com.documenter.exception.BusinessException;
@@ -16,6 +17,7 @@ import com.documenter.service.FileStorage;
 import com.documenter.service.VersionWriter;
 import com.documenter.util.Digests;
 import com.documenter.vo.DocxStructureVO;
+import com.documenter.vo.DocxHeaderFooterLinksVO;
 import com.documenter.vo.DocumentEditPlan;
 import com.documenter.vo.FileAssetVO;
 import com.documenter.vo.FileDownload;
@@ -31,6 +33,8 @@ import org.apache.poi.xwpf.usermodel.XWPFRun;
 import org.apache.poi.xwpf.usermodel.XWPFTable;
 import org.apache.poi.xwpf.usermodel.XWPFTableCell;
 import org.apache.poi.xwpf.usermodel.XWPFTableRow;
+import org.apache.poi.xwpf.model.XWPFHeaderFooterPolicy;
+import org.apache.poi.wp.usermodel.HeaderFooterType;
 import org.w3c.dom.Node;
 import org.apache.poi.xwpf.usermodel.XWPFAbstractNum;
 import org.apache.poi.xwpf.usermodel.XWPFNumbering;
@@ -42,6 +46,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.apache.xmlbeans.XmlCursor;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTSectPr;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STHdrFtr;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -135,6 +141,37 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
             }
             log.warn("读取 DOCX 结构失败, fileId={}, versionNo={}", fileId, versionNo, e);
             throw new BusinessException(422, "DOCX 文档无法解析或内容已损坏");
+        }
+    }
+
+    @Override
+    public DocxHeaderFooterLinksVO readHeaderFooterLinks(Long userId, Long fileId,
+                                                          Integer versionNo) {
+        FileDownload version = versionService.downloadVersion(userId, fileId, versionNo);
+        if (!isDocx(version)) {
+            throw new BusinessException(400, "当前版本不是 DOCX 文档");
+        }
+        try (InputStream input = version.resource().getInputStream();
+             XWPFDocument document = new XWPFDocument(input)) {
+            List<CTSectPr> sections = sectionProperties(document);
+            List<DocxHeaderFooterLinksVO.Section> result = new ArrayList<>();
+            for (int index = 0; index < sections.size(); index++) {
+                CTSectPr section = sections.get(index);
+                int sectionNo = index + 1;
+                boolean canInherit = sectionNo > 1;
+                result.add(new DocxHeaderFooterLinksVO.Section(sectionNo,
+                        canInherit && !hasReference(section, true, HeaderFooterType.DEFAULT),
+                        canInherit && !hasReference(section, true, HeaderFooterType.FIRST),
+                        canInherit && !hasReference(section, true, HeaderFooterType.EVEN),
+                        canInherit && !hasReference(section, false, HeaderFooterType.DEFAULT),
+                        canInherit && !hasReference(section, false, HeaderFooterType.FIRST),
+                        canInherit && !hasReference(section, false, HeaderFooterType.EVEN)));
+            }
+            return new DocxHeaderFooterLinksVO(fileId, versionNo, result.size(), result);
+        } catch (IOException | RuntimeException failure) {
+            if (failure instanceof BusinessException business) throw business;
+            log.warn("读取 DOCX 页眉页脚链接失败, fileId={}, versionNo={}", fileId, versionNo, failure);
+            throw new BusinessException(422, "DOCX 页眉页脚链接无法读取或内容已损坏");
         }
     }
 
@@ -239,6 +276,138 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                 appendImage(userId, insertion.paragraph(), insertion.operation());
             }
         });
+    }
+
+    @Override
+    public VersionVO updateHeaderFooterLink(Long userId, Long fileId, Integer sourceVersion,
+                                            UpdateDocxHeaderFooterLinkDTO request) {
+        if (request == null || request.getSectionNo() == null || request.getSectionNo() < 1
+                || request.getLocation() == null
+                || !(request.getLocation().equals("HEADER") || request.getLocation().equals("FOOTER"))
+                || request.getType() == null
+                || request.getLinkedToPrevious() == null) {
+            throw new BusinessException(400, "页眉页脚链接参数不完整");
+        }
+        boolean unlink = !request.getLinkedToPrevious();
+        if (unlink && (request.getText() == null || request.getText().isBlank())) {
+            throw new BusinessException(400, "取消页眉页脚链接时必须提供新文字");
+        }
+        if (!unlink && request.getText() != null && !request.getText().isBlank()) {
+            throw new BusinessException(400, "重新链接到上一节时不能提供页眉页脚文字");
+        }
+        HeaderFooterType type;
+        try {
+            type = HeaderFooterType.valueOf(request.getType());
+        } catch (IllegalArgumentException invalid) {
+            throw new BusinessException(400, "不支持的页眉页脚类型");
+        }
+        boolean header = request.getLocation().equals("HEADER");
+        return editAndSave(userId, fileId, sourceVersion, request.getInstruction(),
+                (unlink ? "取消" : "恢复") + "第 " + request.getSectionNo() + " 节 "
+                        + request.getType() + (header ? " 页眉" : " 页脚") + "链接",
+                document -> {
+                    List<CTSectPr> sections = sectionProperties(document);
+                    if (request.getSectionNo() > sections.size()) {
+                        throw new BusinessException(404, "指定分节不存在");
+                    }
+                    if (!unlink && request.getSectionNo() == 1) {
+                        throw new BusinessException(400, "第一节没有上一节，不能设置链接");
+                    }
+                    CTSectPr section = sections.get(request.getSectionNo() - 1);
+                    if (unlink) {
+                        if (hasReference(section, header, type)) {
+                            throw new BusinessException(409, "该分节页眉页脚已经是独立内容");
+                        }
+                        createIndependentHeaderFooter(document, section, header, type, request.getText());
+                    } else {
+                        if (!hasReference(section, header, type)) {
+                            throw new BusinessException(409, "该分节页眉页脚已经链接到上一节");
+                        }
+                        removeReference(section, header, type);
+                    }
+                });
+    }
+
+    private static List<CTSectPr> sectionProperties(XWPFDocument document) {
+        List<CTSectPr> sections = new ArrayList<>();
+        for (IBodyElement element : document.getBodyElements()) {
+            if (element instanceof XWPFParagraph paragraph
+                    && paragraph.getCTP().isSetPPr()
+                    && paragraph.getCTP().getPPr().isSetSectPr()) {
+                sections.add(paragraph.getCTP().getPPr().getSectPr());
+            }
+        }
+        if (document.getDocument().getBody().isSetSectPr()) {
+            sections.add(document.getDocument().getBody().getSectPr());
+        }
+        return sections;
+    }
+
+    private static boolean hasReference(CTSectPr section, boolean header, HeaderFooterType type) {
+        STHdrFtr.Enum target = xmlType(type);
+        if (header) {
+            for (var reference : section.getHeaderReferenceList()) {
+                if (reference.getType() == target) return true;
+            }
+        } else {
+            for (var reference : section.getFooterReferenceList()) {
+                if (reference.getType() == target) return true;
+            }
+        }
+        return false;
+    }
+
+    private static void removeReference(CTSectPr section, boolean header, HeaderFooterType type) {
+        STHdrFtr.Enum target = xmlType(type);
+        if (header) {
+            for (int index = section.sizeOfHeaderReferenceArray() - 1; index >= 0; index--) {
+                if (section.getHeaderReferenceArray(index).getType() == target) {
+                    section.removeHeaderReference(index);
+                }
+            }
+        } else {
+            for (int index = section.sizeOfFooterReferenceArray() - 1; index >= 0; index--) {
+                if (section.getFooterReferenceArray(index).getType() == target) {
+                    section.removeFooterReference(index);
+                }
+            }
+        }
+    }
+
+    private static void createIndependentHeaderFooter(XWPFDocument document, CTSectPr section,
+                                                       boolean header, HeaderFooterType type,
+                                                       String text) {
+        if (type == HeaderFooterType.FIRST) {
+            if (section.isSetTitlePg()) section.getTitlePg().setVal(true);
+            else section.addNewTitlePg().setVal(true);
+        }
+        if (type == HeaderFooterType.EVEN) {
+            document.getSettings().setEvenAndOddHeadings(true);
+        }
+        var policy = new XWPFHeaderFooterPolicy(document, section);
+        STHdrFtr.Enum xmlType = xmlType(type);
+        XWPFParagraph paragraph;
+        if (header) {
+            var part = policy.createHeader(xmlType);
+            paragraph = part.getParagraphs().isEmpty() ? part.createParagraph() : part.getParagraphs().getFirst();
+        } else {
+            var part = policy.createFooter(xmlType);
+            paragraph = part.getParagraphs().isEmpty() ? part.createParagraph() : part.getParagraphs().getFirst();
+        }
+        String[] lines = text.replace("\r\n", "\n").replace('\r', '\n').split("\\n", -1);
+        XWPFRun run = paragraph.createRun();
+        for (int index = 0; index < lines.length; index++) {
+            if (index > 0) run.addBreak();
+            run.setText(lines[index]);
+        }
+    }
+
+    private static STHdrFtr.Enum xmlType(HeaderFooterType type) {
+        return switch (type) {
+            case DEFAULT -> STHdrFtr.DEFAULT;
+            case FIRST -> STHdrFtr.FIRST;
+            case EVEN -> STHdrFtr.EVEN;
+        };
     }
 
     @Override

@@ -17,6 +17,7 @@ import com.documenter.dto.InsertDocxImagesDTO;
 import com.documenter.dto.InsertXlsxImagesDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.dto.RenameFileDTO;
+import com.documenter.dto.UpdateDocxHeaderFooterLinkDTO;
 import com.documenter.service.CompatibilityVerificationService;
 import com.documenter.service.DocumentComparisonService;
 import com.documenter.service.DocumentExportService;
@@ -34,6 +35,7 @@ import com.documenter.vo.FileAssetVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.DocxCompatibilityReportVO;
 import com.documenter.vo.DocxStructureVO;
+import com.documenter.vo.DocxHeaderFooterLinksVO;
 import com.documenter.vo.PagePreviewInfoVO;
 import com.documenter.vo.PageResult;
 import com.documenter.vo.PdfContentVO;
@@ -399,6 +401,24 @@ public class FileController {
                                                    @Valid @RequestBody InsertDocxImagesDTO request) {
         return ApiResponse.success("已生成新版本", docxDocumentService.insertImages(
                 SecurityUtil.requireUserId(), fileId, versionNo, request));
+    }
+
+    /** 设置指定分节页眉或页脚是否链接到上一节。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/header-footer-links")
+    public ApiResponse<VersionVO> updateHeaderFooterLink(
+            @PathVariable Long fileId,
+            @PathVariable Integer versionNo,
+            @Valid @RequestBody UpdateDocxHeaderFooterLinkDTO request) {
+        return ApiResponse.success("页眉页脚链接已更新", docxDocumentService.updateHeaderFooterLink(
+                SecurityUtil.requireUserId(), fileId, versionNo, request));
+    }
+
+    /** 查询各分节页眉页脚是否链接到上一节。 */
+    @GetMapping("/{fileId}/versions/{versionNo}/header-footer-links")
+    public ApiResponse<DocxHeaderFooterLinksVO> readHeaderFooterLinks(
+            @PathVariable Long fileId, @PathVariable Integer versionNo) {
+        return ApiResponse.success(docxDocumentService.readHeaderFooterLinks(
+                SecurityUtil.requireUserId(), fileId, versionNo));
     }
 
     /**

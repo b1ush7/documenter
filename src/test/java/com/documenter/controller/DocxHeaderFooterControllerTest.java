@@ -1,9 +1,11 @@
 package com.documenter.controller;
 
 import com.documenter.entity.User;
+import com.documenter.dto.UpdateDocxHeaderFooterLinkDTO;
 import com.documenter.exception.GlobalExceptionHandler;
 import com.documenter.service.*;
 import com.documenter.vo.VersionVO;
+import com.documenter.vo.DocxHeaderFooterLinksVO;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -87,5 +89,56 @@ class DocxHeaderFooterControllerTest {
                         .content("{\"operations\":[{\"blockId\":\"header0/p0\",\"text\":\"x\"}]}"))
                 .andExpect(jsonPath("$.code").value(401));
         verifyNoInteractions(documents);
+    }
+
+    @Test
+    void headerFooterLinkEndpointUsesBoundVersionAndOwner() throws Exception {
+        var version = new VersionVO();
+        version.setVersionNo(4);
+        when(documents.updateHeaderFooterLink(eq(7L), eq(10L), eq(3), any())).thenReturn(version);
+
+        mvc.perform(post("/file/10/versions/3/header-footer-links")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"sectionNo":2,"location":"HEADER","type":"DEFAULT",
+                                 "linkedToPrevious":false,"text":"第二分节页眉"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.versionNo").value(4));
+        verify(documents).updateHeaderFooterLink(eq(7L), eq(10L), eq(3),
+                argThat((UpdateDocxHeaderFooterLinkDTO request) ->
+                        request.getSectionNo() == 2
+                                && !request.getLinkedToPrevious()
+                                && "第二分节页眉".equals(request.getText())));
+    }
+
+    @Test
+    void invalidHeaderFooterTypeFailsBeforeService() throws Exception {
+        mvc.perform(post("/file/10/versions/3/header-footer-links")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"sectionNo":2,"location":"HEADER","type":"ODD",
+                                 "linkedToPrevious":true}
+                                """))
+                .andExpect(jsonPath("$.code").value(400));
+        verify(documents, never()).updateHeaderFooterLink(any(), any(), any(), any());
+    }
+
+    @Test
+    void headerFooterLinkStateUsesExplicitVersionAndAuthenticatedOwner() throws Exception {
+        when(documents.readHeaderFooterLinks(7L, 10L, 3)).thenReturn(
+                new DocxHeaderFooterLinksVO(10L, 3, 2, List.of(
+                        new DocxHeaderFooterLinksVO.Section(1, false, false, false,
+                                false, false, false),
+                        new DocxHeaderFooterLinksVO.Section(2, true, false, false,
+                                true, false, false))));
+
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .get("/file/10/versions/3/header-footer-links"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.totalSections").value(2))
+                .andExpect(jsonPath("$.data.sections[1].defaultHeaderLinked").value(true))
+                .andExpect(jsonPath("$.data.sections[1].defaultFooterLinked").value(true));
     }
 }

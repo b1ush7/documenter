@@ -437,6 +437,7 @@ GET /file/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview  单页渲染
 GET /file/{fileId}/versions/{versionNo}/xlsx/structure         XLSX 结构
 GET /file/{fileId}/versions/{versionNo}/xlsx/range             XLSX 区域
 GET /file/{fileId}/versions/{versionNo}/xlsx/formula-results   XLSX 公式计算结果
+GET /file/{fileId}/versions/{versionNo}/header-footer-links   DOCX 分节页眉页脚链接状态
 ```
 
 **DOCX 结构** `DocxStructureVO`：
@@ -465,6 +466,15 @@ GET /file/{fileId}/versions/{versionNo}/xlsx/formula-results   XLSX 公式计算
 ```
 
 `EDITABLE` 适合继续编辑，`LAYOUT` 尽量保留文字横向位置、字号、粗斜体和基础行距。路径版本必须是当前版本，成功后返回 `Version`，可用新 versionNo 读取 DOCX 结构、继续人工或 AI 编辑。扫描页、复杂表格/域/脚注和精确分页仍需提示限制；没有原生文字的页面会让整次转换返回 422，不使用整页图片冒充可编辑内容。
+
+DOCX 页眉页脚链接使用同一路径的 GET/POST：
+
+```json
+{"sectionNo":2,"location":"HEADER","type":"DEFAULT",
+ "linkedToPrevious":false,"text":"第二分节页眉"}
+```
+
+取消链接时 `text` 必填，链接时必须为空。第一节不能链接上一节；重复设置相同状态返回 409。只在确实继承/拥有显式引用的状态下操作，避免覆盖复杂 PAGE、图片或表格内容。
 
 **XLSX 结构**包含 `sheets[]`（含 `firstRow`/`lastRow`）、`cells[]`、`styles[]`、`charts[]`。
 单元格含 `address`、`type`、`value` 等；**读取单元格数量有上限**，超大表只返回部分。

@@ -148,6 +148,8 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/table-edits` | 是 | 编辑表格 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/paragraph-formats` | 是 | 设置标题、列表格式或正文段前分页 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/inline-images` | 是 | 插入已有图片 |
+| DOCX | GET | `/file/{fileId}/versions/{versionNo}/header-footer-links` | 是 | 查询各分节页眉页脚链接状态 |
+| DOCX | POST | `/file/{fileId}/versions/{versionNo}/header-footer-links` | 是 | 设置页眉页脚链接到上一节或取消链接 |
 | 版本 | POST | `/file/{fileId}/versions/{versionNo}/restore` | 是 | 恢复历史版本 |
 | 任务 | POST | `/task` | 是 | 提交异步任务 |
 | 任务 | GET | `/task/list` | 是 | 任务分页列表 |
@@ -925,6 +927,26 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 
 整批在内存副本完成后才保存；任一图片或目标校验失败，不生成部分版本。目标与图片无权访问按 404 处理；源版本同时作为乐观锁期望值，版本冲突返回 409 并清理未入库产物。成功返回新 [Version](#64-version)。本次不增加数据库迁移，POI 重开测试已覆盖内容保留与边界，真实办公软件版式仍待验收。
 
+### 3.22 将 PDF 转换为可编辑 DOCX
+
+`POST /file/{fileId}/versions/{versionNo}/pdf/convert-to-docx`
+
+```json
+{
+  "mode": "LAYOUT",
+  "instruction": "按版式优先重建"
+}
+```
+
+| 字段 | 必填 | 约束 |
+| --- | --- | --- |
+| `mode` | 是 | `EDITABLE`：按阅读行输出，便于编辑；`LAYOUT`：保留文字横向位置、字号、粗斜体和基础行距 |
+| `instruction` | 否 | 最多 500 字符，写入新版本追溯信息 |
+
+接口读取当前用户拥有的明确 PDF 版本，以路径中的 `versionNo` 同时作为源版本和乐观锁期望版本，生成同一文件的新 `CONVERT` / DOCX 版本并返回 [Version](#64-version)。原 PDF 和其他历史版本不变。
+
+转换只重建原生文字、基础字体、阅读行和无文字页的内嵌 PNG/JPEG；不会将整页渲染图嵌入 DOCX 冒充可编辑文档。目录域、脚注、批注、复杂表格和精确分页可能无法完整还原，结果说明会明确列出该限制。任一页面只有图片、没有原生文字时整次转换返回业务码 `422`，必须先完成后续 OCR。空文档、损坏 PDF、页数/字符/图片像素/输出大小超限分别按 `422`、`413` 返回；源版本已变化返回 `409`。转换产物可继续使用既有 DOCX 结构读取、编辑和 AI 确认接口。
+
 ## 4. DOCX 生成与编辑
 
 ### 4.1 通用版本规则
@@ -1249,25 +1271,37 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 
 图片会以内嵌方式追加到目标段落，成功时创建新版本。
 
-### 3.22 将 PDF 转换为可编辑 DOCX
+### 4.9 查询和设置 DOCX 分节页眉页脚链接
 
-`POST /file/{fileId}/versions/{versionNo}/pdf/convert-to-docx`
+`GET /file/{fileId}/versions/{versionNo}/header-footer-links`
+
+只读取当前用户拥有的明确 DOCX 版本。返回 `DocxHeaderFooterLinks`，按正文分节结束顺序从 1 编号。第一节没有上一节，其所有链接状态均为 `false`；后续分节没有对应类型的显式 `headerReference` / `footerReference` 时，表示该类型从上一节继承。
+
+`POST /file/{fileId}/versions/{versionNo}/header-footer-links`
 
 ```json
 {
-  "mode": "LAYOUT",
-  "instruction": "按版式优先重建"
+  "sectionNo": 2,
+  "location": "HEADER",
+  "type": "DEFAULT",
+  "linkedToPrevious": false,
+  "text": "第二分节页眉",
+  "instruction": "设置独立页眉"
 }
 ```
 
-| 字段 | 必填 | 约束 |
+| 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `mode` | 是 | `EDITABLE`：按阅读行输出，便于编辑；`LAYOUT`：保留文字横向位置、字号、粗斜体和基础行距 |
-| `instruction` | 否 | 最多 500 字符，写入新版本追溯信息 |
+| `sectionNo` | 是 | 从 1 开始的正文分节序号，不能超过实际分节数 |
+| `location` | 是 | `HEADER` 或 `FOOTER` |
+| `type` | 是 | `DEFAULT`、`FIRST`、`EVEN` |
+| `linkedToPrevious` | 是 | `true` 表示继承上一节；`false` 表示创建独立内容 |
+| `text` | 取消链接时必填 | 最多 100000 字符，支持换行；重新链接时必须为空 |
+| `instruction` | 否 | 最多 2000 字符，写入版本说明 |
 
-接口读取当前用户拥有的明确 PDF 版本，以路径中的 `versionNo` 同时作为源版本和乐观锁期望版本，生成同一文件的新 `CONVERT` / DOCX 版本并返回 [Version](#64-version)。原 PDF 和其他历史版本不变。
+取消链接只允许在当前类型确实继承自上一节时执行，并创建只含提交文字的新页眉或页脚部分。重新链接只允许在当前类型已有显式引用时执行，并移除该引用以恢复继承。第一节请求链接、重复设置相同状态或越过分节范围分别返回 `400`、`409`、`404`。成功后返回新 [Version](#64-version)，源版本作为乐观锁期望值。
 
-转换只重建原生文字、基础字体、阅读行和无文字页的内嵌 PNG/JPEG；不会将整页渲染图嵌入 DOCX 冒充可编辑文档。目录域、脚注、批注、复杂表格和精确分页可能无法完整还原，结果说明会明确列出该限制。任一页面只有图片、没有原生文字时整次转换返回业务码 `422`，必须先完成后续 OCR。空文档、损坏 PDF、页数/字符/图片像素/输出大小超限分别按 `422`、`413` 返回；源版本已变化返回 `409`。转换产物可继续使用既有 DOCX 结构读取、编辑和 AI 确认接口。
+本接口不会尝试复制或更新 PAGE/NUMPAGES 等复杂域、目录、图片或复杂表格；取消链接给出的纯文字会替代该分节对上一节的继承。FIRST/EVEN 会自动启用首页不同/奇偶页不同设置。
 
 ## 5. 异步任务
 
@@ -1505,6 +1539,10 @@ PENDING -> RUNNING -> SUCCEEDED
 ### 6.14 XlsxFormulaResults
 
 包含 `fileId`、`versionNo`、`sheetName`、规范化后的 `range` 和 `results`。每项包含 `address`、`formula`、`status`、`valueType`、`value`、`message`；状态和错误含义见 3.19。
+
+### 6.15 DocxHeaderFooterLinks
+
+顶层包含 `fileId`、`versionNo`、`totalSections` 和 `sections[]`。每节包含 `sectionNo`、`defaultHeaderLinked`、`firstHeaderLinked`、`evenHeaderLinked`、`defaultFooterLinked`、`firstFooterLinked`、`evenFooterLinked`。字段为 `true` 表示该分节没有对应显式引用，会继承上一节；第一节没有上一节，因此全部为 `false`。
 
 ## 7. 管理员
 

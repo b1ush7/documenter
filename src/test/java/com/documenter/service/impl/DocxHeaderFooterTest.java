@@ -1,6 +1,7 @@
 package com.documenter.service.impl;
 
 import com.documenter.dto.ReplaceDocxTextDTO;
+import com.documenter.dto.UpdateDocxHeaderFooterLinkDTO;
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.entity.DocumentVersion;
 import com.documenter.entity.FileAsset;
@@ -22,6 +23,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTSectPr;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STHdrFtr;
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.STFldCharType;
 import org.springframework.core.io.ByteArrayResource;
 
@@ -107,6 +109,86 @@ class DocxHeaderFooterTest {
             var target = kind.equals("FIRST") ? policy.getFirstPageHeader() : policy.getEvenPageHeader();
             assertTrue(target.getText().contains("Updated " + kind));
         }
+    }
+
+    @Test
+    void unlinkingSecondSectionCreatesIndependentHeaderAndPreservesFirstSection() throws Exception {
+        prepare(linkedSectionFixture());
+        var request = linkRequest(2, "HEADER", "DEFAULT", false, "Second section header");
+
+        service.updateHeaderFooterLink(7L, 10L, 1, request);
+
+        try (var after = open(saved())) {
+            var first = new XWPFHeaderFooterPolicy(after,
+                    after.getParagraphs().getFirst().getCTP().getPPr().getSectPr());
+            var second = new XWPFHeaderFooterPolicy(after,
+                    after.getDocument().getBody().getSectPr());
+            assertTrue(first.getDefaultHeader().getText().contains("First section header"));
+            assertTrue(second.getDefaultHeader().getText().contains("Second section header"));
+            assertNotEquals(first.getDefaultHeader().getPackagePart().getPartName(),
+                    second.getDefaultHeader().getPackagePart().getPartName());
+        }
+    }
+
+    @Test
+    void linkingSecondSectionRemovesItsExplicitHeaderReference() throws Exception {
+        prepare(fixture());
+
+        service.updateHeaderFooterLink(7L, 10L, 1,
+                linkRequest(2, "HEADER", "DEFAULT", true, null));
+
+        try (var after = open(saved())) {
+            var secondSection = after.getDocument().getBody().getSectPr();
+            assertEquals(0, secondSection.getHeaderReferenceList().stream()
+                    .filter(reference -> reference.getType() == STHdrFtr.DEFAULT)
+                    .count());
+            var firstSection = after.getParagraphs().getFirst().getCTP().getPPr().getSectPr();
+            assertEquals(1, firstSection.getHeaderReferenceList().stream()
+                    .filter(reference -> reference.getType() == STHdrFtr.DEFAULT)
+                    .count());
+        }
+    }
+
+    @Test
+    void linkOperationRejectsFirstSectionInvalidStateAndMissingText() throws Exception {
+        prepare(fixture());
+        assertEquals(400, assertThrows(BusinessException.class, () -> service.updateHeaderFooterLink(
+                7L, 10L, 1, linkRequest(1, "HEADER", "DEFAULT", true, null))).getCode());
+        assertEquals(409, assertThrows(BusinessException.class, () -> service.updateHeaderFooterLink(
+                7L, 10L, 1, linkRequest(2, "HEADER", "DEFAULT", false, "new"))).getCode());
+        assertEquals(404, assertThrows(BusinessException.class, () -> service.updateHeaderFooterLink(
+                7L, 10L, 1, linkRequest(3, "HEADER", "DEFAULT", false, "new"))).getCode());
+        var missing = linkRequest(2, "HEADER", "DEFAULT", false, "placeholder");
+        missing.setText(null);
+        assertEquals(400, assertThrows(BusinessException.class, () -> service.updateHeaderFooterLink(
+                7L, 10L, 1, missing)).getCode());
+        verifyNoInteractions(storage, writer);
+    }
+
+    @Test
+    void readsSectionLinkStateBeforeAndAfterUnlink() throws Exception {
+        byte[] source = linkedSectionFixture();
+        prepare(source);
+        var before = service.readHeaderFooterLinks(7L, 10L, 1);
+        assertEquals(2, before.totalSections());
+        assertFalse(before.sections().getFirst().defaultHeaderLinked());
+        assertTrue(before.sections().get(1).defaultHeaderLinked());
+        assertTrue(before.sections().get(1).defaultFooterLinked());
+
+        service.updateHeaderFooterLink(7L, 10L, 1,
+                linkRequest(2, "HEADER", "DEFAULT", false, "Independent"));
+        byte[] edited = saved();
+        var asset = new FileAsset();
+        asset.setId(10L);
+        asset.setUserId(7L);
+        asset.setContentType("application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+        asset.setExtension("docx");
+        when(versions.downloadVersion(7L, 10L, 2)).thenReturn(new FileDownload(asset,
+                new ByteArrayResource(edited), edited.length, asset.getContentType(), "edited.docx"));
+
+        var after = service.readHeaderFooterLinks(7L, 10L, 2);
+        assertFalse(after.sections().get(1).defaultHeaderLinked());
+        assertTrue(after.sections().get(1).defaultFooterLinked());
     }
 
     @ParameterizedTest
@@ -255,6 +337,20 @@ class DocxHeaderFooterTest {
         });
     }
 
+    private static byte[] linkedSectionFixture() throws Exception {
+        return document(doc -> {
+            var firstBody = doc.createParagraph();
+            firstBody.createRun().setText("Body one");
+            doc.createParagraph().createRun().setText("Body two");
+            doc.createHeader(HeaderFooterType.DEFAULT)
+                    .createParagraph().createRun().setText("First section header");
+            var section = doc.getDocument().getBody().getSectPr();
+            firstBody.getCTP().addNewPPr().setSectPr((CTSectPr) section.copy());
+            while (section.sizeOfHeaderReferenceArray() > 0) section.removeHeaderReference(0);
+            while (section.sizeOfFooterReferenceArray() > 0) section.removeFooterReference(0);
+        });
+    }
+
     private static void addProtectedContent(XWPFParagraph paragraph, String kind) {
         switch (kind) {
             case "COMPLEX_FIELD" -> {
@@ -318,6 +414,17 @@ class DocxHeaderFooterTest {
     private static ReplaceDocxTextDTO request(ReplaceDocxTextDTO.Operation... operations) {
         var request = new ReplaceDocxTextDTO();
         request.setOperations(List.of(operations));
+        return request;
+    }
+    private static UpdateDocxHeaderFooterLinkDTO linkRequest(int section, String location,
+                                                              String type, boolean linked,
+                                                              String text) {
+        var request = new UpdateDocxHeaderFooterLinkDTO();
+        request.setSectionNo(section);
+        request.setLocation(location);
+        request.setType(type);
+        request.setLinkedToPrevious(linked);
+        request.setText(text);
         return request;
     }
     private static XWPFDocument open(byte[] bytes) throws Exception { return new XWPFDocument(new ByteArrayInputStream(bytes)); }
