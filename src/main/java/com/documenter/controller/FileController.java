@@ -2,6 +2,7 @@ package com.documenter.controller;
 
 import com.documenter.constant.ApiResponse;
 import com.documenter.dto.ConvertPdfToDocxDTO;
+import com.documenter.dto.CreateDocxTableOfContentsDTO;
 import com.documenter.dto.FileQueryDTO;
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.EditDocxTableDTO;
@@ -38,6 +39,7 @@ import com.documenter.vo.DocxCompatibilityReportVO;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.DocxHeaderFooterLinksVO;
 import com.documenter.vo.DocxFootnotesVO;
+import com.documenter.vo.DocxTableOfContentsVO;
 import com.documenter.vo.PagePreviewInfoVO;
 import com.documenter.vo.PageResult;
 import com.documenter.vo.PdfContentVO;
@@ -438,6 +440,24 @@ public class FileController {
             @PathVariable Integer versionNo,
             @Valid @RequestBody EditDocxFootnotesDTO request) {
         return ApiResponse.success("脚注已更新", docxDocumentService.editFootnotes(
+                SecurityUtil.requireUserId(), fileId, versionNo, request));
+    }
+
+    /** 查询 DOCX 中的 TOC 域。 */
+    @GetMapping("/{fileId}/versions/{versionNo}/table-of-contents")
+    public ApiResponse<DocxTableOfContentsVO> readTableOfContents(
+            @PathVariable Long fileId, @PathVariable Integer versionNo) {
+        return ApiResponse.success(docxDocumentService.readTableOfContents(
+                SecurityUtil.requireUserId(), fileId, versionNo));
+    }
+
+    /** 插入目录域，或将已有目录标记为下次打开时更新。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/table-of-contents")
+    public ApiResponse<VersionVO> createOrRefreshTableOfContents(
+            @PathVariable Long fileId,
+            @PathVariable Integer versionNo,
+            @Valid @RequestBody CreateDocxTableOfContentsDTO request) {
+        return ApiResponse.success("目录域已更新", docxDocumentService.createOrRefreshTableOfContents(
                 SecurityUtil.requireUserId(), fileId, versionNo, request));
     }
 

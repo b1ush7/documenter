@@ -152,6 +152,8 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/header-footer-links` | 是 | 设置页眉页脚链接到上一节或取消链接 |
 | DOCX | GET | `/file/{fileId}/versions/{versionNo}/footnotes` | 是 | 查询正文脚注及引用段落 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/footnotes` | 是 | 新增、修改或删除正文脚注 |
+| DOCX | GET | `/file/{fileId}/versions/{versionNo}/table-of-contents` | 是 | 查询 TOC 域及打开时更新标记 |
+| DOCX | POST | `/file/{fileId}/versions/{versionNo}/table-of-contents` | 是 | 插入目录域或请求下次打开时刷新 |
 | 版本 | POST | `/file/{fileId}/versions/{versionNo}/restore` | 是 | 恢复历史版本 |
 | 任务 | POST | `/task` | 是 | 提交异步任务 |
 | 任务 | GET | `/task/list` | 是 | 任务分页列表 |
@@ -1331,6 +1333,32 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 
 ADD 在目标段落末尾添加脚注引用，并创建独立 footnote part；UPDATE 保留脚注 ID 和正文引用，重建该脚注的首段纯文字；DELETE 先删除正文及表格中的全部同 ID 引用，再移除 footnote part。UPDATE 遇到多段落、表格或其他无法安全整体替换的脚注结构时返回 `422`，不会破坏原内容。任一操作失败不保存部分版本，版本冲突返回 `409`。
 
+### 4.11 查询、插入和刷新 DOCX 目录
+
+`GET /file/{fileId}/versions/{versionNo}/table-of-contents` 返回 `DocxTableOfContents`。只检测正文中的第一个 `TOC` 复杂域，不执行目录计算。`present=true` 时返回域所在顶层段落块 ID、域指令以及文档是否已设置“打开时更新域”。
+
+`POST /file/{fileId}/versions/{versionNo}/table-of-contents`
+
+```json
+{
+  "position": "START",
+  "maxLevel": 3,
+  "hyperlinks": true,
+  "title": "目录",
+  "instruction": "在正文前插入目录"
+}
+```
+
+| 字段 | 必填 | 规则 |
+| --- | --- | --- |
+| `position` | 否 | `START` 或 `END`，默认 `END` |
+| `maxLevel` | 否 | 1～9，默认 3；写入 `TOC \o "1-N"` |
+| `hyperlinks` | 否 | 默认 true；true 时加入 `\h` |
+| `title` | 否 | 最多 100 字符，默认“目录”；空字符串表示不添加标题段 |
+| `instruction` | 否 | 最多 2000 字符，写入版本说明 |
+
+文档没有 TOC 时插入独立复杂域和占位提示；已有 TOC 时不重复插入，只设置 `w:updateFields` 请求办公软件下次打开时刷新已有域和页码。服务端不会直接计算标题页码，也不会把静态文字冒充可更新目录。真实 Word/LibreOffice 的自动更新和最终分页仍需人工验收。
+
 ## 5. 异步任务
 
 当前仅开放两个有真实处理器的任务类型：`CONVERT` 调用 PDF 转 DOCX 处理链，`EXPORT` 调用既有 Office 渲染后端导出 PDF。两者成功后都把产物写入版本历史，并在任务 `outputVersion` 返回明确版本号。`OCR` 与 `AI_EDIT` 继续使用各自现有同步接口，不接受新建异步任务；历史记录仍可查询。默认不启用占位处理器。
@@ -1575,6 +1603,10 @@ PENDING -> RUNNING -> SUCCEEDED
 ### 6.16 DocxFootnotes
 
 包含 `fileId`、`versionNo` 和 `footnotes[]`。每项包含正整数 `id`、脚注纯文字 `text`，以及引用该脚注的正文/表格段落块 ID 数组 `referencedBy`。内部 footnote part 名称和特殊分隔脚注不会返回。
+
+### 6.17 DocxTableOfContents
+
+包含 `fileId`、`versionNo`、`present`、`blockId`、`instruction` 和 `updateFieldsOnOpen`。没有 TOC 时 `blockId`、`instruction` 为 null；只有 `updateFieldsOnOpen=true` 表示文件设置了下次打开时更新域，不代表当前版本已经渲染出正确页码。
 
 ## 7. 管理员
 

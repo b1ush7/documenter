@@ -2,6 +2,7 @@ package com.documenter.service.impl;
 
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.EditDocxFootnotesDTO;
+import com.documenter.dto.CreateDocxTableOfContentsDTO;
 import com.documenter.dto.EditDocxTableDTO;
 import com.documenter.dto.FormatDocxParagraphsDTO;
 import com.documenter.dto.GenerateDocxDTO;
@@ -20,6 +21,7 @@ import com.documenter.util.Digests;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.DocxHeaderFooterLinksVO;
 import com.documenter.vo.DocxFootnotesVO;
+import com.documenter.vo.DocxTableOfContentsVO;
 import com.documenter.vo.DocumentEditPlan;
 import com.documenter.vo.FileAssetVO;
 import com.documenter.vo.FileDownload;
@@ -51,6 +53,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import org.apache.xmlbeans.XmlCursor;
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTSectPr;
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.STHdrFtr;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STFldCharType;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -220,6 +223,142 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                     }
                 });
     }
+
+    @Override
+    public DocxTableOfContentsVO readTableOfContents(Long userId, Long fileId,
+                                                      Integer versionNo) {
+        FileDownload version = versionService.downloadVersion(userId, fileId, versionNo);
+        if (!isDocx(version)) {
+            throw new BusinessException(400, "当前版本不是 DOCX 文档");
+        }
+        try (InputStream input = version.resource().getInputStream();
+             XWPFDocument document = new XWPFDocument(input)) {
+            TocField toc = findTocField(document);
+            boolean updateFields = document.getSettings() != null
+                    && document.getSettings().getCTSettings().isSetUpdateFields();
+            return new DocxTableOfContentsVO(fileId, versionNo, toc != null,
+                    toc == null ? null : toc.blockId(),
+                    toc == null ? null : toc.instruction(), updateFields);
+        } catch (IOException | RuntimeException failure) {
+            if (failure instanceof BusinessException business) throw business;
+            log.warn("读取 DOCX 目录失败, fileId={}, versionNo={}", fileId, versionNo, failure);
+            throw new BusinessException(422, "DOCX 目录无法读取或内容已损坏");
+        }
+    }
+
+    @Override
+    public VersionVO createOrRefreshTableOfContents(
+            Long userId, Long fileId, Integer sourceVersion,
+            CreateDocxTableOfContentsDTO request) {
+        if (request == null) throw new BusinessException(400, "目录参数不能为空");
+        String position = request.getPosition() == null ? "END" : request.getPosition();
+        if (!(position.equals("START") || position.equals("END"))) {
+            throw new BusinessException(400, "目录位置只支持 START 或 END");
+        }
+        int maxLevel = request.getMaxLevel() == null ? 3 : request.getMaxLevel();
+        if (maxLevel < 1 || maxLevel > 9) {
+            throw new BusinessException(400, "目录标题级别必须在 1 到 9 之间");
+        }
+        boolean hyperlinks = request.getHyperlinks() == null || request.getHyperlinks();
+        String instruction = "TOC \\o \"1-" + maxLevel + "\""
+                + (hyperlinks ? " \\h" : "") + " \\z \\u";
+        String title = normalizeTocTitle(request.getTitle());
+        return editAndSave(userId, fileId, sourceVersion, request.getInstruction(),
+                "插入或刷新 DOCX 目录域", document -> {
+                    TocField existing = findTocField(document);
+                    if (existing != null) {
+                        document.getSettings().setUpdateFields();
+                        return;
+                    }
+                    XWPFParagraph fieldParagraph;
+                    if (position.equals("START")) {
+                        fieldParagraph = insertParagraphAtStart(document);
+                        if (!title.isEmpty()) {
+                            XWPFParagraph titleParagraph = document.createParagraph();
+                            writeTocTitle(titleParagraph, title);
+                            moveBefore(titleParagraph, fieldParagraph);
+                        }
+                    } else {
+                        if (!title.isEmpty()) writeTocTitle(document.createParagraph(), title);
+                        fieldParagraph = document.createParagraph();
+                    }
+                    writeTocField(fieldParagraph, instruction);
+                    document.getSettings().setUpdateFields();
+                });
+    }
+
+    private static String normalizeTocTitle(String title) {
+        if (title == null) return "";
+        String normalized = title.strip();
+        if (normalized.length() > 100) {
+            throw new BusinessException(400, "目录标题不能超过 100 字符");
+        }
+        return normalized;
+    }
+
+    private static XWPFParagraph insertParagraphAtStart(XWPFDocument document) {
+        XWPFParagraph paragraph;
+        if (document.getBodyElements().isEmpty()) {
+            paragraph = document.createParagraph();
+        } else {
+            IBodyElement first = document.getBodyElements().getFirst();
+            try (XmlCursor cursor = first instanceof XWPFParagraph value
+                    ? value.getCTP().newCursor()
+                    : ((XWPFTable) first).getCTTbl().newCursor()) {
+                paragraph = document.insertNewParagraph(cursor);
+            }
+        }
+        if (paragraph == null) throw new BusinessException(422, "无法在文档开头插入目录");
+        return paragraph;
+    }
+
+    private static void moveBefore(XWPFParagraph paragraph, XWPFParagraph reference) {
+        Node parent = reference.getCTP().getDomNode().getParentNode();
+        parent.insertBefore(paragraph.getCTP().getDomNode(), reference.getCTP().getDomNode());
+    }
+
+    private static void writeTocTitle(XWPFParagraph paragraph, String title) {
+        paragraph.setAlignment(ParagraphAlignment.CENTER);
+        XWPFRun run = paragraph.createRun();
+        run.setBold(true);
+        run.setFontSize(16);
+        run.setText(title);
+    }
+
+    private static void writeTocField(XWPFParagraph paragraph, String instruction) {
+        XWPFRun begin = paragraph.createRun();
+        begin.getCTR().addNewFldChar().setFldCharType(STFldCharType.BEGIN);
+        XWPFRun instr = paragraph.createRun();
+        instr.getCTR().addNewInstrText().setStringValue(instruction);
+        XWPFRun separate = paragraph.createRun();
+        separate.getCTR().addNewFldChar().setFldCharType(STFldCharType.SEPARATE);
+        XWPFRun placeholder = paragraph.createRun();
+        placeholder.setText("目录将在 Word 中打开并更新域后生成");
+        XWPFRun end = paragraph.createRun();
+        end.getCTR().addNewFldChar().setFldCharType(STFldCharType.END);
+    }
+
+    private static TocField findTocField(XWPFDocument document) {
+        int paragraphIndex = 0;
+        for (IBodyElement element : document.getBodyElements()) {
+            if (!(element instanceof XWPFParagraph paragraph)) continue;
+            String blockId = "body/p" + paragraphIndex++;
+            StringBuilder instruction = new StringBuilder();
+            for (XWPFRun run : paragraph.getRuns()) {
+                for (var text : run.getCTR().getInstrTextList()) {
+                    if (!instruction.isEmpty()) instruction.append(' ');
+                    instruction.append(text.getStringValue());
+                }
+            }
+            String normalized = instruction.toString().strip();
+            if (normalized.matches("(?is)^TOC(?:\\s.*)?$")) {
+                return new TocField(blockId, normalized);
+            }
+        }
+        return null;
+    }
+
+    private record TocField(String blockId, String instruction) { }
 
     private static void validateFootnoteOperations(EditDocxFootnotesDTO request) {
         if (request == null || request.getOperations() == null

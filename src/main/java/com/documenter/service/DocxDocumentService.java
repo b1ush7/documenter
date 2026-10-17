@@ -3,6 +3,7 @@ package com.documenter.service;
 import com.documenter.dto.EditDocxParagraphsDTO;
 import com.documenter.dto.EditDocxFootnotesDTO;
 import com.documenter.dto.EditDocxTableDTO;
+import com.documenter.dto.CreateDocxTableOfContentsDTO;
 import com.documenter.dto.FormatDocxParagraphsDTO;
 import com.documenter.dto.GenerateDocxDTO;
 import com.documenter.dto.InsertDocxImagesDTO;
@@ -11,6 +12,7 @@ import com.documenter.dto.UpdateDocxHeaderFooterLinkDTO;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.DocxHeaderFooterLinksVO;
 import com.documenter.vo.DocxFootnotesVO;
+import com.documenter.vo.DocxTableOfContentsVO;
 import com.documenter.vo.DocumentEditPlan;
 import com.documenter.vo.FileAssetVO;
 import com.documenter.vo.VersionVO;
@@ -69,4 +71,11 @@ public interface DocxDocumentService {
     /** 新增、修改或删除脚注，并保存为一个新版本。 */
     VersionVO editFootnotes(Long userId, Long fileId, Integer sourceVersion,
                             EditDocxFootnotesDTO request);
+
+    /** 查询 DOCX 中已有的 TOC 域。 */
+    DocxTableOfContentsVO readTableOfContents(Long userId, Long fileId, Integer versionNo);
+
+    /** 插入 TOC 域，或把已有 TOC 请求在下一次打开时更新。 */
+    VersionVO createOrRefreshTableOfContents(Long userId, Long fileId, Integer sourceVersion,
+                                             CreateDocxTableOfContentsDTO request);
 }
