@@ -25,10 +25,16 @@ public record DocxStructureVO(Long fileId, Integer versionNo, List<Block> blocks
      * @param contentType  图片 MIME 类型；非图片块为 null
      * @param sizeBytes    图片原始字节数；非图片块为 null
      * @param children     按原文档顺序排列的子块
+     * @param numberingFormat 直接列表编号类型，如 bullet、decimal；非列表或非段落为 null
      */
     public record Block(String blockId, String type, String text, String styleId,
                         Integer headingLevel, String name, String contentType,
-                        Long sizeBytes, List<Block> children) {
+                        Long sizeBytes, List<Block> children, String numberingFormat) {
+
+        public Block(String blockId, String type, String text, String styleId, Integer headingLevel,
+                     String name, String contentType, Long sizeBytes, List<Block> children) {
+            this(blockId, type, text, styleId, headingLevel, name, contentType, sizeBytes, children, null);
+        }
 
         public Block {
             children = children == null ? List.of() : List.copyOf(children);

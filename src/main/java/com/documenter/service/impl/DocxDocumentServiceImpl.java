@@ -16,6 +16,7 @@ import com.documenter.service.FileStorage;
 import com.documenter.service.VersionWriter;
 import com.documenter.util.Digests;
 import com.documenter.vo.DocxStructureVO;
+import com.documenter.vo.DocumentEditPlan;
 import com.documenter.vo.FileAssetVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.VersionVO;
@@ -37,6 +38,8 @@ import org.apache.poi.util.Units;
 import org.apache.poi.xwpf.usermodel.Document;
 import org.apache.poi.openxml4j.exceptions.InvalidFormatException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.apache.xmlbeans.XmlCursor;
 
 import java.io.IOException;
@@ -204,21 +207,8 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                     item -> "SET_NUMBERED".equals(item.operation().getType()))
                     ? createNumbering(document, false) : null;
             for (ResolvedParagraphFormat format : formats) {
-                XWPFParagraph paragraph = format.paragraph();
-                switch (format.operation().getType()) {
-                    case "SET_HEADING" -> {
-                        clearNumbering(paragraph);
-                        paragraph.setStyle("Heading" + format.operation().getLevel());
-                    }
-                    case "SET_NORMAL" -> {
-                        clearNumbering(paragraph);
-                        paragraph.setStyle("Normal");
-                    }
-                    case "SET_BULLET" -> applyNumbering(paragraph, bulletNumId);
-                    case "SET_NUMBERED" -> applyNumbering(paragraph, numberedNumId);
-                    case "CLEAR_LIST" -> clearNumbering(paragraph);
-                    default -> throw new BusinessException(400, "不支持的段落格式操作");
-                }
+                applyParagraphFormat(format.paragraph(), format.operation().getType(),
+                        format.operation().getLevel(), bulletNumId, numberedNumId);
             }
         });
     }
@@ -238,8 +228,85 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         });
     }
 
+    @Override
+    public VersionVO editPlan(Long userId, Long fileId, Integer sourceVersion,
+                              DocumentEditPlan plan, String instruction) {
+        return editAndSave(userId, fileId, sourceVersion, instruction, plan.summary(), ChangeType.AI_EDIT, document -> {
+            BigInteger bulletNumId = needsFormat(plan, DocumentEditPlan.FormatType.SET_BULLET)
+                    ? createNumbering(document, true) : null;
+            BigInteger numberedNumId = needsFormat(plan, DocumentEditPlan.FormatType.SET_NUMBERED)
+                    ? createNumbering(document, false) : null;
+            // 所有路径先在源版本解析为对象；插入/删除后不能再按旧路径定位。
+            List<Runnable> edits = new ArrayList<>();
+            for (DocumentEditPlan.Operation operation : plan.operations()) {
+                DocumentEditPlan.OperationType type = operation.operationType();
+                if (type == null) {
+                    throw new BusinessException(422, "计划包含尚不支持执行的操作");
+                }
+                String target = operation.target();
+                if (type == DocumentEditPlan.OperationType.SET_CELL_TEXT) {
+                    XWPFTableCell cell = requireCell(document, target);
+                    edits.add(() -> replaceCellText(cell, target, operation.content()));
+                } else {
+                    XWPFParagraph paragraph = requireParagraph(document, target);
+                    edits.add(switch (type) {
+                        case REPLACE_TEXT -> () -> replaceSimpleParagraph(paragraph, target, operation.content());
+                        case INSERT_BEFORE -> () -> insertParagraph(paragraph, operation.content(), false);
+                        case INSERT_AFTER -> () -> insertParagraph(paragraph, operation.content(), true);
+                        case DELETE -> () -> deleteParagraph(paragraph, target);
+                        case FORMAT_PARAGRAPH -> {
+                            var format = operation.format();
+                            if (format == null || format.type() == null) {
+                                throw new BusinessException(422, "格式计划缺少受支持的格式参数");
+                            }
+                            yield () -> applyParagraphFormat(paragraph, format.type().name(), format.level(),
+                                    bulletNumId, numberedNumId);
+                        }
+                        case INSERT_IMAGE -> {
+                            var image = operation.image();
+                            if (image == null) throw new BusinessException(422, "图片计划缺少图片参数");
+                            yield () -> appendImage(userId, paragraph, image.fileId(), image.versionNo(),
+                                    image.widthPixels(), image.heightPixels(), target);
+                        }
+                        default -> throw new BusinessException(422, "计划包含尚不支持执行的操作");
+                    });
+                }
+            }
+            // 任一操作失败都只影响内存副本，editAndSave 不会落盘或创建版本。
+            edits.forEach(Runnable::run);
+        });
+    }
+
+    private static boolean needsFormat(DocumentEditPlan plan, DocumentEditPlan.FormatType type) {
+        return plan.operations().stream().anyMatch(operation ->
+                operation.operationType() == DocumentEditPlan.OperationType.FORMAT_PARAGRAPH
+                        && operation.format() != null && operation.format().type() == type);
+    }
+
+    private static void applyParagraphFormat(XWPFParagraph paragraph, String type, Integer level,
+                                               BigInteger bulletNumId, BigInteger numberedNumId) {
+        var formatType = DocumentEditPlan.FormatType.parse(type);
+        if (formatType == null || (formatType == DocumentEditPlan.FormatType.SET_HEADING
+                ? level == null || level < 1 || level > 9 : level != null)) {
+            throw new BusinessException(400, "不支持的段落格式或标题级别");
+        }
+        switch (formatType) {
+            case SET_HEADING -> { clearNumbering(paragraph); paragraph.setStyle("Heading" + level); }
+            case SET_NORMAL -> { clearNumbering(paragraph); paragraph.setStyle("Normal"); }
+            case SET_BULLET -> applyNumbering(paragraph, bulletNumId);
+            case SET_NUMBERED -> applyNumbering(paragraph, numberedNumId);
+            case CLEAR_LIST -> clearNumbering(paragraph);
+        }
+    }
+
     private VersionVO editAndSave(Long userId, Long fileId, Integer sourceVersion,
                                   String instruction, String summary,
+                                  Consumer<XWPFDocument> editor) {
+        return editAndSave(userId, fileId, sourceVersion, instruction, summary, ChangeType.MANUAL_EDIT, editor);
+    }
+
+    private VersionVO editAndSave(Long userId, Long fileId, Integer sourceVersion,
+                                  String instruction, String summary, ChangeType changeType,
                                   Consumer<XWPFDocument> editor) {
         FileDownload version = versionService.downloadVersion(userId, fileId, sourceVersion);
         if (!isDocx(version)) {
@@ -263,10 +330,21 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
             DocumentVersion created = versionWriter.appendVersion(
                     fileId, userId,
                     new VersionWriter.VersionContent(storageKey, edited.length, Digests.sha256Hex(edited)),
-                    ChangeType.MANUAL_EDIT,
+                    changeType,
                     instruction,
                     summary,
                     sourceVersion);
+            if (TransactionSynchronizationManager.isSynchronizationActive()
+                    && TransactionSynchronizationManager.isActualTransactionActive()) {
+                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                    @Override
+                    public void afterCompletion(int status) {
+                        if (status == STATUS_ROLLED_BACK && !fileStorage.delete(storageKey)) {
+                            log.warn("外层事务回滚后无法清理 DOCX 产物, storageKey={}", storageKey);
+                        }
+                    }
+                });
+            }
             return VersionVO.from(created);
         } catch (RuntimeException e) {
             if (!fileStorage.delete(storageKey)) {
@@ -313,7 +391,7 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         }
         return new DocxStructureVO.Block(path, headingLevel == null ? "PARAGRAPH" : "HEADING",
                 paragraph.getText(), paragraph.getStyle(), headingLevel,
-                null, null, null, images);
+                null, null, null, images, paragraph.getNumFmt());
     }
 
     private static DocxStructureVO.Block readTable(XWPFTable table, String path) {
@@ -775,6 +853,11 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
     private void appendImage(Long userId, XWPFParagraph paragraph, Long imageFileId,
                              Integer imageVersionNo, Integer widthPixels, Integer heightPixels,
                              String targetDescription) {
+        if (imageFileId == null || imageFileId <= 0 || imageVersionNo == null || imageVersionNo <= 0
+                || widthPixels == null || widthPixels < 1 || widthPixels > 10000
+                || heightPixels == null || heightPixels < 1 || heightPixels > 10000) {
+            throw new BusinessException(400, "图片文件、版本和显示尺寸不合法");
+        }
         FileDownload image = versionService.downloadVersion(
                 userId, imageFileId, imageVersionNo);
         int pictureType = pictureType(image);

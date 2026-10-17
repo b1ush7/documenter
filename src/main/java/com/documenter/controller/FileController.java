@@ -13,6 +13,7 @@ import com.documenter.dto.FormatXlsxCellsDTO;
 import com.documenter.dto.FormatDocxParagraphsDTO;
 import com.documenter.dto.GenerateDocxDTO;
 import com.documenter.dto.InsertDocxImagesDTO;
+import com.documenter.dto.InsertXlsxImagesDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.dto.RenameFileDTO;
 import com.documenter.service.CompatibilityVerificationService;
@@ -273,6 +274,15 @@ public class FileController {
                                                 @PathVariable Integer versionNo,
                                                 @Valid @RequestBody EditXlsxCellsDTO request) {
         return ApiResponse.success("已生成新版本", xlsxDocumentService.editCells(
+                SecurityUtil.requireUserId(), fileId, versionNo, request));
+    }
+
+    /** 内嵌当前用户图片的明确版本，源版本同时作为乐观锁期望值。 */
+    @PostMapping("/{fileId}/versions/{versionNo}/xlsx/images")
+    public ApiResponse<VersionVO> insertXlsxImages(@PathVariable Long fileId,
+                                                  @PathVariable Integer versionNo,
+                                                  @Valid @RequestBody InsertXlsxImagesDTO request) {
+        return ApiResponse.success("已生成新版本", xlsxDocumentService.insertImages(
                 SecurityUtil.requireUserId(), fileId, versionNo, request));
     }
 

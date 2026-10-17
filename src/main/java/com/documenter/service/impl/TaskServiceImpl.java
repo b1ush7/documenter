@@ -108,7 +108,9 @@ public class TaskServiceImpl implements TaskService {
         log.info("任务已创建, taskId={}, userId={}, type={}, fileId={}, inputVersion={}",
                 task.getId(), userId, type, task.getFileId(), task.getInputVersion());
         executionEngine.submit(task.getId());
-        return TaskVO.from(task);
+        // 入队可能立即被拒绝并写成 FAILED，响应应反映该结果，不能仍声称正在排队。
+        ProcessingTask current = taskMapper.selectById(task.getId());
+        return TaskVO.from(current == null ? task : current);
     }
 
     @Override
@@ -164,8 +166,12 @@ public class TaskServiceImpl implements TaskService {
 
         if (status == TaskStatus.PENDING) {
             // 还没开始执行：直接置为取消，避免它被调度线程捡起来
-            taskMapper.finish(taskId, TaskStatus.CANCELLED.name(), 0, null, null,
+            int cancelled = taskMapper.finish(taskId, TaskStatus.CANCELLED.name(), 0, null, null,
                     List.of(TaskStatus.PENDING.name()));
+            if (cancelled == 0) {
+                // 查询后可能已被执行器抢占；条件更新失败时仍须保留用户的取消请求。
+                taskMapper.requestCancel(taskId);
+            }
         } else {
             // 正在执行：只打标记，执行循环会在步骤边界自行收尾
             taskMapper.requestCancel(taskId);

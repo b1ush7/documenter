@@ -53,7 +53,7 @@ Base URL:  http://<host>:8080
 | 409 | 状态冲突（并发编辑、重复操作、资源被占用） |
 | 413 | 文件超过大小限制 |
 | 415 | 文件内容类型不受支持 |
-| 429 | 频率限制（验证码、上传次数、重试次数） |
+| 429 | 频率或额度限制（验证码、上传次数、重试次数、每日 AI 调用次数） |
 | 500 | 服务端异常 |
 | 502 | 外部服务失败（短信发送） |
 
@@ -162,7 +162,7 @@ POST /user/login/code
 
 请求 `{ "phone": "13800000000" }`（校验 `^1[3-9]\d{9}$`）
 
-### 可选：注册验证码预校验
+### 独立消费注册验证码
 
 ```
 POST /user/verify/code
@@ -170,13 +170,11 @@ POST /user/verify/code
 
 请求 `{ "phone": "13800000000", "code": "123456" }`
 
-用于注册流程中「提交注册前先确认验证码有效」，避免用户填完表单才被告知验证码已过期。
-
 > **注意：本接口会真正消费验证码**，成功后验证码立即失效。
-> 因此调用它之后必须紧接着提交注册，不能只做校验不提交。
+> 注册表单应直接提交 `/user/register/by-code`，不能先调用本接口再用同一验证码注册。
 > 另外它固定使用 **REGISTER** 场景，不能用于校验登录或找回密码的验证码。
 
-响应 `data`：`"****0000"`（脱敏手机号字符串）
+独立校验成功时 data 为 null；发送验证码接口的 data 才是脱敏手机号。
 
 错误：
 
@@ -186,6 +184,9 @@ POST /user/verify/code
 | 403 | 账号已被禁用 |
 | 429 | 验证码发送过于频繁（默认 60 秒间隔）/ 今日发送次数已达上限（默认 10 次） |
 | 502 | 验证码发送失败（外部服务问题） |
+| 503 | 已投递但无法确认验证码保存成功，需在重发间隔后重新获取 |
+
+消费时错误次数未达上限返回 400；达到上限的那次返回 429 并立即作废。已消费、已作废或已过期的验证码再次提交返回 400。不能在前端把独立校验结果当成可重复使用的注册凭证。
 
 ## P2 注册页
 
@@ -513,22 +514,25 @@ POST /file/{fileId}/versions/{versionNo}/xlsx/structure-edits   行列增删
 POST /file/{fileId}/versions/{versionNo}/xlsx/sheet-edits       工作表增删改名
 POST /file/{fileId}/versions/{versionNo}/xlsx/data-edits        排序与筛选
 POST /file/{fileId}/versions/{versionNo}/xlsx/formats           基础格式
+POST /file/{fileId}/versions/{versionNo}/xlsx/images            内嵌已有图片的明确版本
 ```
 
-请求公共字段：`instruction`、`sheetName`、`range`（区域，如 `A1:C10`）。
+请求顶层使用 `instruction` 与 `operations` 数组；`sheetName`、`cell`、`range` 等位于各操作对象内。`cell-edits` 的 `recalculateFormulas` 是顶层选项。
 
 各接口特有字段：
 
 | 接口 | 特有字段 |
 | --- | --- |
-| cell-edits | `cell` / `range`、`valueType`（`TEXT`/`NUMBER`/`FORMULA`）、`value`、`formula`、`recalculateFormulas` |
+| cell-edits | `type`（SET_VALUE/SET_FORMULA/CLEAR/SET_RANGE/FILL_FORMULA）、`cell` / `range`、`valueType`（STRING/NUMBER/BOOLEAN/DATE）、`value`、`formula`、`values` |
 | structure-edits | `type`（插入/删除行或列）、`start`、`count` |
 | sheet-edits | `type`（新增/重命名/删除）、`sheetName`、`newName`、`position` |
 | data-edits | `type`（排序/筛选）、`range`、`keyColumn`、`direction`、`hasHeader` |
 | formats | `range`、`fontName`、`fontSize`、`bold`、`italic`、`fontColor`、`horizontalAlignment`、`verticalAlignment`、`wrapText`、`fillColor`、`numberFormat`、`borderStyle` |
+| images | `sheetName`、`cell`、`imageFileId`、`imageVersionNo`、`widthPixels`、`heightPixels`；无需 type |
 
-**注意 `valueType`**：区分文本与公式。如果把 `=SUM(A1:A2)` 当普通文本写入，会变成字符串而不是公式。
-前端在"用户输入以 `=` 开头"时应自动切换为 `FORMULA`，或提供显式开关。
+**注意文本与公式**：SET_VALUE 的 STRING 始终写为普通文本，即使以等号开头。公式应显式使用 SET_FORMULA 或 FILL_FORMULA 并传 formula；SET_RANGE 矩阵中的公式才使用 valueType=FORMULA。界面应提供明确的值类型选择。
+
+XLSX 插图每批 1～20 张，尺寸均必填且为 1～10000 像素，以目标单元格左上角定位，不覆盖单元格内容。选择图片时保存其内部 ID 与明确版本，成功后按返回的新版本预览/下载。不要传 URL、路径或省略版本；该入口直接保存人工编辑，无 AI 确认步骤。参数、来源记录和 400/404/409/413/422 边界见 [API.md 第 3.21 节](../API.md#321-将已有图片插入-xlsx)。
 
 ## P9 版本历史页
 
@@ -635,26 +639,33 @@ POST /file/{fileId}/versions/{versionNo}/image-edits
 
 ```json
 {
-  "instruction": "裁剪并旋转",
-  "type": "CROP",
-  "x": 0, "y": 0, "width": 800, "height": 600,
-  "degrees": 90,
-  "outputFormat": "PNG",
+  "instruction": "裁剪、旋转、提亮并添加标题",
+  "operations": [
+    {"type": "CROP", "x": 0, "y": 0, "width": 800, "height": 600},
+    {"type": "ROTATE", "degrees": 90},
+    {"type": "BRIGHTNESS", "factor": 1.2},
+    {"type": "ADD_TEXT", "text": "项目周报", "x": 10, "y": 10, "fontSize": 24, "color": "#112233"}
+  ],
+  "outputFormat": "JPEG",
   "jpegQuality": 0.9
 }
 ```
 
 | 字段 | 说明 |
 | --- | --- |
-| type | 操作类型（裁剪/缩放/旋转/压缩/格式转换等） |
-| x, y, width, height | 区域类操作的坐标与尺寸 |
-| degrees | 旋转角度 |
+| operations | 最多 20 项，按顺序执行；字段放在各操作对象内 |
+| operations[].type | CROP / RESIZE / ROTATE / BRIGHTNESS / ADD_TEXT |
+| x, y, width, height | CROP 坐标与尺寸；RESIZE 只使用 width/height |
+| degrees | ROTATE 使用，顺时针 90/180/270 |
+| factor | BRIGHTNESS 使用，0～4，1 为原亮度，保留 alpha |
+| text, x, y | ADD_TEXT 使用；单行纯文本最多 500 字符，x/y 为文字实际像素边界的左上角 |
+| fontSize, color | ADD_TEXT 可选，字号 1～512（默认 24）、#RRGGBB（默认黑色） |
 | outputFormat | 输出格式；`PNG` 保留透明通道，`JPEG` 合成白色背景 |
 | jpegQuality | JPEG 质量 |
 
 响应：新建的版本 `Version`。
 
-**前端注意**：坐标必须映射回**原图像素**。如果界面做了缩放显示，需要自行换算，否则裁剪位置会偏移。
+**前端注意**：显示坐标须换算为对应操作执行时图片的像素坐标，前面的裁剪/缩放/旋转会改变后续坐标和边界。文字越界返回 400，不会自动裁字；系统缺少对应字体返回 422。PNG 保留透明度，JPEG 合成白底，jpegQuality 仅能用于 JPEG 输出。失败不生成部分版本；完整参数及边界见 [API.md 第 3.20 节](../API.md#320-本地编辑-pngjpeg-图片)。
 
 ## P11 DOCX 生成
 
@@ -684,8 +695,8 @@ POST /file/docx/generate
 
 响应：新建的 `FileAsset`（`source` 为 `GENERATED`）。
 
-**若接了模板**：`GET /admin/templates` 返回的 `enabled=true` 项里有 `variables`（JSON 数组字符串），
-前端解析后动态渲染表单。变量定义形如：
+**模板生成尚未接通**：当前生成接口只接受结构化 blocks，没有 templateId 或变量填充参数。
+`GET /admin/templates` 仅供管理员管理模板，不能在普通用户生成页调用。未来的变量表单可参考如下定义：
 
 ```json
 [
@@ -847,13 +858,30 @@ POST /ai/sessions/{sessionId}/messages    { "content": "把第二段改正式一
 
 消息列表按时间正序返回。`role` 取值 `USER`/`ASSISTANT`/`TOOL`/`SYSTEM`。
 
-> ### 重要：当前不生成 AI 回复
->
-> 模型调用属于 **TODO 4.2（P1 阶段）**，尚未接入。
-> `POST /ai/sessions/{sessionId}/messages` **只落库用户消息**，不会返回助手回复。
->
-> **前端不要显示"AI 正在思考"或 loading 态**，否则用户会一直等待。
-> 建议在界面上明确标注"模型接入中"，或暂时隐藏发送入口。
+旧 `POST .../messages` 仍只记录用户消息。需要模型回复时直接调用新增接口，不要先通过旧接口重复保存：
+
+```text
+POST /ai/sessions/{sessionId}/replies
+GET  /ai/sessions/{sessionId}/replies/{messageId}
+POST /ai/sessions/{sessionId}/replies/{messageId}/confirm
+POST /ai/sessions/{sessionId}/replies/{messageId}/discard
+```
+
+发送体：`{"content":"把第二段改正式一点","versionNo":1,"idempotencyKey":"客户端生成的稳定键"}`。绑定文档支持 DOCX 编辑及 XLSX 单元格公式，versionNo 必填；纯对话不传版本。旧会话 CRUD 不变。
+
+返回 `AiReply`，包含助手 `message`、`runStatus`、`planStatus`、`sourceVersion`、`outputVersion`、过程与用量 `result`、确认前逐项内容差异 `changes`。完整字段和状态规则见 [API.md 第 8 节](../API.md#8-ai-回复与确认编辑)。
+
+界面流程：发送时显示同步请求状态；超时重发沿用同一幂等键，若返回 RUNNING 则通过 GET 查询。PENDING 时显示 before/after、操作类型和理由，再提供确认/放弃；确认和放弃均无需请求体。CONFIRMED 时按 outputVersion 预览、比较和下载。FAILED 不代表编辑成功；stub 模型和未配置计价必须明确展示，不能显示真实模型完成或免费。放弃后可用新键继续发送调整要求。
+
+当前只有同步返回，没有 SSE。确认前提供内容差异，页面排版预览仍使用已保存版本；真实模型与前端端到端联调待验收。
+
+插图也使用相同确认流程：`changes[].type=INSERT_IMAGE` 时，读取其 `image` 对象中的 `fileId/versionNo/widthPixels/heightPixels`，通过既有按版本图片预览展示所选图片，显示“追加到目标段落”及尺寸。该项 before/after 为 null，不代表删除。图片参数同样持久化在 result.plans 中，客户端不重传计划；确认时服务端再次校验图片归属和版本。完整结构见 [API.md 第 8.3 节](../API.md#83-待确认的-docx-图片插入)。旧文本项的 image 可缺失或为 null。
+
+`changes[].type=FORMAT_PARAGRAPH` 时，使用 `beforeFormat`（原 styleId、headingLevel、numberingFormat）与目标 `format` 展示格式差异；before/after 为 null，不代表删除。仅支持标题 1～9、正文、项目符号、编号和清除列表；客户端不提交格式计划。字段见 [API.md 第 8.4 节](../API.md#84-待确认的-docx-基础格式)。
+
+每日额度按 ChatModel 调用尝试计数，包含智能体重试。生成回复的业务码 429（额度用尽）或 503（无法检查额度）仍可能带 `data=AiReply`，应先保存 message.id 和失败状态，再展示 msg；禁止确认或自动换键重试。GET 查询以业务码 0 返回同一 FAILED 记录；原键重放仍返回原失败结果。额度恢复后由用户用新键发送。规则见 [API.md 第 8.5 节](../API.md#85-每用户每日调用额度)。
+
+XLSX 会话通过相同接口提出公式要求。`changes[].type=SET_FORMULA` 时展示目标工作表/单元格、before、after 与 reason；原公式和目标公式带等号，普通原值为文本，空白目标 before 为 null，不表示删除。target 是内部“原始工作表名!A1”定位，最后一个 ! 为分隔符，不额外给工作表名加 Excel 引号。用户确认前不写 XLSX；确认后按 outputVersion 预览或调用公式结果接口，不能把公式文本视为已计算的数值结果。当前不支持 AI 区域填充或行列调整；完整规则见 [API.md 第 8.6 节](../API.md#86-待确认的-xlsx-单元格公式)。
 
 ---
 
@@ -1020,7 +1048,7 @@ DELETE /admin/templates/{id}
 GET    /admin/templates/{id}/download
 ```
 
-响应 `data`：`DocTemplate`
+响应 `data`：`DocTemplateVO`（列表接口为分页包装，不返回内部 storageKey）
 
 ```json
 {
@@ -1046,9 +1074,9 @@ GET    /admin/templates/{id}/download
 **新建的模板默认 `enabled=false`**，需要显式启用后才对普通用户可见。
 
 **`variables` 是字符串形式的 JSON 数组**，前端需要二次 `JSON.parse`。
-格式约束：`name` 必填、只允许字母数字下划线且不能以数字开头；非法结构后端返回 `400`。
+格式约束：最多 100 个变量；`name` 必须是字符串，去除首尾空格后保存，1～64 字符、只允许字母数字下划线且不能以数字开头。名称区分大小写，规范化后不得重复。`label`、`description` 可省略或为 null，非 null 时必须是字符串，分别最多 128、255 字符；`required` 可省略，提供时必须是 JSON 布尔值，不能传字符串、数字或 null。非法结构后端返回业务码 `400`。
 
-**替换内容不删除旧文件**（便于回退），清理由后台任务负责。
+创建或替换内容后操作失败、事务明确回滚，会清理本次新上传文件；替换内容不删除旧文件。当前仅保存最新模板元数据，尚无历史版本查询、回退、模板生成或模板预览入口。旧文件的正式存储回收尚未实现；现有后台任务只清理临时目录。
 
 ## P22 审计日志页
 
@@ -1169,6 +1197,6 @@ FileDetailPage
 | 任务进度推送 | **仅轮询** | 需自行实现轮询与停止策略 |
 | OCR | 未实现（P2） | 扫描型 PDF 的 `text` 为空 |
 | PDF 转可编辑 DOCX | 未实现（P2） | 无此入口 |
-| 图片模型编辑（去背景等） | 未实现（P2） | 只有本地确定性操作（裁剪/缩放/旋转/压缩/格式转换） |
+| 图片模型编辑（去背景等） | 未实现（P2） | 已有本地裁剪/缩放/旋转/亮度/单行文字/压缩/格式转换 |
 | 前端工程 | **不存在** | 技术选型、构建与部署方式均待定 |
 | 邮件验证码 | 未实现 | 只有短信渠道（当前为 Mock） |

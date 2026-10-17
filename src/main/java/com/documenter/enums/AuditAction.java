@@ -54,5 +54,8 @@ public enum AuditAction {
     // ---- AI 对话（TODO 3.2 要求对话模块同样执行服务端归属校验）----
     AI_SESSION_CREATE,
     AI_SESSION_DELETE,
-    AI_MESSAGE_SEND
+    AI_MESSAGE_SEND,
+    AI_REPLY_CREATE,
+    AI_REPLY_CONFIRM,
+    AI_REPLY_DISCARD
 }

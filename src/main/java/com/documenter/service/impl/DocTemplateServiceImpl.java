@@ -19,10 +19,14 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.InputStream;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
 
 /**
  * 公共模板管理实现（TODO 3.2「管理公共模板」）。
@@ -32,8 +36,8 @@ import java.util.List;
  * 不存在「模板上传是绕过校验的后门」这种问题。
  *
  * <p>版本策略：单行保存当前版本，{@code version_no} 在替换内容时由 SQL 原子递增。
- * 旧 storageKey 对应的磁盘文件不会被删除——出问题时可回退，
- * 物理回收交给过期文件清理任务。
+ * 旧文件暂时保留，但尚无模板历史版本索引、回退或正式存储回收任务。
+ * 新上传文件在本次操作失败或事务回滚时清理。
  */
 @Slf4j
 @Service
@@ -106,38 +110,38 @@ public class DocTemplateServiceImpl implements DocTemplateService {
             throw new BusinessException(409, "模板标识「" + code + "」已存在");
         }
 
-        StorageWriter.StoredFile stored = storageWriter.store(file);
-
+        String variables = TemplateVariables.validateAndNormalize(dto.getVariables());
         DocTemplate template = new DocTemplate();
         template.setCode(code);
         template.setName(dto.getName().trim());
         template.setCategory(trimToNull(dto.getCategory()));
         template.setDescription(trimToNull(dto.getDescription()));
-        template.setVariables(TemplateVariables.validateAndNormalize(dto.getVariables()));
-        template.setStorageKey(stored.storageKey());
-        template.setOriginalName(stored.originalName());
-        template.setContentType(stored.contentType());
-        template.setExtension(stored.extension());
-        template.setSizeBytes(stored.sizeBytes());
+        template.setVariables(variables);
         template.setVersionNo(1);
         // 新建默认停用：模板要经过管理员核对后才能对普通用户可见
         template.setEnabled(Boolean.FALSE);
 
-        try {
-            mapper.insert(template);
-        } catch (DuplicateKeyException e) {
-            // 并发创建同 code 时先查后插会失效，靠唯一索引兜底；顺带清理已落盘的文件
-            fileStorage.delete(stored.storageKey());
-            throw new BusinessException(409, "模板标识「" + code + "」已存在");
-        }
-        if (template.getId() == null) {
-            fileStorage.delete(stored.storageKey());
-            throw new BusinessException(500, "创建模板失败，请稍后重试");
-        }
+        return withStoredFile(file, stored -> {
+            template.setStorageKey(stored.storageKey());
+            template.setOriginalName(stored.originalName());
+            template.setContentType(stored.contentType());
+            template.setExtension(stored.extension());
+            template.setSizeBytes(stored.sizeBytes());
+            int inserted;
+            try {
+                inserted = mapper.insert(template);
+            } catch (DuplicateKeyException e) {
+                // 并发创建同 code 时由唯一索引兜底，文件由 withStoredFile 清理。
+                throw new BusinessException(409, "模板标识「" + code + "」已存在");
+            }
+            if (inserted != 1 || template.getId() == null) {
+                throw new BusinessException(500, "创建模板失败，请稍后重试");
+            }
 
-        auditService.success(AuditAction.ADMIN_TEMPLATE_CREATE, "TEMPLATE", template.getId(),
-                "新建模板 code=" + code + ", 类型=" + stored.extension());
-        return DocTemplateVO.from(requireTemplate(template.getId()));
+            auditService.success(AuditAction.ADMIN_TEMPLATE_CREATE, "TEMPLATE", template.getId(),
+                    "新建模板 code=" + code + ", 类型=" + stored.extension());
+            return DocTemplateVO.from(requireTemplate(template.getId()));
+        });
     }
 
     @Override
@@ -171,24 +175,18 @@ public class DocTemplateServiceImpl implements DocTemplateService {
     @Transactional(rollbackFor = Exception.class)
     public DocTemplateVO replaceContent(Long id, MultipartFile file) {
         DocTemplate existing = requireTemplate(id);
-        StorageWriter.StoredFile stored = storageWriter.store(file);
+        return withStoredFile(file, stored -> {
+            int updated = mapper.replaceContent(id, stored.storageKey(), stored.originalName(),
+                    stored.contentType(), stored.extension(), stored.sizeBytes());
+            if (updated != 1) {
+                throw new BusinessException(409, "模板内容更新失败，请刷新后重试");
+            }
 
-        String previousKey = existing.getStorageKey();
-        int updated = mapper.replaceContent(id, stored.storageKey(), stored.originalName(),
-                stored.contentType(), stored.extension(), stored.sizeBytes());
-        if (updated != 1) {
-            // 更新失败说明记录状态异常，清理刚写入的文件避免产生孤儿
-            fileStorage.delete(stored.storageKey());
-            throw new BusinessException(409, "模板内容更新失败，请刷新后重试");
-        }
-
-        // 旧文件不删除：模板内容被替换后仍可回退，清理交给过期文件清理任务。
-        // 若后续确认不需要回退，可在这里改为 fileStorage.delete(previousKey)。
-        log.info("模板内容已替换, templateId={}, 旧 storageKey 保留={}", id, previousKey != null);
-
-        auditService.success(AuditAction.ADMIN_TEMPLATE_CONTENT_REPLACE, "TEMPLATE", id,
-                "替换模板内容，类型=" + stored.extension());
-        return DocTemplateVO.from(requireTemplate(id));
+            log.info("模板内容已替换, templateId={}, 旧 storageKey 保留={}", id, existing.getStorageKey() != null);
+            auditService.success(AuditAction.ADMIN_TEMPLATE_CONTENT_REPLACE, "TEMPLATE", id,
+                    "替换模板内容，类型=" + stored.extension());
+            return DocTemplateVO.from(requireTemplate(id));
+        });
     }
 
     @Override
@@ -217,7 +215,7 @@ public class DocTemplateServiceImpl implements DocTemplateService {
             throw new BusinessException(409, "请先停用该模板再删除");
         }
         mapper.deleteById(id);
-        // 磁盘文件保留，由清理任务统一回收
+        // 磁盘文件暂时保留；正式存储的回收策略仍待实现。
         auditService.success(AuditAction.ADMIN_TEMPLATE_DELETE, "TEMPLATE", id,
                 "删除模板 code=" + existing.getCode());
     }
@@ -254,6 +252,42 @@ public class DocTemplateServiceImpl implements DocTemplateService {
 
     private boolean existsByCode(String code) {
         return mapper.exists(Wrappers.<DocTemplate>lambdaQuery().eq(DocTemplate::getCode, code));
+    }
+
+    private DocTemplateVO withStoredFile(MultipartFile file,
+                                         Function<StorageWriter.StoredFile, DocTemplateVO> operation) {
+        StorageWriter.StoredFile stored = storageWriter.store(file);
+        AtomicBoolean cleanupAttempted = new AtomicBoolean();
+        Runnable cleanup = () -> {
+            if (!cleanupAttempted.compareAndSet(false, true)) {
+                return;
+            }
+            try {
+                if (!fileStorage.delete(stored.storageKey())) {
+                    log.warn("无法清理未提交的模板文件, storageKey={}", stored.storageKey());
+                }
+            } catch (RuntimeException e) {
+                // 保留原始业务/数据库异常，清理失败单独记录。
+                log.warn("清理未提交的模板文件失败, storageKey={}", stored.storageKey(), e);
+            }
+        };
+        try {
+            if (TransactionSynchronizationManager.isSynchronizationActive()
+                    && TransactionSynchronizationManager.isActualTransactionActive()) {
+                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                    @Override
+                    public void afterCompletion(int status) {
+                        if (status == STATUS_ROLLED_BACK) {
+                            cleanup.run();
+                        }
+                    }
+                });
+            }
+            return operation.apply(stored);
+        } catch (RuntimeException | Error e) {
+            cleanup.run();
+            throw e;
+        }
     }
 
     private static Boolean parseEnabled(String value) {

@@ -5,7 +5,7 @@
 - 默认服务地址：`http://localhost:8080`
 - 默认数据格式：`application/json; charset=UTF-8`
 - 时间格式：ISO-8601 本地时间，例如 `2026-10-11T14:30:00`
-- 最近更新日期：2026-10-12
+- 最近更新日期：2026-10-17
 
 ## 1. 通用约定
 
@@ -72,7 +72,7 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | `413` | 文件大小、页数、像素或解压规模超过限制 |
 | `415` | 文件类型不支持 |
 | `422` | PDF、图片、Office 压缩包或 DOCX 内容损坏，或结构暂不支持处理 |
-| `429` | 发送、上传或重试次数达到限制 |
+| `429` | 发送、上传、重试次数或每日 AI 调用次数达到限制 |
 | `500` | 服务端内部错误 |
 | `502` | 验证码发送失败 |
 
@@ -140,6 +140,7 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | XLSX | POST | `/file/{fileId}/versions/{versionNo}/xlsx/sheet-edits` | 是 | 新增、重命名或删除工作表并新建版本 |
 | XLSX | POST | `/file/{fileId}/versions/{versionNo}/xlsx/data-edits` | 是 | 排序区域或设置、清除自动筛选并新建版本 |
 | XLSX | POST | `/file/{fileId}/versions/{versionNo}/xlsx/formats` | 是 | 设置单元格区域基础格式并新建版本 |
+| XLSX | POST | `/file/{fileId}/versions/{versionNo}/xlsx/images` | 是 | 内嵌已有图片的明确版本并新建 XLSX 版本 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/paragraph-text` | 是 | 替换段落文本 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/paragraph-edits` | 是 | 插入或删除段落 |
 | DOCX | POST | `/file/{fileId}/versions/{versionNo}/table-edits` | 是 | 编辑表格 |
@@ -152,6 +153,10 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | 任务 | POST | `/task/{taskId}/cancel` | 是 | 取消任务 |
 | 任务 | POST | `/task/{taskId}/retry` | 是 | 重试任务 |
 | 任务 | GET | `/task/by-file/{fileId}` | 是 | 查询文件处理历史 |
+| AI 对话 | POST | `/ai/sessions/{sessionId}/replies` | 是 | 生成并保存回复及待确认计划 |
+| AI 对话 | GET | `/ai/sessions/{sessionId}/replies/{messageId}` | 是 | 查询回复和确认前修改预览 |
+| AI 对话 | POST | `/ai/sessions/{sessionId}/replies/{messageId}/confirm` | 是 | 确认计划并保存一个新版本 |
+| AI 对话 | POST | `/ai/sessions/{sessionId}/replies/{messageId}/discard` | 是 | 放弃待确认计划 |
 | 管理员 | GET | `/admin/users` | 管理员 | 用户分页列表 |
 | 管理员 | GET | `/admin/users/{userId}` | 管理员 | 用户详情 |
 | 管理员 | GET | `/admin/users/{userId}/usage` | 管理员 | 单用户资源用量与任务统计 |
@@ -222,6 +227,8 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 ```
 
 开发环境目前使用模拟发送器，验证码写入服务端日志。发送间隔、有效期和每日次数由服务端配置控制。
+
+发送成功后，摘要、错误计数与有效期在 Redis 中一次原子发布。若验证码已投递但无法确认保存成功，返回业务码 503，不能按发送成功处理；需等重发间隔后重新获取。此时不会生成成功发送审计。日发送尝试计数和既有重发间隔策略保持不变。
 
 ### 2.3 验证码注册
 
@@ -325,6 +332,8 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 ```
 
 注意：此接口校验的是注册场景验证码，而且会真正消费验证码。调用成功后，同一验证码不能再提交给 `/user/register/by-code`。
+
+所有验证码消费入口使用同一规则：错误次数未达上限返回业务码 400；在达到上限的那次错误尝试中立即删除验证码并返回 429。成功消费、错误次数用尽或过期后，再提交原验证码返回 400，需重新获取；注册、登录和找回密码三种用途隔离。并发原子性依赖 Redis Lua，专用 Redis 集成测试与运行方法见 [安全回归说明](docs/security-testing.md)。
 
 ### 2.10 刷新 Token
 
@@ -836,11 +845,13 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 
 ```json
 {
-  "instruction": "裁剪后缩放、顺时针旋转，转为 JPEG",
+  "instruction": "裁剪后缩放、提亮并添加标题，转为 JPEG",
   "operations": [
     {"type": "CROP", "x": 10, "y": 20, "width": 600, "height": 400},
     {"type": "RESIZE", "width": 300, "height": 200},
-    {"type": "ROTATE", "degrees": 90}
+    {"type": "ROTATE", "degrees": 90},
+    {"type": "BRIGHTNESS", "factor": 1.2},
+    {"type": "ADD_TEXT", "text": "项目周报", "x": 10, "y": 10, "fontSize": 24, "color": "#112233"}
   ],
   "outputFormat": "JPEG",
   "jpegQuality": 0.85
@@ -859,16 +870,53 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 - `CROP`：必填 `x`、`y`、`width`、`height`。坐标从左上角 `(0,0)` 开始，以像素计；起点不得为负，宽高必须大于 0，范围不能超出当前图片。
 - `RESIZE`：必填正整数 `width`、`height`，按这两个尺寸缩放，使用双线性插值；不会自动保持宽高比，调用方应自行计算等比尺寸。
 - `ROTATE`：只填 `degrees`，支持顺时针 `90`、`180`、`270` 度。90/270 度会交换宽高。
+- `BRIGHTNESS`：只填有限数值 `factor`，范围 0～4。各 RGB 通道乘以该系数、四舍五入并截断到 255；0 为全黑、1 保持原值、大于 1 提亮。不改变 alpha，不执行自动曝光或伽马校正。
+- `ADD_TEXT`：必填 `text`、非负整数 `x/y`，可选 `fontSize`（1～512 像素，默认 24）、`color`（`#RRGGBB`，默认 `#000000`）。单行非空纯文本，最多 500 个 UTF-16 字符，不允许换行、制表符或控制字符；不解析 HTML，不接受字体文件或字体路径。使用系统逻辑 SansSerif 普通字体，中文等字符依赖部署环境安装的字体；缺字返回 `422` 并说明应安装对应字体。
+
+文字 `x/y` 是实际可见文字像素边界的左上角，不是基线或字框左上角；整个可见文字必须落在当前图片内，越界返回 `400`，不静默裁掉文字。原有像素保持不变，文字按抗锯齿方式覆盖合成。文字排版随操作系统、JDK 和字体而变化，不保证不同部署环境像素一致。
 
 每个操作的坐标与尺寸以此前操作完成后的图片为准。至少提供一个操作、`outputFormat` 或 `jpegQuality`；仅转换格式或调整 JPEG 质量时可省略 `operations`。
 
 - 源版本仅支持 PNG/JPEG，解码前校验实际格式和尺寸。源图片与每个中间结果默认最多 4000 万像素（`res.storage.upload.max-image-pixels`），源文件及编码后输出默认最多 50 MiB（`max-size-bytes`）；超限返回 `413`。
 - PNG 输出保留透明通道；JPEG 不支持透明，透明区域合成到白色背景。转换为 JPEG 后再转回 PNG 不会恢复丢失的透明度或有损细节。
-- 输出重新编码，不保留 EXIF、ICC、DPI 等元数据，也不按 EXIF 自动纠正方向；坐标基于实际解码像素。尚不支持任意角度旋转、亮度调整、文字添加或模型编辑。
+- 输出重新编码，不保留 EXIF、ICC、DPI 等元数据，也不按 EXIF 自动纠正方向；坐标基于实际解码像素。尚不支持任意角度旋转、多行或富文本排版、指定字体及模型编辑。
 - 成功时返回新 [Version](#64-version)，包含 `contentType`、`extension`；跨格式为 `CONVERT`，同格式为 `MANUAL_EDIT`。历史版本保留原内容和原格式，当前文件同步到新版本。
-- `versionNo` 同时为源版本和乐观锁期望值；不是最新版本时返回 `409`，不会覆盖最新内容，并清理已经生成的未入库产物。无权访问按 `404` 处理，字段或裁剪范围无效返回 `400`，损坏或格式不符返回 `422`。
+- `versionNo` 同时为源版本和乐观锁期望值；不是最新版本时返回 `409`，不会覆盖最新内容，并清理已经生成的未入库产物。无权访问按 `404` 处理，字段、裁剪范围或文字范围无效返回 `400`，损坏、格式不符或缺字返回 `422`。所有操作完成后才写入单个新版本，任一操作失败都不保存部分结果。
 
 已有数据库需要执行 Flyway `V2__version_content_types.sql`：为历史版本回填格式，并把当前文件内容指针同步到最新版本。该迁移随应用启动执行，真实 MariaDB 环境迁移验收仍需完成。
+
+### 3.21 将已有图片插入 XLSX
+
+`POST /file/{fileId}/versions/{versionNo}/xlsx/images`
+
+需要登录。服务端按当前用户校验目标工作簿和每张源图片，图片必须为已上传或编辑后的 PNG/JPEG 明确版本；不读取外部 URL 或本地路径。本接口直接执行人工插图，不接入 AI 待确认计划。
+
+```json
+{
+  "instruction": "在数据表右侧添加说明图片",
+  "operations": [
+    {"sheetName": "数据", "cell": "F2", "imageFileId": 30, "imageVersionNo": 2,
+     "widthPixels": 400, "heightPixels": 300}
+  ]
+}
+```
+
+| 字段 | 规则 |
+| --- | --- |
+| `instruction` | 可选，最多 2000 字符，仅记录操作说明 |
+| `operations` | 必填，1～20 个非空操作，按顺序插入；成功仅保存一个 MANUAL_EDIT 版本 |
+| `sheetName` | 必填，已有工作表的准确名称；不存在返回 404，受保护工作表返回 422 |
+| `cell` | 必填，锚点单元格，如 F2；支持大小写及绝对引用标记，必须在 A1～XFD1048576 内，不接受区域或带工作表名的地址 |
+| `imageFileId` / `imageVersionNo` | 必填正数，图片文件 ID 和明确版本；图片已有新版本时也不会改用新版本 |
+| `widthPixels` / `heightPixels` | 必填，各为 1～10000 像素，不自动保持宽高比 |
+
+图片是浮动绘图对象，左上角对齐锚点单元格，不写入或覆盖该单元格值，也不会自动调整行高或列宽。可以在未创建的空白单元格位置插图，也允许显式重叠多张图片。图片采用随单元格移动、固定尺寸的 OOXML 锚定方式；计算显示范围时跳过隐藏行列，范围超出工作表边界返回 400。办公软件中后续插入行列时的兼容表现仍需人工验收。
+
+服务端验证图片实际 PNG/JPEG 格式、可解码性、原始像素数及读取字节数，保留原始图片字节并内嵌到 XLSX。每张图片沿用上传像素上限（默认 4000 万），本批新增图片总字节及最终 XLSX 沿用文件大小上限（默认 50 MiB），超限返回 413；损坏或 MIME 与内容不一致返回 422，不支持的图片 MIME 返回 400。PNG 透明度随原始字节保留，不重新编码。
+
+源图片仍为独立文件资源；内嵌副本的替代文本记录 `Documenter imageFileId=30; imageVersionNo=2`，用于保留来源。插入后不依赖外部图片链接，源图片后续更新不会改变既有 XLSX 内容。本次不扩展 XLSX 结构接口中的图片清单；保存后的页面显示、下载和恢复复用已有按版本接口。
+
+整批在内存副本完成后才保存；任一图片或目标校验失败，不生成部分版本。目标与图片无权访问按 404 处理；源版本同时作为乐观锁期望值，版本冲突返回 409 并清理未入库产物。成功返回新 [Version](#64-version)。本次不增加数据库迁移，POI 重开测试已覆盖内容保留与边界，真实办公软件版式仍待验收。
 
 ## 4. DOCX 生成与编辑
 
@@ -1147,6 +1195,10 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 ## 5. 异步任务
 
 当前任务框架已经支持提交、排队、状态流转、进度、取消、超时和重试，但默认启用的是占位处理器。占位处理器会更新进度和步骤，不会真正执行 OCR、转换、AI 编辑、导出或图片生成，也不会产生输出文件。
+
+调度与实际处理使用独立的有界线程池，`res.task` 的线程数和队列容量分别应用于两个池。队列满或执行器关闭时，不在请求线程中执行耗时处理，而是将任务记录为 `FAILED`，`errorCode=QUEUE_FULL`，并提示稍后通过现有重试入口重试。若提交时已发生拒绝，创建任务响应中的任务状态也会反映该失败；接受入队后的状态变化通过任务查询获取。
+
+自动重试仅针对处理器异常，最多重试 `maxRetry` 次；超时、取消、执行线程中断和队列拒绝均不自动重试。自动重试的步骤号接续同一任务的历史步骤，失败现场保留。取消任务保留实际进度，成功任务才以 100% 收尾。超时和取消会关闭该次执行上下文并发送线程中断，真实处理器仍须在耗时边界及保存产物前检查取消或中断状态。
 
 ### 5.1 提交任务
 
@@ -1477,10 +1529,221 @@ PENDING -> RUNNING -> SUCCEEDED
 
 存储量只累计未软删除文件；失败率按 `FAILED / (SUCCEEDED + FAILED)` 计算，取消任务不计入成功或失败样本。两个查询均为只读聚合查询，并记录管理员审计日志。
 
-## 8. 当前实现边界
+### 7.12 公共模板管理
 
-- 尚未提供 AI 对话或自然语言文档编辑 HTTP 接口。
-- 尚未把 LangChain4j 工具调用接入 Controller 或任务处理器。
+以下均为现有管理员接口，普通用户无权调用：
+
+| 接口 | 请求与结果 |
+| --- | --- |
+| `GET /admin/templates` | `page=1`、`size=20`（1～100），可选 `enabled=true/false`、`category`（最多 32 字符）、`keyword`（最多 100 字符）；返回 `PageResult<DocTemplateVO>` |
+| `GET /admin/templates/{id}` | 返回 `DocTemplateVO` |
+| `POST /admin/templates` | multipart：元数据和必填 `file`；创建第 1 版，默认停用 |
+| `PUT /admin/templates/{id}` | JSON 元数据；更新名称、标识、分类、说明和变量定义 |
+| `POST /admin/templates/{id}/content` | multipart：必填 `file`；替换当前内容，版本号原子递增 |
+| `PUT /admin/templates/{id}/enabled?enabled=true` | 启用或停用；未上传内容时不能启用 |
+| `DELETE /admin/templates/{id}` | 删除停用模板的记录；启用中的模板返回业务码 `409` |
+| `GET /admin/templates/{id}/download` | 下载当前内容供管理员核对；不接受任意存储路径 |
+
+创建与更新元数据均使用以下字段，创建时放在 multipart 表单中：
+
+```json
+{
+  "code": "weekly-report",
+  "name": "周报模板",
+  "category": "报告",
+  "description": "周报内容",
+  "variables": "[{\"name\":\"title\",\"label\":\"标题\",\"required\":true}]"
+}
+```
+
+`code`、`name` 必填，分别最多 64、128 字符；code 只允许字母、数字、下划线和连字符，重复返回 `409`。可选 category、description 分别最多 32、500 字符，variables 原始字符串最多 20,000 字符。
+
+variables 是 **JSON 数组字符串**，null、空白或 JSON null 代表无变量。最多 100 个变量，每个元素必须是对象：name 必须是字符串，去除首尾空格后保存，1～64 字符、以字母或下划线开头，其余只允许字母、数字和下划线；名称区分大小写，规范化后不得重复。label、description 可省略或为 null，否则必须是字符串，分别最多 128、255 字符；required 可省略，提供时必须是 JSON 布尔值。校验失败返回业务码 `400`，创建时在上传落盘前完成变量校验。
+
+`DocTemplateVO` 包含 id、code、name、category、description、originalName、contentType、extension、sizeBytes、versionNo、variables、enabled、createTime、updateTime、hasFile，不含内部 storageKey。文件类型和结构校验复用普通上传规则。创建、替换操作失败或事务明确回滚时清理本次新文件；替换前的旧文件保留。
+
+当前只保存最新模板元数据。尚无模板历史版本查询/回退、变量填充生成或生成预览接口，也没有旧模板文件的正式存储回收任务；临时目录清理任务不处理这些文件。
+
+## 8. AI 回复与确认编辑
+
+原有会话 CRUD、`GET /ai/sessions/{sessionId}/messages` 和 `POST .../messages` 保持原语义：后者只保存一条用户消息。需要模型回复时使用下面的新接口，不要先调用旧消息接口重复记录同一条指令。
+
+### 8.1 生成回复
+
+`POST /ai/sessions/{sessionId}/replies`，需要登录、会话归属及 ACTIVE 状态。新流程要求 `res.ai.require-confirmation=true`，关闭时返回业务码 `503`。支持纯对话、DOCX 编辑，以及 XLSX 单元格公式计划（见 8.6）。绑定文件时均要求明确版本。调用同步返回，尚未提供 SSE。
+
+```json
+{
+  "content": "把第二段改得更正式，保留表格和图片",
+  "versionNo": 1,
+  "idempotencyKey": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+| 字段 | 规则 |
+| --- | --- |
+| `content` | 必填，非空，最多 2000 字符；去除首尾空白后保存 |
+| `versionNo` | 绑定文件时必填，必须为明确的正版本号；纯对话不允许传入 |
+| `idempotencyKey` | 必填，非空，最多 128 字符，按会话隔离；一次发送意图对应一个稳定键 |
+
+同一幂等键与相同内容/版本重放时返回原回复，不再次调用模型；键被用于其他内容或版本时返回业务码 `409`。同一会话已有回复正在生成时，其他键的新请求返回 `409`。请求超时后重发应沿用原键；若返回 `RUNNING`，使用查询接口检查进度，不要自动换键重新调用模型。
+
+新回复会保存一条 USER 消息和一条 ASSISTANT 消息。模型调用在数据库事务外执行。历史最多读取最近 20 条用户/已完成助手消息，总字符数不超过 12000，按完整消息取最近内容并保持角色和时间顺序，不接受历史 SYSTEM/TOOL 内容作为新系统指令。
+
+统一响应的 `data` 类型为 `AiReply`：
+
+```json
+{
+  "message": {
+    "id": 102, "sessionId": 7, "role": "ASSISTANT",
+    "content": "已生成待确认的修改计划", "modelName": "stub",
+    "promptTokens": 20, "completionTokens": 10, "durationMs": 50
+  },
+  "runStatus": "COMPLETED",
+  "planStatus": "PENDING",
+  "sourceVersion": 1,
+  "outputVersion": null,
+  "result": {
+    "reply": "已生成待确认的修改计划",
+    "steps": [],
+    "plans": [{"summary": "修改段落", "operations": [
+      {"type": "REPLACE_TEXT", "target": "body/p1", "content": "修改后的段落", "reason": "改为正式表述"}
+    ], "expected": null}],
+    "usage": {"modelCalls": 2, "toolCalls": 1, "inputTokens": 20, "outputTokens": 10,
+      "estimatedCost": 0, "costConfigured": false, "elapsedMs": 50},
+    "termination": "COMPLETED", "truncated": false
+  },
+  "changes": [{"type": "REPLACE_TEXT", "target": "body/p1",
+    "before": "原始段落", "after": "修改后的段落", "reason": "改为正式表述"}]
+}
+```
+
+示例中的 `modelName=stub` 仅为桩模型，不代表真实模型已验收。模型不可用、调用失败或中断时，回复记录为 `runStatus=FAILED`，`planStatus=NONE`，说明保存在回复中；HTTP 成功返回数据不代表模型执行成功，前端必须检查状态。合并计划冲突时 `termination=INVALID_PLAN`，保留已收到的用量，不能确认该结果。未配置计价时 `costConfigured=false`，不能将 `estimatedCost=0` 显示成免费。每日调用额度见 8.5，当前不扣余额。
+
+### 8.2 查询、确认与放弃
+
+`GET /ai/sessions/{sessionId}/replies/{messageId}` 返回同一 `AiReply`。这里的 `messageId` 是生成接口返回的助手消息 ID。跨用户会话、跨会话消息或普通旧消息返回业务码 `404`。
+
+| 状态 | 含义与可用操作 |
+| --- | --- |
+| `runStatus=RUNNING` | 回复尚未完成，可重查 |
+| `runStatus=FAILED` | 本次回复失败；需重试时发送新请求并使用新幂等键 |
+| `planStatus=NONE` | 没有待处理修改，不能确认或放弃 |
+| `planStatus=PENDING` | 可查看 `changes` 并确认或放弃 |
+| `planStatus=CONFIRMED` | 修改已保存，`outputVersion` 是产出版本；重复确认不再写版本 |
+| `planStatus=DISCARDED` | 已放弃；重复放弃幂等，不能再确认 |
+
+`changes` 只在 PENDING 时提供：替换展示 before/after，插入的 before 为 null、target 是参照块，删除的 after 为 null。这是内容差异预览，不是尚未保存版本的页面排版预览。按钮可用性以 `planStatus` 为准；`result.plans` 保留原始生成结果用于追溯。
+
+`POST /ai/sessions/{sessionId}/replies/{messageId}/confirm`，无需请求体。服务端从已保存回复中读取计划，使用会话绑定的文件和保存的 `sourceVersion`，不会使用客户端提供的计划、文件 ID、版本或用户 ID。会话必须 ACTIVE；同一计划的确认/放弃由数据库行锁串行处理。段落、单元格、图片与格式修改合并成一次原子编辑，成功仅生成一个 `AI_EDIT` 版本；回复状态和版本写入处于同一事务，回滚时清理文件产物。
+
+若源版本已过期，返回业务码 `409`，原计划仍为 PENDING，不能强制覆盖新版本。用户应查看最新版本，再放弃旧计划并用新键重新发送指令。确认成功后使用 `outputVersion` 调用既有按版本预览、下载及 PDF 导出；修改前后比较使用 `sourceVersion` 与 `outputVersion`，不要改用“最新版本”下载。
+
+`POST /ai/sessions/{sessionId}/replies/{messageId}/discard`，无需请求体，不生成文档版本。继续调整时可放弃旧计划，再发送新的自然语言要求。已确认计划不能再放弃，已放弃计划不能再确认，均返回业务码 `409`。
+
+数据库需应用 `V5__ai_reply_confirmation.sql`。启动恢复沿用 `res.task.recover-on-startup`：开启时将遗留 RUNNING 回复标记为 FAILED，并提示使用新键重发；与现有任务恢复相同，该模式用于单实例，多实例需关闭启动恢复并另行设计分布式恢复。
+
+### 8.3 待确认的 DOCX 图片插入
+
+图片插入复用以上四个回复接口，不新增 HTTP 路径。用户需要提供已上传的 PNG/JPEG 文件 ID 和明确版本；`insert_image` 工具在默认确认模式下只产出计划，不写文档。计划生成时校验图片归属、版本及格式，确认时再次读取同一图片版本校验。即使图片已有更新版本，也不改用最新版本；图片已不可用或不再符合条件时，整次混合编辑失败，不保存部分文本或图片。
+
+服务端返回的 `result.plans[].operations[]` 新增 `INSERT_IMAGE` 类型和可选 `image` 字段；这不是让客户端提交编辑计划的新请求体：
+
+```json
+{
+  "type": "INSERT_IMAGE",
+  "target": "body/p0",
+  "content": null,
+  "reason": "添加说明图片",
+  "image": {"fileId": 30, "versionNo": 2, "widthPixels": 80, "heightPixels": 40}
+}
+```
+
+`target` 必须是源 DOCX 中的段落，图片以内嵌方式追加到该段落，保留原段落文本和其他未涉及内容。图片 ID 和版本必须为正数，显示宽高必须在 1～10000 像素；工具未指定宽高时默认 400×300，显式越界会拒绝，不会静默调整。单个计划最多 50 个总操作，其中图片不超过 20 张；同一目标不能同时替换文本和插图，也不能同时替换单元格及其内部插图目标。
+
+`changes[]` 中的图片项包含同样的 `image` 对象，`before`/`after` 为 null，前端应按 `type=INSERT_IMAGE` 展示“追加图片”、显示尺寸，并使用 image.fileId/image.versionNo 对应的既有预览或下载入口展示图片。不要将它解释成删除或普通文本替换。
+
+图片与段落、表格操作可合并确认，只产生一个 `AI_EDIT` 版本；重复确认复用该输出版本，放弃则不生成版本。旧纯文本计划的 `image` 缺失或为 null，仍可读取；其他类型不允许夹带图片参数。本次仅扩展 V5 已有的 JSON 结果结构，不新增数据库迁移。新 HTTP 回复流程仍要求提交前确认；显式关闭确认的内部兼容模式保留原直接插图路径。
+
+### 8.4 待确认的 DOCX 基础格式
+
+基础格式复用现有 `edit_paragraph` 工具和四个回复接口，不新增 HTTP 路径或数据库迁移。工具参数为 `operation=FORMAT_PARAGRAPH`、目标 `target`、`formatType`，标题另传整数 `level`；不使用文本 `content`。服务端保存的计划如下：
+
+```json
+{
+  "type": "FORMAT_PARAGRAPH",
+  "target": "body/p0",
+  "content": null,
+  "reason": "将首段设为二级标题",
+  "format": {"type": "SET_HEADING", "level": 2}
+}
+```
+
+| `format.type` | 效果 |
+| --- | --- |
+| `SET_HEADING` | 设置 Heading1～Heading9 并清除直接列表编号；level 必须为 1～9 |
+| `SET_NORMAL` | 设置 Normal 样式并清除直接列表编号 |
+| `SET_BULLET` | 设置项目符号列表，保留段落样式 |
+| `SET_NUMBERED` | 设置十进制编号列表，保留段落样式 |
+| `CLEAR_LIST` | 仅清除直接列表编号，保留段落样式 |
+
+除 SET_HEADING 外不能传 level。不接受任意样式名或脚本。格式操作保留段落文本；同一段落允许一次格式与一次 REPLACE_TEXT 或 INSERT_IMAGE 组合，其他重复目标及删除组合会被拒绝。同一计划中新建的同类列表共用编号定义，不接续源文件中其他列表。
+
+`changes[]` 中格式项的 before/after 为 null，前端通过 `type=FORMAT_PARAGRAPH` 区分，展示 `beforeFormat={styleId,headingLevel,numberingFormat}` 与目标 `format`。编号类型可能为 bullet、decimal 或 null；这些字段反映基础段落属性，不展开全部继承样式。DOCX 结构的段落块也增加可选 `numberingFormat` 字段，read_document 工具向模型提供原样式与列表类型。旧计划不含 format 时仍可读取；其他操作不能携带该字段。确认后与其他操作一同生成单个 AI_EDIT 版本，失败不保存部分结果。现有按版本 compare 接口仍只比较内容，纯格式变化应查看回复中的格式差异及保存后的页面预览。
+
+### 8.5 每用户每日调用额度
+
+`AI_DAILY_CALL_LIMIT` 对应 `res.ai.daily-call-limit-per-user`：0 为不限额，正数限制每用户每日进入 ChatModel 的调用尝试次数。包含失败、智能体重试和桩模型调用；不包含模型客户端内部的 HTTP 重试。查询、确认、放弃及同键幂等重放不额外耗额，不扣减 balance。
+
+每次模型调用前使用 Redis Lua 原子占额；失败不退还额度。按 `AI_QUOTA_ZONE`（默认 Asia/Shanghai）的自然日分键，跨实例需使用同一 Redis、额度与时区配置。计数键的 48 小时 TTL 仅回收历史数据，不是滚动额度窗口。生产环境额度数值需部署时确定；启用正数额度时必须有可用的 Redis。
+
+生成回复达到上限返回业务码 `429`，`result.termination=QUOTA_EXCEEDED`；Redis 检查失败返回业务码 `503`，termination 为 QUOTA_UNAVAILABLE，均停止后续模型调用。沿用统一响应的 HTTP 200/业务码约定，**data 仍包含已持久化的 AiReply**：runStatus=FAILED、planStatus=NONE，可读取 message.id 和实际 usage，不能确认中途产生的计划。GET 查询失败回复时返回业务码 0，失败状态保持不变。
+
+重复提交原幂等键返回原失败回复与相同业务码，不重新调用模型。额度恢复后再次发送需由用户发起并使用新键；前端不能自动换键重试。真实 Redis 并发与供应商用量的集成验收尚未完成。
+
+### 8.6 待确认的 XLSX 单元格公式
+
+复用回复生成、查询、确认和放弃四个接口，不新增 HTTP 路径或数据库迁移。将会话绑定已有 XLSX 文件，以明确 versionNo 发送自然语言指令；模型通过 read_document 读取当前版本的工作表、列名和实际单元格内容，再调用 set_formula。真实模型的自然语言效果尚未验收，桩模型完整链路已覆盖。
+
+set_formula 工具每次接受一个 sheetName、一个 A1 格式的 cell、formula 和必填说明 reason。工作表必须真实存在，目标可以是空白单元格；公式可带开头等号，保存计划时去除该等号。工具不接收用户 ID、文件 ID 或版本，均由已认证上下文提供。一次回复可收集多个单元格计划，但总操作数不得超过 50 或配置的 XLSX 编辑上限；同一目标不允许重复写入，大小写及绝对引用别名也视为同一目标。
+
+`result.plans[].operations[]` 示例：
+
+```json
+{
+  "type": "SET_FORMULA",
+  "target": "数据!C2",
+  "content": "SUM(A2:A3)",
+  "reason": "汇总金额列的两条实际数据"
+}
+```
+
+target 是内部定位形式“原始工作表名称!规范单元格”，单元格使用大写、不含绝对引用标记；工作表名称自身包含 ! 时，最后一个 ! 才是分隔符。它不是待执行的 Excel 公式表达式，带空格的工作表名称也不额外加引号。公式 content 中跨表引用仍遵循 Excel 自身的引号规则。
+
+对应 changes 项展示实际源单元格内容：
+
+```json
+{
+  "type": "SET_FORMULA",
+  "target": "数据!C2",
+  "before": "=A2*2",
+  "after": "=SUM(A2:A3)",
+  "reason": "汇总金额列的两条实际数据"
+}
+```
+
+原内容为公式时 before 带等号；普通值返回原值文本，空白单元格为 null。after 为带等号的目标公式。差异直接读取明确源版本中的目标单元格，即使整表结构因读取上限被截断，也不会把未读到的已有内容当作空白。截断仍影响模型能看到的数据范围，不能据此声称完整分析了整张表。客户端不重传或编辑服务端计划。
+
+生成计划时和确认时都复用已有 XLSX 公式编辑检查：限制公式长度为 8192 字符、语法、直接工作表引用、行列边界及已限制的外部引用/危险函数；拒绝受保护工作表、非合并区域左上角及数组公式单元格。DOCX 与 XLSX 操作不能混为同一计划。模型工具参数无效时作为 FAILURE 步骤回填模型，不形成可确认计划；合并计划无效时回复为 FAILED/INVALID_PLAN。
+
+确认只读取已持久化计划，成功一次写入一个 AI_EDIT 版本；保留目标基础样式及其他单元格的值和公式。任一操作失败都不保存部分结果，版本冲突返回 409，外层事务回滚时清理产物。重复确认返回原 outputVersion；放弃不写版本。确认后复用既有 XLSX 按版本预览、比较、下载及公式结果接口。
+
+本次写入不自动重算整个工作簿的公式缓存，而是标记办公软件打开时重算；差异中的公式不代表已获得计算结果。需要即时计算时使用既有 formula-results 接口，仍受 POI 不支持的函数、动态引用、动态数组及 1904 日期系统等既有边界限制。区域公式填充、普通值写入、工作表或行列调整仍使用已有人工编辑接口，尚未接入该 AI 计划。
+
+## 9. 当前实现边界
+
+- 已提供同步 AI 回复、DOCX 文本/图片/基础格式及 XLSX 单元格公式差异、确认与放弃接口，以及可配置的每日调用额度；真实模型效果尚未验收，流式响应和前端页面尚未实现。
+- LangChain4j 工具循环已接入回复 Controller；尚未接入异步任务处理器。
 - 异步任务默认使用占位处理器，不产生真实处理结果。
 - 尚未提供 SSE 或 WebSocket 进度推送。
 - DOCX 生成样式目前固定，尚不支持用户模板、主题配置和自由页面参数。

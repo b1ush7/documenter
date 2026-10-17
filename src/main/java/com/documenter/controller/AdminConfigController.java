@@ -135,7 +135,7 @@ public class AdminConfigController {
         return ApiResponse.success("模板已更新", docTemplateService.update(id, dto));
     }
 
-    /** 替换模板内容，版本号 +1；旧文件保留以便回退。 */
+    /** 替换模板内容，版本号 +1；旧文件暂时保留，尚无历史版本回退接口。 */
     @PostMapping("/templates/{id}/content")
     public ApiResponse<DocTemplateVO> replaceTemplateContent(@PathVariable Long id,
                                                              @RequestParam("file") MultipartFile file) {

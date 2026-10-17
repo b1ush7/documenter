@@ -36,14 +36,13 @@ public interface DocTemplateService {
     /**
      * 替换模板内容，版本号 +1。
      *
-     * <p>不覆盖历史版本内容（旧 storageKey 仍保留在磁盘上），
-     * 便于出问题时回退；清理交给过期文件清理任务。
+     * <p>当前只保存最新版本的元数据。旧文件暂时保留，历史版本查询、回退和正式存储回收尚未实现。
      */
     DocTemplateVO replaceContent(Long id, MultipartFile file);
 
     DocTemplateVO updateEnabled(Long id, boolean enabled);
 
-    /** 删除模板记录；磁盘文件保留，由清理任务回收。 */
+    /** 删除模板记录；磁盘文件暂时保留，正式存储回收策略尚未实现。 */
     void delete(Long id);
 
     /** 下载模板文件，供管理员核对内容。 */

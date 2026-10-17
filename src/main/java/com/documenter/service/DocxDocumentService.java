@@ -7,6 +7,7 @@ import com.documenter.dto.GenerateDocxDTO;
 import com.documenter.dto.InsertDocxImagesDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
 import com.documenter.vo.DocxStructureVO;
+import com.documenter.vo.DocumentEditPlan;
 import com.documenter.vo.FileAssetVO;
 import com.documenter.vo.VersionVO;
 
@@ -38,6 +39,10 @@ public interface DocxDocumentService {
     /** 修改单元格文本或增删表格行，并保存为新版本。 */
     VersionVO editTable(Long userId, Long fileId, Integer sourceVersion,
                         EditDocxTableDTO request);
+
+    /** 在同一份源文档中执行已校验的段落和单元格计划，只保存一个新版本。 */
+    VersionVO editPlan(Long userId, Long fileId, Integer sourceVersion,
+                       DocumentEditPlan plan, String instruction);
 
     /** 设置标题、普通段落、项目符号或编号列表格式，并保存为新版本。 */
     VersionVO formatParagraphs(Long userId, Long fileId, Integer sourceVersion,

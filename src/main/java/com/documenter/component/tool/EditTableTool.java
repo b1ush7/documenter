@@ -57,7 +57,7 @@ public class EditTableTool extends AbstractAiTool {
         String content = requireString(args, "content", "单元格的新文本");
         String reason = optionalString(args, "reason");
 
-        if (!"XLSX".equalsIgnoreCase(context.format()) && !isCellBlock(target)) {
+        if (!"DOCX".equalsIgnoreCase(context.format()) || !isCellBlock(target)) {
             // 这是一个常见的模型错误：把段落 ID 当成单元格用。
             // 提前给出明确提示，比让它一路执行到后端再报「不是单元格」更有帮助
             throw new BusinessException(422,

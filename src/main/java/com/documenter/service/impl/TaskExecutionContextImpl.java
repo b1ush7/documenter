@@ -35,6 +35,7 @@ public class TaskExecutionContextImpl implements TaskExecutionContext {
     private String currentStepName;
     private LocalDateTime currentStepStart;
     private int lastReportedProgress = -1;
+    private volatile boolean stopped;
 
     /**
      * 兼容构造器：不带尝试序号。
@@ -57,6 +58,7 @@ public class TaskExecutionContextImpl implements TaskExecutionContext {
         this.stepMapper = stepMapper;
         this.taskId = task.getId();
         this.attemptNo = attemptNo;
+        this.stepCounter = stepMapper.selectMaxStepNo(taskId);
     }
 
     @Override
@@ -70,12 +72,13 @@ public class TaskExecutionContextImpl implements TaskExecutionContext {
     }
 
     @Override
-    public int nextStepNo() {
+    public synchronized int nextStepNo() {
         return stepCounter + 1;
     }
 
     @Override
-    public void startStep(String stepName, String detail) {
+    public synchronized void startStep(String stepName, String detail) {
+        assertNotCancelled();
         // 上一步若未显式结束，先按成功收尾，避免步骤记录一直停在 RUNNING
         if (currentStepId != null) {
             finishStep(TaskStepStatus.SUCCEEDED, null, null);
@@ -102,8 +105,8 @@ public class TaskExecutionContextImpl implements TaskExecutionContext {
     }
 
     @Override
-    public void finishStep(TaskStepStatus status, String detail, String errorMessage) {
-        if (currentStepId == null) {
+    public synchronized void finishStep(TaskStepStatus status, String detail, String errorMessage) {
+        if (stopped || currentStepId == null) {
             return;
         }
         LocalDateTime now = LocalDateTime.now();
@@ -122,21 +125,25 @@ public class TaskExecutionContextImpl implements TaskExecutionContext {
     }
 
     @Override
-    public void reportProgress(int progress) {
+    public synchronized void reportProgress(int progress) {
+        assertNotCancelled();
         int bounded = Math.max(0, Math.min(100, progress));
         // 同一进度不重复写库：进度上报可能很频繁，去重能显著减少写压力
         if (bounded == lastReportedProgress) {
             return;
         }
-        lastReportedProgress = bounded;
         ProcessingTask update = new ProcessingTask();
         update.setId(taskId);
         update.setProgress(bounded);
         taskMapper.updateById(update);
+        lastReportedProgress = bounded;
     }
 
     @Override
     public boolean isCancelRequested() {
+        if (stopped || Thread.currentThread().isInterrupted()) {
+            return true;
+        }
         Boolean flag = taskMapper.selectCancelRequested(taskId);
         return Boolean.TRUE.equals(flag);
     }
@@ -149,18 +156,35 @@ public class TaskExecutionContextImpl implements TaskExecutionContext {
     }
 
     /** 当前处理中的步骤名，便于日志定位。 */
-    public String currentStepName() {
+    public synchronized String currentStepName() {
         return currentStepName;
     }
 
     /** 供引擎在任务失败时把当前步骤标记为失败，而不是留在 RUNNING。 */
-    public void failCurrentStep(String errorMessage) {
-        finishStep(TaskStepStatus.FAILED, null, errorMessage);
+    public synchronized void failCurrentStep(String errorMessage) {
+        try {
+            finishStep(TaskStepStatus.FAILED, null, errorMessage);
+        } finally {
+            stopped = true;
+        }
     }
 
     /** 供引擎在任务被取消时把当前步骤标记为跳过。 */
-    public void skipCurrentStep(String reason) {
-        finishStep(TaskStepStatus.SKIPPED, reason, null);
+    public synchronized void skipCurrentStep(String reason) {
+        try {
+            finishStep(TaskStepStatus.SKIPPED, reason, null);
+        } finally {
+            stopped = true;
+        }
+    }
+
+    /** 处理器正常返回时关闭未显式结束的步骤，并禁止后续继续上报。 */
+    public synchronized void complete() {
+        try {
+            finishStep(TaskStepStatus.SUCCEEDED, null, null);
+        } finally {
+            stopped = true;
+        }
     }
 
     /**

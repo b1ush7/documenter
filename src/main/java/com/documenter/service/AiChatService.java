@@ -21,8 +21,7 @@ import java.util.List;
  *   <li>会话绑定文件时必须校验该文件属于当前用户，否则会通过会话绕过文件归属校验。</li>
  * </ul>
  *
- * <p>范围说明：模型调用属于 TODO 4.2（P1），本接口只负责会话与消息的持久化和鉴权，
- * 不生成助手回复。
+ * <p>本接口只负责会话与消息的持久化和鉴权；模型回复由 {@link AiReplyService} 提供。
  */
 public interface AiChatService {
 
@@ -43,7 +42,7 @@ public interface AiChatService {
     /**
      * 追加一条用户消息。
      *
-     * <p>不生成助手回复：模型调用尚未接入，返回伪造回复会误导前端。
+     * <p>不调用模型，保留旧消息记录接口的语义。
      */
     AiMessageVO appendUserMessage(Long userId, Long sessionId, String content);
 

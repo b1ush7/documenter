@@ -18,7 +18,9 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
@@ -51,22 +53,32 @@ public class TaskExecutionEngine {
     private final TaskHandlerRegistry handlerRegistry;
     private final TaskExecutorProperties properties;
     private final ThreadPoolTaskExecutor executor;
+    private final ThreadPoolTaskExecutor coordinator;
 
     public TaskExecutionEngine(ProcessingTaskMapper taskMapper,
                                TaskStepMapper stepMapper,
                                TaskHandlerRegistry handlerRegistry,
                                TaskExecutorProperties properties,
+                               @Qualifier(TaskExecutorConfig.TASK_COORDINATOR) ThreadPoolTaskExecutor coordinator,
                                @Qualifier(TaskExecutorConfig.TASK_EXECUTOR) ThreadPoolTaskExecutor executor) {
         this.taskMapper = taskMapper;
         this.stepMapper = stepMapper;
         this.handlerRegistry = handlerRegistry;
         this.properties = properties;
         this.executor = executor;
+        this.coordinator = coordinator;
     }
 
     /** 异步提交任务。调用方需先持久化任务记录。 */
     public void submit(Long taskId) {
-        executor.execute(() -> execute(taskId));
+        try {
+            coordinator.execute(() -> execute(taskId));
+        } catch (RejectedExecutionException e) {
+            // 只结束仍在排队的记录，不能覆盖已被其他调度线程抢占的任务。
+            taskMapper.finish(taskId, TaskStatus.FAILED.name(), 0, "QUEUE_FULL",
+                    "任务队列已满或执行器已关闭，请稍后通过重试入口重试", List.of("PENDING"));
+            log.warn("任务调度被拒绝, taskId={}", taskId, e);
+        }
     }
 
     /**
@@ -89,10 +101,16 @@ public class TaskExecutionEngine {
             return;
         }
 
-        TaskType type = parseType(task.getTaskType());
+        TaskType type;
+        try {
+            type = parseType(task.getTaskType());
+        } catch (IllegalStateException e) {
+            finish(taskId, TaskStatus.FAILED, currentProgress(taskId), "INVALID_TASK_TYPE", safeMessage(e));
+            return;
+        }
         Optional<TaskHandler> handler = handlerRegistry.find(type);
         if (handler.isEmpty()) {
-            finish(taskId, TaskStatus.FAILED, task.getProgress(), "NO_HANDLER",
+            finish(taskId, TaskStatus.FAILED, currentProgress(taskId), "NO_HANDLER",
                     "没有可处理该任务类型的处理器：" + task.getTaskType());
             log.error("缺少任务处理器, taskId={}, taskType={}", taskId, task.getTaskType());
             return;
@@ -111,11 +129,12 @@ public class TaskExecutionEngine {
                     new TaskExecutionContextImpl(taskMapper, stepMapper, task, attemptNo);
             Outcome outcome = runOnce(task, handler.get(), context, timeoutSeconds);
             if (outcome.status() == TaskStatus.SUCCEEDED || outcome.status() == TaskStatus.CANCELLED) {
-                finish(taskId, outcome.status(), 100, null, null);
+                finish(taskId, outcome.status(), outcome.status() == TaskStatus.SUCCEEDED
+                        ? 100 : currentProgress(taskId), null, null);
                 return;
             }
 
-            if (attemptNo > maxRetry) {
+            if (!"HANDLER_ERROR".equals(outcome.errorCode()) || attemptNo > maxRetry) {
                 finish(taskId, TaskStatus.FAILED, currentProgress(taskId),
                         outcome.errorCode(), outcome.errorMessage());
                 return;
@@ -136,33 +155,67 @@ public class TaskExecutionEngine {
     /** 单次执行，负责超时与取消判定。 */
     private Outcome runOnce(ProcessingTask task, TaskHandler handler,
                             TaskExecutionContextImpl context, int timeoutSeconds) {
-        Future<?> future = executor.submit(() -> handler.handle(task, context));
+        if (context.isCancelRequested()) {
+            context.skipCurrentStep("用户取消");
+            return Outcome.cancelled();
+        }
+        Future<?> future;
+        try {
+            future = executor.submit(() -> handler.handle(task, context));
+        } catch (RejectedExecutionException e) {
+            context.failCurrentStep("任务队列已满或执行器已关闭");
+            return Outcome.failure("QUEUE_FULL", "任务队列已满或执行器已关闭，请稍后通过重试入口重试");
+        }
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
 
         try {
             while (true) {
                 try {
-                    future.get(CANCEL_POLL_MILLIS, TimeUnit.MILLISECONDS);
+                    long remaining = deadline - System.nanoTime();
+                    future.get(Math.max(1, Math.min(TimeUnit.MILLISECONDS.toNanos(CANCEL_POLL_MILLIS), remaining)),
+                            TimeUnit.NANOSECONDS);
+                    if (context.isCancelRequested()) {
+                        context.skipCurrentStep("用户取消");
+                        return Outcome.cancelled();
+                    }
+                    context.complete();
                     return Outcome.success();
                 } catch (TimeoutException e) {
                     if (context.isCancelRequested()) {
-                        future.cancel(true);
-                        context.skipCurrentStep("用户取消");
+                        try {
+                            context.skipCurrentStep("用户取消");
+                        } finally {
+                            future.cancel(true);
+                        }
                         log.info("任务已取消, taskId={}", task.getId());
                         return Outcome.cancelled();
                     }
                     if (System.nanoTime() >= deadline) {
-                        future.cancel(true);
-                        context.failCurrentStep("执行超时");
+                        try {
+                            context.failCurrentStep("执行超时");
+                        } finally {
+                            future.cancel(true);
+                        }
                         log.warn("任务执行超时, taskId={}, timeout={}s", task.getId(), timeoutSeconds);
                         return Outcome.failure("TIMEOUT", "任务超时（超过 " + timeoutSeconds + " 秒）");
                     }
                 }
             }
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            context.failCurrentStep("执行线程被中断");
+            try {
+                context.failCurrentStep("执行线程被中断");
+            } finally {
+                future.cancel(true);
+                Thread.currentThread().interrupt();
+            }
             return Outcome.failure("INTERRUPTED", "执行线程被中断");
+        } catch (CancellationException e) {
+            if (context.isCancelRequested()) {
+                context.skipCurrentStep("用户取消");
+                return Outcome.cancelled();
+            }
+            context.failCurrentStep("处理线程已中断");
+            return Outcome.failure("INTERRUPTED", "处理线程已中断");
         } catch (ExecutionException e) {
             Throwable cause = e.getCause() == null ? e : e.getCause();
             if (cause instanceof TaskCancelledException) {

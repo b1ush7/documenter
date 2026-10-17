@@ -100,6 +100,12 @@ public class ReadDocumentTool extends AbstractAiTool {
                 if (block.headingLevel() != null) {
                     builder.append("(H").append(block.headingLevel()).append(')');
                 }
+                if (block.styleId() != null) {
+                    builder.append("(style=").append(block.styleId()).append(')');
+                }
+                if (block.numberingFormat() != null) {
+                    builder.append("(list=").append(block.numberingFormat()).append(')');
+                }
                 builder.append(": ")
                         .append(block.text() == null ? "（空）" : abbreviate(block.text()))
                         .append('\n');

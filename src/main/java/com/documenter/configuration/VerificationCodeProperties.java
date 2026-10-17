@@ -25,7 +25,7 @@ public class VerificationCodeProperties {
     /** 同一接收对象同一用途的重发间隔。 */
     private Duration resendInterval = Duration.ofSeconds(60);
 
-    /** 滑动 24 小时内的最大发送次数，用于日发送量限制。 */
+    /** 服务器时区内每自然日的发送尝试上限。 */
     private int dailyLimit = 10;
 
     /** 最多允许校验失败几次，超出后验证码立即作废，需重新发送。 */

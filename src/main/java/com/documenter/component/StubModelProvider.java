@@ -107,7 +107,7 @@ public class StubModelProvider implements AiModelProvider {
                             .ToolExecutionResultMessage);
             if (hasToolResult) {
                 return response(AiMessage.from(
-                        "已完成你要求的修改。（桩模型响应，非真实模型产出）"));
+                        "已处理本轮工具请求；如有修改计划，需确认后才会保存。（桩模型响应，非真实模型产出）"));
             }
 
             String lastUserText = lastUserText(messages);

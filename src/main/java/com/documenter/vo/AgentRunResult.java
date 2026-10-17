@@ -63,7 +63,7 @@ public record AgentRunResult(
     /**
      * 用量统计（TODO 4.2「记录模型调用量、耗时和估算成本」）。
      *
-     * @param modelCalls        模型调用次数
+     * @param modelCalls        智能体调用 ChatModel 的尝试次数（含失败重试，不含客户端内部 HTTP 重试）
      * @param toolCalls         工具调用次数
      * @param inputTokens       输入 token 总数
      * @param outputTokens      输出 token 总数
@@ -89,6 +89,12 @@ public record AgentRunResult(
         REPEATED_TOOL,
         /** 调用方请求中止。 */
         CANCELLED,
+        /** 工具计划合并后无法整体执行。 */
+        INVALID_PLAN,
+        /** 用户当日调用额度已用尽。 */
+        QUOTA_EXCEEDED,
+        /** 无法安全检查额度，未继续调用模型。 */
+        QUOTA_UNAVAILABLE,
         /** 模型不可用。 */
         MODEL_UNAVAILABLE
     }

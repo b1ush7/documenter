@@ -1,6 +1,7 @@
 package com.documenter.service.impl;
 
 import com.documenter.component.EditPlanExecutor;
+import com.documenter.component.AiDailyCallQuota;
 import com.documenter.component.EditPlanValidator;
 import com.documenter.configuration.AiModelProperties;
 import com.documenter.exception.BusinessException;
@@ -70,8 +71,8 @@ import java.util.function.BooleanSupplier;
  *       否则上限会被超出一次。</li>
  *   <li><b>模型调用失败会重试有限次后放弃</b>：网络抖动是常见的，
  *       但无限重试会把一次用户请求变成一串超时。</li>
- *   <li><b>是否创建新版本由调用方决定</b>：本类是只读的，
- *       它只产出计划。真正落版本要经用户确认，见 {@code EditPlanExecutor}。</li>
+ *   <li><b>默认要求提交前确认</b>：段落与表格工具只产出计划，
+ *       图片工具也只产出带明确图片版本的计划。关闭确认的兼容模式可直接插图。</li>
  * </ul>
  */
 @Slf4j
@@ -86,6 +87,7 @@ public class AgentServiceImpl implements AgentService {
     private final EditPlanValidator planValidator;
     private final EditPlanExecutor planExecutor;
     private final List<AiTool> tools;
+    private final AiDailyCallQuota quota;
     private final Map<String, AiTool> toolIndex;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -96,6 +98,7 @@ public class AgentServiceImpl implements AgentService {
                             DocumentVersionService versionService,
                             EditPlanValidator planValidator,
                             EditPlanExecutor planExecutor,
+                            AiDailyCallQuota quota,
                             List<AiTool> tools) {
         this.properties = properties;
         this.modelProvider = modelProvider;
@@ -104,6 +107,7 @@ public class AgentServiceImpl implements AgentService {
         this.versionService = versionService;
         this.planValidator = planValidator;
         this.planExecutor = planExecutor;
+        this.quota = quota;
         this.tools = List.copyOf(tools);
         Map<String, AiTool> index = new LinkedHashMap<>();
         for (AiTool tool : tools) {
@@ -120,6 +124,16 @@ public class AgentServiceImpl implements AgentService {
     @Override
     public AgentRunResult run(Long userId, Long fileId, Integer versionNo, String instruction,
                               List<String> history, BooleanSupplier cancelled) {
+        List<ConversationTurn> turns = new ArrayList<>();
+        for (String content : history == null ? List.<String>of() : history) {
+            turns.add(new ConversationTurn("USER", content));
+        }
+        return runConversation(userId, fileId, versionNo, instruction, turns, cancelled);
+    }
+
+    @Override
+    public AgentRunResult runConversation(Long userId, Long fileId, Integer versionNo, String instruction,
+                                          List<ConversationTurn> history, BooleanSupplier cancelled) {
         long startedAt = System.nanoTime();
         List<Step> steps = new ArrayList<>();
         BooleanSupplier cancelSignal = cancelled == null ? () -> false : cancelled;
@@ -144,9 +158,13 @@ public class AgentServiceImpl implements AgentService {
         ChatModel chatModel = modelProvider.chatModel();
         List<ChatMessage> messages = new ArrayList<>();
         messages.add(SystemMessage.from(systemPrompt()));
-        for (String previous : history == null ? List.<String>of() : history) {
-            if (previous != null && !previous.isBlank()) {
-                messages.add(UserMessage.from(previous));
+        for (ConversationTurn previous : history == null ? List.<ConversationTurn>of() : history) {
+            if (previous != null && previous.content() != null && !previous.content().isBlank()) {
+                if ("USER".equals(previous.role())) {
+                    messages.add(UserMessage.from(previous.content()));
+                } else if ("ASSISTANT".equals(previous.role())) {
+                    messages.add(AiMessage.from(previous.content()));
+                }
             }
         }
         messages.add(UserMessage.from(buildUserMessage(instruction, context)));
@@ -165,14 +183,25 @@ public class AgentServiceImpl implements AgentService {
                         modelCalls, inputTokens, outputTokens, startedAt, true);
             }
 
-            ChatResponse response = callModelWithRetry(chatModel, messages, parameters, steps,
-                    stepIndex, cancelSignal);
+            ModelCallResult call = callModelWithRetry(chatModel, messages, parameters, steps,
+                    stepIndex, cancelSignal, userId);
+            modelCalls += call.attempts();
+            ChatResponse response = call.response();
             if (response == null) {
+                if (cancelSignal.getAsBoolean()) {
+                    return finish("已按请求中止。", steps, context, Termination.CANCELLED,
+                            modelCalls, inputTokens, outputTokens, startedAt, true);
+                }
+                if (call.termination() == Termination.QUOTA_EXCEEDED || call.termination() == Termination.QUOTA_UNAVAILABLE) {
+                    return finish(call.termination() == Termination.QUOTA_EXCEEDED
+                                    ? "今日 AI 调用次数已达上限，请于配置时区的下一自然日重试。"
+                                    : "暂时无法检查每日 AI 额度，请稍后重试。",
+                            steps, context, call.termination(), modelCalls, inputTokens, outputTokens, startedAt, true);
+                }
                 return finish("模型暂时不可用，请稍后重试。", steps, context,
                         Termination.MODEL_UNAVAILABLE, modelCalls, inputTokens, outputTokens,
                         startedAt, true);
             }
-            modelCalls++;
 
             Integer prompt = null;
             Integer completion = null;
@@ -181,6 +210,11 @@ public class AgentServiceImpl implements AgentService {
                 completion = response.tokenUsage().outputTokenCount();
                 inputTokens += prompt == null ? 0 : prompt;
                 outputTokens += completion == null ? 0 : completion;
+            }
+
+            if (cancelSignal.getAsBoolean()) {
+                return finish("已按请求中止。", steps, context, Termination.CANCELLED,
+                        modelCalls, inputTokens, outputTokens, startedAt, true);
             }
 
             AiMessage aiMessage = response.aiMessage();
@@ -243,7 +277,7 @@ public class AgentServiceImpl implements AgentService {
                         // 修改类工具产出的计划在这里统一收集，
                         // 并在收集时立即做一次完整校验 —— 不合格的计划
                         // 不该等到用户点了确认才发现无法执行
-                        planValidator.validate(result.plan(), context.blockIds());
+                        planValidator.validateForContext(result.plan(), context);
                         context.collectPlan(result.plan());
                     }
                     steps.add(new Step(steps.size() + 1, StepKind.TOOL_CALL, toolName,
@@ -277,9 +311,9 @@ public class AgentServiceImpl implements AgentService {
                                                         Integer expectVersion,
                                                         DocumentEditPlan plan,
                                                         String instruction) {
-        // 执行前再校验一次：计划可能在客户端往返过程中被改动，
-        // 而且这里没有上下文的结构信息，因此只做字段级校验
-        planValidator.validate(plan, null);
+        // 客户端往返后的计划必须重新核对源版本的目标和归属。
+        ToolExecutionContext context = prepareContext(userId, fileId, expectVersion);
+        planValidator.validateForContext(plan, context);
         return planExecutor.execute(userId, fileId, expectVersion, plan, instruction);
     }
 
@@ -349,7 +383,9 @@ public class AgentServiceImpl implements AgentService {
                 1. 先调用 read_document 了解文档结构，拿到可用的块 ID；
                 2. 根据用户要求，用编辑工具逐个提出修改；
                 3. 修改工具只生成待确认的计划，不会立即改动文档，因此可以放心提出；
-                4. 完成后用简洁的中文说明你做了什么。
+                4. 完成后用简洁的中文说明提出了哪些待确认修改。
+                5. XLSX 首批仅支持 set_formula：根据真实列名、数据和用户目的给出单个目标单元格的公式与说明；
+                   不得虚构工作表或数据。上下文被截断时须说明限制，不能声称已检查整张表。
 
                 硬性约束：
                 - 只能使用已提供的工具，不得假设存在其他能力（例如删除文件、发送网络请求）；
@@ -384,16 +420,23 @@ public class AgentServiceImpl implements AgentService {
     /**
      * 调用模型，失败时有限次重试。
      *
-     * <p>返回 null 表示重试后仍失败。只对**非业务异常**重试：
+     * <p>结果中的 response 为 null 表示未取得响应。只对**非业务异常**重试：
      * BusinessException 表示配置或请求本身有问题，重试没有意义。
      */
-    private ChatResponse callModelWithRetry(ChatModel chatModel, List<ChatMessage> messages,
+    private ModelCallResult callModelWithRetry(ChatModel chatModel, List<ChatMessage> messages,
                                             ChatRequestParameters parameters, List<Step> steps,
-                                            int stepIndex, BooleanSupplier cancelSignal) {
+                                            int stepIndex, BooleanSupplier cancelSignal, Long userId) {
         int attempts = Math.max(1, properties.getMaxModelRetries() + 1);
         for (int attempt = 1; attempt <= attempts; attempt++) {
             if (cancelSignal.getAsBoolean()) {
-                return null;
+                return new ModelCallResult(null, attempt - 1);
+            }
+            try {
+                quota.acquire(userId);
+            } catch (BusinessException denied) {
+                steps.add(new Step(steps.size() + 1, StepKind.FAILURE, "quota", denied.getMessage(), 0));
+                return new ModelCallResult(null, attempt - 1,
+                        denied.getCode() == 429 ? Termination.QUOTA_EXCEEDED : Termination.QUOTA_UNAVAILABLE);
             }
             long started = System.nanoTime();
             try {
@@ -403,19 +446,23 @@ public class AgentServiceImpl implements AgentService {
                         .build());
                 steps.add(new Step(steps.size() + 1, StepKind.MODEL_CALL, "chat",
                         "第 " + stepIndex + " 步模型响应", elapsedMs(started)));
-                return response;
+                return new ModelCallResult(response, attempt);
             } catch (RuntimeException e) {
                 boolean last = attempt >= attempts;
                 log.warn("模型调用失败, attempt={}/{}, last={}", attempt, attempts, last, e);
                 steps.add(new Step(steps.size() + 1, StepKind.FAILURE, "chat",
                         "模型调用失败（第 " + attempt + " 次）：" + e.getMessage(),
                         elapsedMs(started)));
-                if (last) {
-                    return null;
+                if (last || e instanceof BusinessException) {
+                    return new ModelCallResult(null, attempt);
                 }
             }
         }
-        return null;
+        return new ModelCallResult(null, attempts);
+    }
+
+    private record ModelCallResult(ChatResponse response, int attempts, Termination termination) {
+        private ModelCallResult(ChatResponse response, int attempts) { this(response, attempts, null); }
     }
 
     // ---------------------------------------------------------------- 收尾

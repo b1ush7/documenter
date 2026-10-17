@@ -78,7 +78,8 @@ res:
     secret: ${MODEL_CONFIG_SECRET:}
   # 处理任务（TODO 3.4）
   task:
-    # 有界队列 + CallerRuns 拒绝策略：队列满时由提交线程执行，形成背压而不是丢任务
+    # 调度与处理使用独立有界线程池；以下容量分别作用于两个池。
+    # 队列满或执行器关闭时任务标记为 FAILED / QUEUE_FULL，通过已有重试入口重试。
     core-pool-size: 2
     max-pool-size: 4
     queue-capacity: 50
@@ -165,6 +166,7 @@ res:
     cost-per-1k-input-tokens: ${AI_COST_PER_1K_INPUT:0}
     cost-per-1k-output-tokens: ${AI_COST_PER_1K_OUTPUT:0}
     daily-call-limit-per-user: ${AI_DAILY_CALL_LIMIT:0}
+    quota-zone: ${AI_QUOTA_ZONE:Asia/Shanghai}
 
 logging:
   level:

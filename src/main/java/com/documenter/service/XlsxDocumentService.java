@@ -5,7 +5,9 @@ import com.documenter.dto.EditXlsxDataDTO;
 import com.documenter.dto.EditXlsxSheetsDTO;
 import com.documenter.dto.EditXlsxStructureDTO;
 import com.documenter.dto.FormatXlsxCellsDTO;
+import com.documenter.dto.InsertXlsxImagesDTO;
 import com.documenter.vo.VersionVO;
+import com.documenter.vo.DocumentEditPlan;
 import com.documenter.vo.XlsxFormulaResultsVO;
 import com.documenter.vo.XlsxRangeVO;
 import com.documenter.vo.XlsxStructureVO;
@@ -34,4 +36,11 @@ public interface XlsxDocumentService {
 
     VersionVO formatCells(Long userId, Long fileId, Integer sourceVersion,
                           FormatXlsxCellsDTO request);
+
+    VersionVO insertImages(Long userId, Long fileId, Integer sourceVersion, InsertXlsxImagesDTO request);
+
+    java.util.Map<String, XlsxStructureVO.Cell> validateFormulaPlan(
+            Long userId, Long fileId, Integer sourceVersion, DocumentEditPlan plan);
+
+    VersionVO editFormulaPlan(Long userId, Long fileId, Integer sourceVersion, DocumentEditPlan plan, String instruction);
 }

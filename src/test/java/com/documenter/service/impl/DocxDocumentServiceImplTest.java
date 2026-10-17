@@ -14,6 +14,8 @@ import com.documenter.service.FileStorage;
 import com.documenter.service.VersionWriter;
 import com.documenter.vo.FileAssetVO;
 import com.documenter.vo.FileDownload;
+import com.documenter.vo.DocumentEditPlan;
+import com.documenter.component.EditPlanExecutor;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.apache.poi.xwpf.usermodel.XWPFTable;
 import org.junit.jupiter.api.Test;
@@ -26,6 +28,7 @@ import java.util.List;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -34,6 +37,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 class DocxDocumentServiceImplTest {
 
@@ -47,6 +51,275 @@ class DocxDocumentServiceImplTest {
     private final FileService fileService = mock(FileService.class);
     private final DocxDocumentServiceImpl service = new DocxDocumentServiceImpl(
             versionService, fileStorage, versionWriter, fileService);
+
+    @Test
+    void mixedFormattingAndTextPlanPreservesContentAndListDefinitions() throws Exception {
+        prepareEdit(createDocument(document -> {
+            for (String text : List.of("heading", "bullet", "number one", "number two")) {
+                document.createParagraph().createRun().setText(text);
+            }
+        }));
+        var plan = new DocumentEditPlan("mixed format", List.of(
+                new DocumentEditPlan.Operation("REPLACE_TEXT", "body/p0", "new heading", null),
+                format("body/p0", DocumentEditPlan.FormatType.SET_HEADING, 2),
+                format("body/p1", DocumentEditPlan.FormatType.SET_BULLET, null),
+                format("body/p2", DocumentEditPlan.FormatType.SET_NUMBERED, null),
+                format("body/p3", DocumentEditPlan.FormatType.SET_NUMBERED, null)), null);
+
+        service.editPlan(USER_ID, FILE_ID, SOURCE_VERSION, plan, "test");
+
+        try (var document = open(storedDocxBytes())) {
+            assertEquals("new heading", document.getParagraphs().get(0).getText());
+            assertEquals("Heading2", document.getParagraphs().get(0).getStyle());
+            assertEquals("bullet", document.getParagraphs().get(1).getNumFmt());
+            assertEquals("decimal", document.getParagraphs().get(2).getNumFmt());
+            assertEquals(document.getParagraphs().get(2).getNumID(), document.getParagraphs().get(3).getNumID());
+        }
+        verifyVersionWasAppended(ChangeType.AI_EDIT);
+    }
+
+    @Test
+    void clearingListOrRestoringNormalPreservesTextAndOnlyRemovesRequestedFormatting() throws Exception {
+        prepareEdit(createDocument(document -> {
+            var numbered = document.createNumbering();
+            var definition = org.openxmlformats.schemas.wordprocessingml.x2006.main.CTAbstractNum.Factory.newInstance();
+            definition.setAbstractNumId(java.math.BigInteger.ZERO);
+            var level = definition.addNewLvl();
+            level.setIlvl(java.math.BigInteger.ZERO);
+            level.addNewNumFmt().setVal(org.openxmlformats.schemas.wordprocessingml.x2006.main.STNumberFormat.DECIMAL);
+            var id = numbered.addNum(numbered.addAbstractNum(new org.apache.poi.xwpf.usermodel.XWPFAbstractNum(definition)));
+            for (String text : List.of("keep heading", "normal")) {
+                var paragraph = document.createParagraph();
+                paragraph.setStyle("Heading2");
+                paragraph.setNumID(id);
+                paragraph.setNumILvl(java.math.BigInteger.ZERO);
+                paragraph.createRun().setText(text);
+            }
+        }));
+        var plan = new DocumentEditPlan("clear", List.of(
+                format("body/p0", DocumentEditPlan.FormatType.CLEAR_LIST, null),
+                format("body/p1", DocumentEditPlan.FormatType.SET_NORMAL, null)), null);
+
+        service.editPlan(USER_ID, FILE_ID, SOURCE_VERSION, plan, "test");
+
+        try (var document = open(storedDocxBytes())) {
+            assertEquals("keep heading", document.getParagraphs().get(0).getText());
+            assertEquals("Heading2", document.getParagraphs().get(0).getStyle());
+            assertEquals("Normal", document.getParagraphs().get(1).getStyle());
+            assertEquals("normal", document.getParagraphs().get(1).getText());
+            assertNull(document.getParagraphs().get(0).getNumID());
+            assertNull(document.getParagraphs().get(1).getNumID());
+        }
+    }
+
+    @Test
+    void failureAfterFormattingDoesNotSavePartialResult() throws Exception {
+        prepareEdit(createDocument(document -> {
+            document.createParagraph().createRun().setText("heading");
+            var cell = document.createTable(1, 1).getRow(0).getCell(0);
+            try (var cursor = cell.getCTTc().newCursor()) { cursor.toEndToken(); cell.insertNewTbl(cursor); }
+        }));
+        var plan = new DocumentEditPlan("fail", List.of(
+                format("body/p0", DocumentEditPlan.FormatType.SET_HEADING, 2),
+                new DocumentEditPlan.Operation("SET_CELL_TEXT", "body/t0/r0/c0", "text", null)), null);
+        assertThrows(BusinessException.class,
+                () -> service.editPlan(USER_ID, FILE_ID, SOURCE_VERSION, plan, "test"));
+        verifyNoInteractions(fileStorage, versionWriter);
+    }
+
+    private static DocumentEditPlan.Operation format(String target, DocumentEditPlan.FormatType type, Integer level) {
+        return new DocumentEditPlan.Operation("FORMAT_PARAGRAPH", target, null, null, null,
+                new DocumentEditPlan.ParagraphFormat(type, level));
+    }
+
+    @Test
+    void imageAndTextPlanProducesOneVersionWithEmbeddedImage() throws Exception {
+        byte[] source = createDocument(document -> {
+            document.createParagraph().createRun().setText("image anchor");
+            document.createParagraph().createRun().setText("old text");
+        });
+        prepareEdit(source);
+        when(versionService.downloadVersion(USER_ID, 30L, 2)).thenReturn(imageDownload());
+        var reference = new DocumentEditPlan.ImageReference(30L, 2, 80, 40);
+        var plan = new DocumentEditPlan("image and text", List.of(
+                new DocumentEditPlan.Operation("INSERT_IMAGE", "body/p0", null, "illustration", reference),
+                new DocumentEditPlan.Operation("REPLACE_TEXT", "body/p1", "new text", null)), null);
+
+        service.editPlan(USER_ID, FILE_ID, SOURCE_VERSION, plan, "test");
+
+        try (var document = open(storedDocxBytes())) {
+            assertEquals("image anchor", document.getParagraphs().getFirst().getText());
+            assertEquals("new text", document.getParagraphs().get(1).getText());
+            assertEquals(1, document.getAllPictures().size());
+            assertEquals(1, document.getParagraphs().getFirst().getRuns().stream()
+                    .mapToInt(run -> run.getEmbeddedPictures().size()).sum());
+            var picture = document.getParagraphs().getFirst().getRuns().getLast().getEmbeddedPictures().getFirst();
+            assertEquals(org.apache.poi.util.Units.pixelToEMU(80), picture.getCTPicture().getSpPr().getXfrm().getExt().getCx());
+            assertEquals(org.apache.poi.util.Units.pixelToEMU(40), picture.getCTPicture().getSpPr().getXfrm().getExt().getCy());
+        }
+        verifyVersionWasAppended(ChangeType.AI_EDIT);
+        verify(versionService).downloadVersion(USER_ID, 30L, 2);
+    }
+
+    @Test
+    void imagePermissionFailureAfterTextEditDoesNotSavePartialResult() throws Exception {
+        prepareEdit(createDocument(document -> {
+            document.createParagraph().createRun().setText("old text");
+            document.createParagraph().createRun().setText("image anchor");
+        }));
+        when(versionService.downloadVersion(USER_ID, 30L, 2))
+                .thenThrow(new BusinessException(404, "图片不存在"));
+        var plan = new DocumentEditPlan("mixed", List.of(
+                new DocumentEditPlan.Operation("REPLACE_TEXT", "body/p0", "new text", null),
+                new DocumentEditPlan.Operation("INSERT_IMAGE", "body/p1", null, null,
+                        new DocumentEditPlan.ImageReference(30L, 2, 80, 40))), null);
+
+        assertEquals(404, assertThrows(BusinessException.class,
+                () -> service.editPlan(USER_ID, FILE_ID, SOURCE_VERSION, plan, "test")).getCode());
+
+        verifyNoInteractions(fileStorage, versionWriter);
+    }
+
+    @Test
+    void laterTableFailureDoesNotSaveAnAlreadyInsertedImage() throws Exception {
+        prepareEdit(createDocument(document -> {
+            document.createParagraph().createRun().setText("image anchor");
+            var cell = document.createTable(1, 1).getRow(0).getCell(0);
+            try (var cursor = cell.getCTTc().newCursor()) {
+                cursor.toEndToken();
+                cell.insertNewTbl(cursor);
+            }
+        }));
+        when(versionService.downloadVersion(USER_ID, 30L, 2)).thenReturn(imageDownload());
+        var plan = new DocumentEditPlan("mixed", List.of(
+                new DocumentEditPlan.Operation("INSERT_IMAGE", "body/p0", null, null,
+                        new DocumentEditPlan.ImageReference(30L, 2, 80, 40)),
+                new DocumentEditPlan.Operation("SET_CELL_TEXT", "body/t0/r0/c0", "new", null)), null);
+
+        assertThrows(BusinessException.class,
+                () -> service.editPlan(USER_ID, FILE_ID, SOURCE_VERSION, plan, "test"));
+
+        verify(versionService).downloadVersion(USER_ID, 30L, 2);
+        verifyNoInteractions(fileStorage, versionWriter);
+    }
+
+    @Test
+    void imageVersionThatIsNotAnImageIsRejectedBeforeSaving() throws Exception {
+        prepareEdit(createDocument(document -> document.createParagraph().createRun().setText("anchor")));
+        when(versionService.downloadVersion(USER_ID, 30L, 2)).thenReturn(download(new byte[0]));
+        var plan = new DocumentEditPlan("image", List.of(
+                new DocumentEditPlan.Operation("INSERT_IMAGE", "body/p0", null, null,
+                        new DocumentEditPlan.ImageReference(30L, 2, 80, 40))), null);
+
+        assertEquals(400, assertThrows(BusinessException.class,
+                () -> service.editPlan(USER_ID, FILE_ID, SOURCE_VERSION, plan, "test")).getCode());
+        verifyNoInteractions(fileStorage, versionWriter);
+    }
+
+    private static FileDownload imageDownload() throws Exception {
+        var image = new java.awt.image.BufferedImage(2, 2, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+        image.setRGB(0, 0, 0xffff0000);
+        try (var output = new ByteArrayOutputStream()) {
+            javax.imageio.ImageIO.write(image, "png", output);
+            var asset = new FileAsset();
+            asset.setId(30L);
+            asset.setUserId(USER_ID);
+            asset.setExtension("png");
+            return new FileDownload(asset, new ByteArrayResource(output.toByteArray()), output.size(),
+                    "image/png", "source.png");
+        }
+    }
+
+    @Test
+    void mixedPlanProducesOneReopenableVersionAndPreservesSourceTargets() throws Exception {
+        byte[] source = createDocument(document -> {
+            document.createParagraph().createRun().setText("first");
+            document.createParagraph().createRun().setText("second");
+            document.createTable(1, 1).getRow(0).getCell(0).setText("old cell");
+        });
+        prepareEdit(source);
+        var plan = new DocumentEditPlan("mixed edit", List.of(
+                new DocumentEditPlan.Operation(" insert_before ", "body/p0", "inserted", null),
+                new DocumentEditPlan.Operation("replace_text", "body/p1", "changed second", null),
+                new DocumentEditPlan.Operation("SET_CELL_TEXT", "body/t0/r0/c0", "changed cell", null)), null);
+
+        var result = new EditPlanExecutor(service, mock(com.documenter.service.XlsxDocumentService.class)).execute(USER_ID, FILE_ID, SOURCE_VERSION, plan, "test");
+
+        assertEquals(2, result.version().getVersionNo());
+        assertEquals(1, result.appliedBatches().size());
+        try (XWPFDocument document = open(storedDocxBytes())) {
+            assertEquals(List.of("inserted", "first", "changed second"),
+                    document.getParagraphs().stream().map(p -> p.getText()).toList());
+            assertEquals("changed cell", document.getTables().getFirst().getRow(0).getCell(0).getText());
+        }
+        verifyVersionWasAppended(ChangeType.AI_EDIT);
+        verify(versionService).downloadVersion(USER_ID, FILE_ID, SOURCE_VERSION);
+    }
+
+    @Test
+    void failureAfterParagraphEditDoesNotStoreOrAppendPartialPlan() throws Exception {
+        byte[] source = createDocument(document -> {
+            document.createParagraph().createRun().setText("original");
+            var cell = document.createTable(1, 1).getRow(0).getCell(0);
+            try (var cursor = cell.getCTTc().newCursor()) {
+                cursor.toEndToken();
+                cell.insertNewTbl(cursor);
+            }
+        });
+        when(versionService.downloadVersion(USER_ID, FILE_ID, SOURCE_VERSION)).thenReturn(download(source));
+        var plan = new DocumentEditPlan("mixed edit", List.of(
+                new DocumentEditPlan.Operation("REPLACE_TEXT", "body/p0", "changed", null),
+                new DocumentEditPlan.Operation("SET_CELL_TEXT", "body/t0/r0/c0", "new cell", null)), null);
+
+        BusinessException error = assertThrows(BusinessException.class,
+                () -> new EditPlanExecutor(service, mock(com.documenter.service.XlsxDocumentService.class)).execute(USER_ID, FILE_ID, SOURCE_VERSION, plan, "test"));
+
+        assertEquals(422, error.getCode());
+        verifyNoInteractions(fileStorage, versionWriter);
+        try (XWPFDocument document = open(source)) {
+            assertEquals("original", document.getParagraphs().getFirst().getText());
+        }
+    }
+
+    @Test
+    void mixedPlanConflictCleansTheSingleArtifact() throws Exception {
+        byte[] source = createDocument(document -> {
+            document.createParagraph().createRun().setText("original");
+            document.createTable(1, 1).getRow(0).getCell(0).setText("cell");
+        });
+        prepareEdit(source);
+        when(fileStorage.store(any(byte[].class), eq("docx"))).thenReturn("versions/conflict.docx");
+        when(fileStorage.delete("versions/conflict.docx")).thenReturn(true);
+        when(versionWriter.appendVersion(eq(FILE_ID), eq(USER_ID),
+                any(VersionWriter.VersionContent.class), eq(ChangeType.AI_EDIT),
+                any(), any(), eq(SOURCE_VERSION)))
+                .thenThrow(new BusinessException(409, "版本冲突"));
+        var plan = new DocumentEditPlan("mixed edit", List.of(
+                new DocumentEditPlan.Operation("REPLACE_TEXT", "body/p0", "changed", null),
+                new DocumentEditPlan.Operation("SET_CELL_TEXT", "body/t0/r0/c0", "new cell", null)), null);
+
+        BusinessException error = assertThrows(BusinessException.class,
+                () -> service.editPlan(USER_ID, FILE_ID, SOURCE_VERSION, plan, "test"));
+
+        assertEquals(409, error.getCode());
+        verify(fileStorage).store(any(byte[].class), eq("docx"));
+        verify(fileStorage).delete("versions/conflict.docx");
+        verifyVersionWasAppended(ChangeType.AI_EDIT);
+    }
+
+    @Test
+    void invalidTargetInLaterOperationLeavesNoPartialVersion() throws Exception {
+        byte[] source = createDocument(document -> document.createParagraph().createRun().setText("original"));
+        when(versionService.downloadVersion(USER_ID, FILE_ID, SOURCE_VERSION)).thenReturn(download(source));
+        var plan = new DocumentEditPlan("invalid", List.of(
+                new DocumentEditPlan.Operation("REPLACE_TEXT", "body/p0", "changed", null),
+                new DocumentEditPlan.Operation("SET_CELL_TEXT", "body/t9/r0/c0", "cell", null)), null);
+
+        assertThrows(BusinessException.class,
+                () -> service.editPlan(USER_ID, FILE_ID, SOURCE_VERSION, plan, "test"));
+
+        verifyNoInteractions(fileStorage, versionWriter);
+    }
 
     @Test
     void generatedDocumentCanBeOpenedAndContainsRequestedStructures() throws Exception {
@@ -251,7 +524,7 @@ class DocxDocumentServiceImplTest {
                 .thenReturn(download(source));
         when(fileStorage.store(any(byte[].class), eq("docx"))).thenReturn("versions/v2.docx");
         when(versionWriter.appendVersion(eq(FILE_ID), eq(USER_ID),
-                any(VersionWriter.VersionContent.class), eq(ChangeType.MANUAL_EDIT),
+                any(VersionWriter.VersionContent.class), any(ChangeType.class),
                 any(), any(), eq(SOURCE_VERSION))).thenReturn(createdVersion());
     }
 
@@ -263,9 +536,33 @@ class DocxDocumentServiceImplTest {
     }
 
     private void verifyVersionWasAppended() {
+        verifyVersionWasAppended(ChangeType.MANUAL_EDIT);
+    }
+
+    private void verifyVersionWasAppended(ChangeType changeType) {
         verify(versionWriter).appendVersion(eq(FILE_ID), eq(USER_ID),
-                any(VersionWriter.VersionContent.class), eq(ChangeType.MANUAL_EDIT),
+                any(VersionWriter.VersionContent.class), eq(changeType),
                 any(), any(), eq(SOURCE_VERSION));
+    }
+
+    @Test
+    void outerConfirmationRollbackCleansStoredArtifact() throws Exception {
+        prepareEdit(createDocument(document -> document.createParagraph().createRun().setText("old")));
+        var plan = new DocumentEditPlan("edit", List.of(
+                new DocumentEditPlan.Operation("REPLACE_TEXT", "body/p0", "new", null)), null);
+        when(fileStorage.delete("versions/v2.docx")).thenReturn(true);
+        org.springframework.transaction.support.TransactionSynchronizationManager.initSynchronization();
+        org.springframework.transaction.support.TransactionSynchronizationManager.setActualTransactionActive(true);
+        try {
+            service.editPlan(USER_ID, FILE_ID, SOURCE_VERSION, plan, "test");
+            for (var synchronization : org.springframework.transaction.support.TransactionSynchronizationManager.getSynchronizations()) {
+                synchronization.afterCompletion(org.springframework.transaction.support.TransactionSynchronization.STATUS_ROLLED_BACK);
+            }
+            verify(fileStorage).delete("versions/v2.docx");
+        } finally {
+            org.springframework.transaction.support.TransactionSynchronizationManager.clearSynchronization();
+            org.springframework.transaction.support.TransactionSynchronizationManager.setActualTransactionActive(false);
+        }
     }
 
     private static GenerateDocxDTO.Block heading(String text, int level) {

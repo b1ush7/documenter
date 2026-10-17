@@ -4,8 +4,10 @@ import com.documenter.exception.BusinessException;
 import tools.jackson.databind.JavaType;
 import tools.jackson.databind.ObjectMapper;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 变量定义 JSON 校验（TODO 3.2 公共模板的 variables 字段）。
@@ -62,16 +64,20 @@ public final class TemplateVariables {
             throw new BusinessException(400, "变量数量不能超过 " + MAX_VARIABLES + " 个");
         }
 
+        Set<String> names = new HashSet<>();
         for (int i = 0; i < parsed.size(); i++) {
             Map<String, Object> item = parsed.get(i);
             if (item == null) {
                 throw new BusinessException(400, "第 " + (i + 1) + " 个变量不能为 null");
             }
             Object name = item.get("name");
-            if (name == null || name.toString().isBlank()) {
+            if (name == null || name instanceof String text && text.isBlank()) {
                 throw new BusinessException(400, "第 " + (i + 1) + " 个变量缺少 name 字段");
             }
-            String nameText = name.toString().trim();
+            if (!(name instanceof String text)) {
+                throw new BusinessException(400, "第 " + (i + 1) + " 个变量的 name 必须是字符串");
+            }
+            String nameText = text.trim();
             if (nameText.length() > MAX_NAME_LENGTH) {
                 throw new BusinessException(400, "变量 name 不能超过 " + MAX_NAME_LENGTH + " 个字符");
             }
@@ -80,8 +86,15 @@ public final class TemplateVariables {
                 throw new BusinessException(400,
                         "变量 name「" + nameText + "」只能包含字母、数字和下划线，且不能以数字开头");
             }
-            checkOptionalLength(item.get("label"), MAX_LABEL_LENGTH, "label", i);
-            checkOptionalLength(item.get("description"), MAX_DESCRIPTION_LENGTH, "description", i);
+            if (!names.add(nameText)) {
+                throw new BusinessException(400, "变量 name「" + nameText + "」重复");
+            }
+            item.put("name", nameText);
+            checkOptionalText(item.get("label"), MAX_LABEL_LENGTH, "label", i);
+            checkOptionalText(item.get("description"), MAX_DESCRIPTION_LENGTH, "description", i);
+            if (item.containsKey("required") && !(item.get("required") instanceof Boolean)) {
+                throw new BusinessException(400, "第 " + (i + 1) + " 个变量的 required 必须是布尔值");
+            }
         }
 
         try {
@@ -91,8 +104,15 @@ public final class TemplateVariables {
         }
     }
 
-    private static void checkOptionalLength(Object value, int max, String field, int index) {
-        if (value != null && value.toString().length() > max) {
+    private static void checkOptionalText(Object value, int max, String field, int index) {
+        if (value == null) {
+            return;
+        }
+        if (!(value instanceof String text)) {
+            throw new BusinessException(400,
+                    "第 " + (index + 1) + " 个变量的 " + field + " 必须是字符串");
+        }
+        if (text.length() > max) {
             throw new BusinessException(400,
                     "第 " + (index + 1) + " 个变量的 " + field + " 不能超过 " + max + " 个字符");
         }

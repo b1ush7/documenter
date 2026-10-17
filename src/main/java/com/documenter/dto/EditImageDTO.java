@@ -4,6 +4,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.DecimalMax;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
@@ -31,7 +32,7 @@ public class EditImageDTO {
     @Data
     public static class Operation {
         @NotNull(message = "操作类型不能为空")
-        @Pattern(regexp = "^(CROP|RESIZE|ROTATE)$", message = "不支持的图片操作")
+        @Pattern(regexp = "^(CROP|RESIZE|ROTATE|BRIGHTNESS|ADD_TEXT)$", message = "不支持的图片操作")
         private String type;
         @Min(value = 0, message = "x 不能为负数")
         private Integer x;
@@ -43,5 +44,17 @@ public class EditImageDTO {
         private Integer height;
         /** 顺时针旋转，只支持 90/180/270 度。 */
         private Integer degrees;
+        /** RGB 亮度乘数，0 为全黑，1 为原值，最大 4；不影响 alpha。 */
+        @DecimalMin(value = "0", message = "亮度乘数不能小于 0")
+        @DecimalMax(value = "4", message = "亮度乘数不能大于 4")
+        private Double factor;
+        /** 单行纯文本，不解析 HTML、脚本或字体路径。 */
+        @Size(max = 500, message = "文字最多 500 字符")
+        private String text;
+        @Min(value = 1, message = "字号不能小于 1")
+        @Max(value = 512, message = "字号不能大于 512")
+        private Integer fontSize;
+        @Pattern(regexp = "^#[0-9a-fA-F]{6}$", message = "文字颜色必须为 #RRGGBB")
+        private String color;
     }
 }

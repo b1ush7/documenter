@@ -14,6 +14,7 @@ import com.documenter.vo.FileDownload;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.core.io.ByteArrayResource;
 
@@ -36,6 +37,188 @@ class ImageDocumentServiceImplTest {
     private final StorageProperties properties = new StorageProperties();
     private final ImageDocumentServiceImpl service = new ImageDocumentServiceImpl(
             versions, storage, writer, properties);
+
+    @ParameterizedTest
+    @CsvSource({"0,80000000", "0.5,800a4b6e", "1,801496dc", "2,8028ffff", "4,8050ffff"})
+    void brightnessScalesRgbClampsChannelsAndKeepsAlpha(double factor, String expected) throws Exception {
+        var image = new BufferedImage(2, 1, BufferedImage.TYPE_INT_ARGB);
+        image.setRGB(0, 0, 0x801496dc);
+        image.setRGB(1, 0, 0x001496dc);
+        prepare(image, "png");
+
+        service.edit(7L, 10L, 1, request(brightness(factor)));
+
+        var output = ImageIO.read(new ByteArrayInputStream(stored("png")));
+        assertEquals((int) Long.parseLong(expected, 16), output.getRGB(0, 0));
+        assertEquals(0, output.getRGB(1, 0) >>> 24);
+        verify(writer).appendVersion(eq(10L), eq(7L), any(), eq(ChangeType.MANUAL_EDIT), any(), any(), eq(1));
+    }
+
+    @Test
+    void textUsesRequestedColorAndInkPositionWhilePreservingOtherPixels() throws Exception {
+        var image = new BufferedImage(128, 80, BufferedImage.TYPE_INT_ARGB);
+        image.setRGB(120, 70, 0x8044aa66);
+        prepare(image, "png");
+        var text = text("A", 10, 12);
+        text.setFontSize(24);
+        text.setColor("#ff0000");
+
+        service.edit(7L, 10L, 1, request(text));
+
+        var output = ImageIO.read(new ByteArrayInputStream(stored("png")));
+        assertEquals(0x8044aa66, output.getRGB(120, 70));
+        assertEquals(0, output.getRGB(0, 0));
+        int pixels = 0;
+        int minX = Integer.MAX_VALUE;
+        int minY = Integer.MAX_VALUE;
+        for (int y = 0; y < 60; y++) {
+            for (int x = 0; x < 100; x++) {
+                int pixel = output.getRGB(x, y);
+                if ((pixel >>> 24) == 0) continue;
+                assertEquals(0x00ff0000, pixel & 0x00ffffff);
+                assertTrue(x >= 10 && y >= 12);
+                minX = Math.min(minX, x);
+                minY = Math.min(minY, y);
+                pixels++;
+            }
+        }
+        assertTrue(pixels > 0);
+        assertEquals(10, minX);
+        assertEquals(12, minY);
+    }
+
+    @Test
+    void textDefaultsToBlackAndFitsAtImageOriginWithoutBaselineClipping() throws Exception {
+        prepare(new BufferedImage(100, 60, BufferedImage.TYPE_INT_ARGB), "png");
+        service.edit(7L, 10L, 1, request(text("Ag", 0, 0)));
+        var output = ImageIO.read(new ByteArrayInputStream(stored("png")));
+        assertEquals(100, output.getWidth());
+        assertEquals(60, output.getHeight());
+        assertTrue(java.util.Arrays.stream(output.getRGB(0, 0, 100, 60, null, 0, 100))
+                .anyMatch(pixel -> (pixel >>> 24) > 0));
+        assertTrue(java.util.Arrays.stream(output.getRGB(0, 0, 100, 60, null, 0, 100))
+                .allMatch(pixel -> (pixel & 0x00ffffff) == 0));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void brightnessAndTextAreAppliedInRequestedOrder(boolean brightnessFirst) throws Exception {
+        prepare(new BufferedImage(100, 60, BufferedImage.TYPE_INT_ARGB), "png");
+        var text = text("A", 5, 5);
+        text.setColor("#ff0000");
+        var request = brightnessFirst ? request(brightness(0.0), text) : request(text, brightness(0.0));
+
+        service.edit(7L, 10L, 1, request);
+
+        var output = ImageIO.read(new ByteArrayInputStream(stored("png")));
+        int[] pixels = output.getRGB(0, 0, 100, 60, null, 0, 100);
+        assertTrue(java.util.Arrays.stream(pixels).anyMatch(pixel -> (pixel >>> 24) > 0));
+        assertEquals(brightnessFirst, java.util.Arrays.stream(pixels)
+                .anyMatch(pixel -> (pixel & 0x00ffffff) != 0));
+        verify(storage, times(1)).store(any(byte[].class), eq("png"));
+    }
+
+    @Test
+    void newOperationsCanBeComposedWithResizeAndJpegConversion() throws Exception {
+        prepare(new BufferedImage(2, 2, BufferedImage.TYPE_INT_ARGB), "png");
+        var text = text("A", 4, 4);
+        text.setColor("#ff0000");
+        var request = request(operation("RESIZE", 100, 60, null), brightness(2.0), text);
+        request.setOutputFormat("JPEG");
+
+        service.edit(7L, 10L, 1, request);
+
+        var output = ImageIO.read(new ByteArrayInputStream(stored("jpg")));
+        assertEquals(100, output.getWidth());
+        assertFalse(output.getColorModel().hasAlpha());
+        assertEquals(Color.WHITE.getRGB(), output.getRGB(99, 59));
+        verify(writer).appendVersion(eq(10L), eq(7L), any(), eq(ChangeType.CONVERT), any(), any(), eq(1));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"BEYOND_X", "BEYOND_Y", "AFTER_RESIZE", "MISSING_GLYPH"})
+    void textRenderingFailureNeverStoresEarlierOperations(String scenario) throws Exception {
+        prepare(new BufferedImage(100, 60, BufferedImage.TYPE_INT_ARGB), "png");
+        var text = text("Too wide", 0, 0);
+        var request = request(brightness(2.0), text);
+        int expected = 400;
+        switch (scenario) {
+            case "BEYOND_X" -> text.setX(Integer.MAX_VALUE);
+            case "BEYOND_Y" -> text.setY(Integer.MAX_VALUE);
+            case "AFTER_RESIZE" -> request.setOperations(List.of(operation("RESIZE", 10, 10, null), text));
+            case "MISSING_GLYPH" -> { text.setText("\u0378"); expected = 422; }
+            default -> throw new IllegalArgumentException(scenario);
+        }
+
+        assertEquals(expected, assertThrows(BusinessException.class,
+                () -> service.edit(7L, 10L, 1, request)).getCode());
+        verifyNoInteractions(storage, writer);
+    }
+
+    @Test
+    void invalidNewFieldsAreRejectedBeforeReadingSource() {
+        for (Double factor : new Double[]{null, -0.1, 4.1, Double.NaN, Double.POSITIVE_INFINITY}) {
+            assertBadRequest(brightness(factor));
+        }
+        for (String content : new String[]{null, " ", "a\nb", "a\rb", "a\tb", "a\u2028b", "a".repeat(501)}) {
+            assertBadRequest(text(content, 0, 0));
+        }
+        for (Integer fontSize : new Integer[]{0, 513}) {
+            var text = text("A", 0, 0);
+            text.setFontSize(fontSize);
+            assertBadRequest(text);
+        }
+        for (String color : List.of("red", "#abcd", "#ff000000", "#gg0000")) {
+            var text = text("A", 0, 0);
+            text.setColor(color);
+            assertBadRequest(text);
+        }
+        assertBadRequest(text("A", -1, 0));
+        assertBadRequest(text("A", 0, -1));
+        assertBadRequest(text("A", null, 0));
+        verifyNoInteractions(versions, storage, writer);
+    }
+
+    @Test
+    void operationSpecificFieldsCannotBeSilentlyIgnored() {
+        var crop = operation("CROP", 1, 1, null);
+        crop.setX(0);
+        crop.setY(0);
+        crop.setFactor(1.0);
+        assertBadRequest(crop);
+        var resize = operation("RESIZE", 10, 10, null);
+        resize.setColor("#ff0000");
+        assertBadRequest(resize);
+        var rotate = operation("ROTATE", null, null, 90);
+        rotate.setText("A");
+        assertBadRequest(rotate);
+        var brightness = brightness(2.0);
+        brightness.setX(0);
+        assertBadRequest(brightness);
+        var text = text("A", 0, 0);
+        text.setFactor(1.0);
+        assertBadRequest(text);
+        verifyNoInteractions(versions, storage, writer);
+    }
+
+    private void assertBadRequest(EditImageDTO.Operation operation) {
+        assertEquals(400, assertThrows(BusinessException.class,
+                () -> service.edit(7L, 10L, 1, request(operation))).getCode());
+    }
+
+    private static EditImageDTO.Operation brightness(Double factor) {
+        var operation = operation("BRIGHTNESS", null, null, null);
+        operation.setFactor(factor);
+        return operation;
+    }
+
+    private static EditImageDTO.Operation text(String content, Integer x, Integer y) {
+        var operation = operation("ADD_TEXT", null, null, null);
+        operation.setText(content);
+        operation.setX(x);
+        operation.setY(y);
+        return operation;
+    }
 
     @Test
     void cropsAndRotatesInOrderPreservingPngTransparencyAndVersionDigest() throws Exception {

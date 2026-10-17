@@ -41,16 +41,47 @@ public record DocumentEditPlan(
      * @param target   目标块 ID（DOCX 结构路径，或 XLSX 的 {@code 工作表!单元格}）
      * @param content  新内容；删除类操作为 null
      * @param reason   模型给出的理由，展示给用户以帮助判断是否采纳
+     * @param image    INSERT_IMAGE 的明确图片版本与显示尺寸，其他操作为 null
+     * @param format   FORMAT_PARAGRAPH 的受限格式参数，其他操作为 null
      */
     public record Operation(
             String type,
             String target,
             String content,
-            String reason) {
+            String reason,
+            ImageReference image,
+            ParagraphFormat format) {
+
+        /** 兼容已有纯文本计划及调用方。 */
+        public Operation(String type, String target, String content, String reason) {
+            this(type, target, content, reason, null, null);
+        }
+
+        public Operation(String type, String target, String content, String reason, ImageReference image) {
+            this(type, target, content, reason, image, null);
+        }
 
         /** 解析为枚举；未知类型返回 null，由校验器报错而不是抛异常。 */
         public OperationType operationType() {
             return OperationType.parse(type);
+        }
+    }
+
+    /** 只接受内部图片文件 ID 与明确版本，不接受路径、URL 或脚本。 */
+    public record ImageReference(Long fileId, Integer versionNo, Integer widthPixels, Integer heightPixels) { }
+
+    public record ParagraphFormat(FormatType type, Integer level) { }
+
+    public enum FormatType {
+        SET_HEADING, SET_NORMAL, SET_BULLET, SET_NUMBERED, CLEAR_LIST;
+
+        public static FormatType parse(String text) {
+            if (text == null) return null;
+            try {
+                return valueOf(text.trim().toUpperCase(java.util.Locale.ROOT));
+            } catch (IllegalArgumentException unknown) {
+                return null;
+            }
         }
     }
 
@@ -78,8 +109,14 @@ public record DocumentEditPlan(
         /** 设置单元格文本。需要 content。 */
         SET_CELL_TEXT(true),
 
-        /** 设置段落格式（标题层级等）。需要 content。 */
-        FORMAT_PARAGRAPH(true);
+        /** 在目标段落中追加内嵌图片，需要 image，不使用 content。 */
+        INSERT_IMAGE(false),
+
+        /** 设置标题、正文或列表格式，使用 format，不使用 content。 */
+        FORMAT_PARAGRAPH(false),
+
+        /** XLSX 单单元格公式，target 使用原始工作表名称!A1，content 为公式。 */
+        SET_FORMULA(true);
 
         private final boolean requiresContent;
 

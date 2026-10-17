@@ -1,6 +1,8 @@
 package com.documenter.component;
 
 import com.documenter.configuration.AiModelProperties;
+import com.documenter.service.ToolExecutionContext;
+import com.documenter.util.XlsxFormulaTarget;
 import com.documenter.exception.BusinessException;
 import com.documenter.vo.DocumentEditPlan;
 import com.documenter.vo.DocumentEditPlan.Operation;
@@ -12,6 +14,8 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.Map;
+import java.util.HashMap;
 
 /**
  * 编辑计划校验器（TODO 4.2「校验目标、字段和操作范围」）。
@@ -74,7 +78,12 @@ public class EditPlanValidator {
         }
 
         Set<String> touchedTargets = new HashSet<>();
+        Map<String, Set<OperationType>> targetTypes = new HashMap<>();
         int deletions = 0;
+        int images = 0;
+        Set<String> formulaTargets = new HashSet<>();
+        boolean hasFormula = false;
+        boolean hasDocx = false;
 
         for (int index = 0; index < plan.operations().size(); index++) {
             Operation operation = plan.operations().get(index);
@@ -88,17 +97,44 @@ public class EditPlanValidator {
                 continue;
             }
 
+            if (type == OperationType.SET_FORMULA) {
+                hasFormula = true;
+                try {
+                    var target = XlsxFormulaTarget.parse(operation.target());
+                    if (!formulaTargets.add(target.key())) problems.add(position + "重复修改同一个公式目标");
+                } catch (BusinessException invalid) { problems.add(position + invalid.getMessage()); }
+                if (operation.content() == null || operation.content().isBlank() || operation.content().length() > 8192) {
+                    problems.add(position + "公式长度必须为 1 到 8192 字符");
+                }
+                if (operation.image() != null || operation.format() != null) problems.add(position + "公式操作不能携带图片或段落格式");
+                continue;
+            }
+            hasDocx = true;
+
             if (operation.target() == null || operation.target().isBlank()) {
                 problems.add(position + "缺少目标块标识");
             } else {
+                String pattern = type == OperationType.SET_CELL_TEXT
+                        ? "^body(?:/t\\d+/r\\d+/c\\d+)+$"
+                        : "^body(?:/t\\d+/r\\d+/c\\d+)*/p\\d+$";
+                if (!operation.target().matches(pattern)) {
+                    problems.add(position + "的目标类型与操作不匹配；当前计划执行仅支持 DOCX 段落与单元格");
+                }
                 if (availableBlocks != null && !availableBlocks.contains(operation.target())) {
                     problems.add(position + "的目标「" + operation.target() + "」在该版本中不存在");
                 }
-                // 同一目标被多次修改时，后一次会覆盖前一次，用户的预期难以预测
-                if (!touchedTargets.add(operation.target())) {
+                touchedTargets.add(operation.target());
+                Set<OperationType> previous = targetTypes.computeIfAbsent(operation.target(), key -> new HashSet<>());
+                boolean formattingPair = previous.size() == 1 && (
+                        (type == OperationType.FORMAT_PARAGRAPH && (previous.contains(OperationType.REPLACE_TEXT)
+                                || previous.contains(OperationType.INSERT_IMAGE)))
+                        || (previous.contains(OperationType.FORMAT_PARAGRAPH)
+                                && (type == OperationType.REPLACE_TEXT || type == OperationType.INSERT_IMAGE)));
+                if (!previous.isEmpty() && !formattingPair) {
                     problems.add(position + "重复修改同一个目标「" + operation.target() + "」；"
                             + "请合并为一次操作");
                 }
+                previous.add(type);
             }
 
             if (type.requiresContent()) {
@@ -110,8 +146,55 @@ public class EditPlanValidator {
                 }
             }
 
+            if (type == OperationType.INSERT_IMAGE) {
+                images++;
+                var image = operation.image();
+                if (image == null || image.fileId() == null || image.fileId() <= 0
+                        || image.versionNo() == null || image.versionNo() <= 0
+                        || image.widthPixels() == null || image.widthPixels() < 1 || image.widthPixels() > 10000
+                        || image.heightPixels() == null || image.heightPixels() < 1 || image.heightPixels() > 10000) {
+                    problems.add(position + "必须提供正数图片 ID、版本，以及 1 到 10000 像素的宽高");
+                }
+                if (operation.content() != null) {
+                    problems.add(position + "的 INSERT_IMAGE 只能使用 image，不能包含文本 content");
+                }
+            } else if (operation.image() != null) {
+                problems.add(position + "不是图片插入操作，不能包含 image 字段");
+            }
+
+            if (type == OperationType.FORMAT_PARAGRAPH) {
+                var format = operation.format();
+                if (format == null || format.type() == null) {
+                    problems.add(position + "必须提供受支持的 format.type");
+                } else if (format.type() == DocumentEditPlan.FormatType.SET_HEADING) {
+                    if (format.level() == null || format.level() < 1 || format.level() > 9) {
+                        problems.add(position + "的标题级别必须在 1 到 9 之间");
+                    }
+                } else if (format.level() != null) {
+                    problems.add(position + "只有 SET_HEADING 可以提供 level");
+                }
+                if (operation.content() != null) problems.add(position + "格式操作不能包含 content");
+            } else if (operation.format() != null) {
+                problems.add(position + "不是格式操作，不能包含 format 字段");
+            }
+
             if (type == OperationType.DELETE) {
                 deletions++;
+                if (operation.content() != null) problems.add(position + "的 DELETE 不能包含 content");
+            }
+        }
+
+        if (images > 20) problems.add("单次计划最多插入 20 张图片");
+        if (hasFormula && hasDocx) problems.add("同一计划不能混合 DOCX 与 XLSX 操作");
+
+        for (Operation operation : plan.operations()) {
+            if (operation.operationType() == OperationType.SET_CELL_TEXT && operation.target() != null) {
+                for (String target : touchedTargets) {
+                    if (target.startsWith(operation.target() + "/")) {
+                        problems.add("不能同时替换单元格及其内部内容：" + operation.target());
+                        break;
+                    }
+                }
             }
         }
 
@@ -127,6 +210,22 @@ public class EditPlanValidator {
             String message = "编辑计划校验未通过：" + String.join("；", problems);
             log.warn("编辑计划校验失败, 问题数={}, 详情={}", problems.size(), message);
             throw new BusinessException(422, message);
+        }
+    }
+
+    /** XLSX 允许在已有工作表的空白单元格写公式；DOCX 仍要求目标块实际存在。 */
+    public void validateForContext(DocumentEditPlan plan, ToolExecutionContext context) {
+        validate(plan, context.blockIds());
+        for (var operation : plan.operations()) {
+            if (operation.operationType() == OperationType.SET_FORMULA) {
+                var target = XlsxFormulaTarget.parse(operation.target());
+                if (!"XLSX".equals(context.format()) || context.xlsxStructure() == null
+                        || context.xlsxStructure().sheets().stream().noneMatch(sheet -> sheet.name().equalsIgnoreCase(target.sheetName()))) {
+                    throw new BusinessException(422, "公式目标工作表不属于当前 XLSX 版本");
+                }
+            } else if (!"DOCX".equals(context.format())) {
+                throw new BusinessException(422, "当前文档格式不能执行 DOCX 计划");
+            }
         }
     }
 

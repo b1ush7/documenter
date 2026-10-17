@@ -1,12 +1,15 @@
 package com.documenter.component.tool;
 
 import com.documenter.component.AbstractAiTool;
+import com.documenter.configuration.AiModelProperties;
 import com.documenter.dto.InsertDocxImagesDTO;
 import com.documenter.exception.BusinessException;
 import com.documenter.service.AiTool;
 import com.documenter.service.DocxDocumentService;
+import com.documenter.service.DocumentVersionService;
 import com.documenter.service.ToolExecutionContext;
 import com.documenter.vo.VersionVO;
+import com.documenter.vo.DocumentEditPlan;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -16,12 +19,8 @@ import java.util.Map;
 /**
  * 插入图片（TODO 4.2「封装受控工具：插入图片」）。
  *
- * <p>与段落/表格工具不同，这个工具<b>直接执行</b>而不是产出待确认计划。
- * 原因是它的参数结构（图片文件 ID、版本、宽高）无法用
- * {@code DocumentEditPlan} 的「目标 + 内容」模型表达 ——
- * 硬塞进去会得到一个语义不清的计划。
- *
- * <p>直接执行的代价是用户在提交前看不到差异预览。为了控制这个风险：
+ * <p>默认产出带类型化图片参数的待确认计划，不直接写版本。
+ * 仅显式关闭确认的兼容模式保留直接执行。两条路径都受以下约束：
  * <ul>
  *   <li>只允许插入<b>用户自己拥有的</b>图片文件（由后端 {@code appendImage} 校验），
  *       因此模型无法引用他人的图片或网络地址；</li>
@@ -39,9 +38,14 @@ public class InsertImageTool extends AbstractAiTool {
     private static final int MAX_DIMENSION = 10000;
 
     private final DocxDocumentService docxDocumentService;
+    private final AiModelProperties properties;
+    private final DocumentVersionService versionService;
 
-    public InsertImageTool(DocxDocumentService docxDocumentService) {
+    public InsertImageTool(DocxDocumentService docxDocumentService, AiModelProperties properties,
+                            DocumentVersionService versionService) {
         this.docxDocumentService = docxDocumentService;
+        this.properties = properties;
+        this.versionService = versionService;
     }
 
     @Override
@@ -53,7 +57,7 @@ public class InsertImageTool extends AbstractAiTool {
     public String description() {
         return "在指定段落位置插入一张图片。图片必须已经上传且属于当前用户，"
                 + "需要用户提供图片文件 ID 与版本号。"
-                + "本工具会立即生成新版本（图片参数无法用「修改计划」表达）。";
+                + "默认只生成待确认计划，用户确认后才写入文档。";
     }
 
     @Override
@@ -63,7 +67,8 @@ public class InsertImageTool extends AbstractAiTool {
                 ToolParameter.required("imageFileId", "图片文件 ID（必须由用户提供）"),
                 ToolParameter.required("imageVersionNo", "图片的版本号"),
                 ToolParameter.optional("widthPixels", "显示宽度像素，默认 400"),
-                ToolParameter.optional("heightPixels", "显示高度像素，默认 300"));
+                ToolParameter.optional("heightPixels", "显示高度像素，默认 300"),
+                ToolParameter.optional("reason", "插入理由，供用户确认"));
     }
 
     @Override
@@ -80,15 +85,29 @@ public class InsertImageTool extends AbstractAiTool {
         }
 
         String target = requireString(args, "target", "插入位置的段落块 ID");
-        if (!context.blockIds().contains(target)) {
+        if (!target.matches("^body(?:/t\\d+/r\\d+/c\\d+)*/p\\d+$")
+                || !context.blockIds().contains(target)) {
             throw new BusinessException(422,
                     "目标「" + target + "」在当前版本中不存在；请先调用 read_document");
         }
 
         long imageFileId = requirePositiveLong(args, "imageFileId");
         int imageVersionNo = requirePositiveInt(args, "imageVersionNo");
-        int width = clampDimension(optionalInt(args, "widthPixels"), 400, "widthPixels");
-        int height = clampDimension(optionalInt(args, "heightPixels"), 300, "heightPixels");
+        int width = requireDimension(optionalInt(args, "widthPixels"), 400, "widthPixels");
+        int height = requireDimension(optionalInt(args, "heightPixels"), 300, "heightPixels");
+        var image = versionService.downloadVersion(context.userId(), imageFileId, imageVersionNo);
+        if (!"image/png".equalsIgnoreCase(image.contentType())
+                && !"image/jpeg".equalsIgnoreCase(image.contentType())) {
+            throw new BusinessException(422, "插入图片仅支持 PNG 或 JPEG 版本");
+        }
+        if (properties.isRequireConfirmation()) {
+            var reference = new DocumentEditPlan.ImageReference(imageFileId, imageVersionNo, width, height);
+            var plan = new DocumentEditPlan("在 " + target + " 追加内嵌图片", List.of(
+                    new DocumentEditPlan.Operation("INSERT_IMAGE", target, null,
+                            optionalString(args, "reason"), reference)), null);
+            return ToolResult.withPlan("将在 " + target + " 追加图片 " + imageFileId + " 的 v"
+                    + imageVersionNo + "，显示尺寸 " + width + "×" + height + " 像素（待确认）", plan);
+        }
 
         InsertDocxImagesDTO.Operation operation = new InsertDocxImagesDTO.Operation();
         operation.setBlockId(target);
@@ -138,20 +157,12 @@ public class InsertImageTool extends AbstractAiTool {
         return value;
     }
 
-    /**
-     * 归一化尺寸。
-     *
-     * <p>越界时直接修正而不是报错：模型给出的像素值通常只是「大概意思」，
-     * 因为一个尺寸超限就整轮失败，用户体验不成比例。
-     * 但修正后会写进工具结果，让用户知道实际用了多少。
-     */
-    private static int clampDimension(Integer value, int fallback, String name) {
-        if (value == null || value <= 0) {
+    private static int requireDimension(Integer value, int fallback, String name) {
+        if (value == null) {
             return fallback;
         }
-        if (value > MAX_DIMENSION) {
-            log.info("图片尺寸 {} 超出上限，已收敛为 {}", value, MAX_DIMENSION);
-            return MAX_DIMENSION;
+        if (value < 1 || value > MAX_DIMENSION) {
+            throw new BusinessException(422, name + " 必须在 1 到 10000 像素之间");
         }
         return value;
     }

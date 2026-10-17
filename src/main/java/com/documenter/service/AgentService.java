@@ -16,6 +16,12 @@ import java.util.function.BooleanSupplier;
  */
 public interface AgentService {
 
+    /** 持久化会话的历史角色与内容；仅 USER / ASSISTANT 参与模型上下文。 */
+    record ConversationTurn(String role, String content) { }
+
+    com.documenter.vo.AgentRunResult runConversation(Long userId, Long fileId, Integer versionNo,
+            String instruction, java.util.List<ConversationTurn> history, BooleanSupplier cancelled);
+
     /**
      * 执行一轮智能体交互。
      *
@@ -33,9 +39,8 @@ public interface AgentService {
     /**
      * 执行经用户确认的编辑计划（TODO 4.2「用户能够确认、继续修改或放弃结果」）。
      *
-     * <p>与 {@link #run} 的分工：{@code run} 只产出计划、不改动文档；
-     * 本方法在用户确认后把计划落到新版本。这样「放弃」才是真的有意义的选项 ——
-     * 如果 {@code run} 直接改文档，用户就没有可放弃的东西。
+     * <p>默认提交前确认模式下，{@link #run} 的段落、表格和图片工具均只产出计划。
+     * 本方法在用户确认后把计划保存为新版本；显式关闭确认时图片工具可直接写入。
      *
      * @param userId        已认证用户
      * @param fileId        文件 ID

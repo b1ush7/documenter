@@ -6,6 +6,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
+import java.time.ZoneId;
 
 /**
  * 文本模型接入配置（TODO 4.2「接入一个选定的文本模型；配置地址、密钥、超时和输出长度」）。
@@ -121,8 +122,11 @@ public class AiModelProperties {
     /** 每千输出 token 的估算单价。 */
     private double costPer1kOutputTokens = 0.0;
 
-    /** 单用户每日模型调用次数上限；0 表示不限制。 */
+    /** 单用户每日 ChatModel 调用尝试上限，含智能体重试；0 表示不限制。 */
     private int dailyCallLimitPerUser = 0;
+
+    /** 各实例必须使用同一时区定义自然日；默认 Asia/Shanghai。 */
+    private ZoneId quotaZone = ZoneId.of("Asia/Shanghai");
 
     /** 是否已配置到可以真实调用模型的程度。 */
     public boolean configured() {
