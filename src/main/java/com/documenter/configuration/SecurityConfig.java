@@ -41,7 +41,7 @@ public class SecurityConfig {
     @Bean
     public CorsConfigurationSource configurationSource(){
         CorsConfiguration configuration = new CorsConfiguration();
-        configuration.setAllowedOrigins(List.of("https://documenter.erfumestore.xin"
+        configuration.setAllowedOrigins(List.of("https://jenandygyt-web.github.io"
                 , "http://localhost:5173"));
         configuration.addAllowedHeader("*");
         configuration.addAllowedMethod(HttpMethod.GET);
