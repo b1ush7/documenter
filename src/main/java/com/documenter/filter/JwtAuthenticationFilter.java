@@ -83,6 +83,13 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                 response.setContentType("application/json;charset=UTF-8");
                 response.getWriter().write("{\"code\":401,\"msg\":\"Token 无效或已过期\"}");
                 return;
+            } catch (RuntimeException failure) {
+                if (!com.documenter.util.DependencyFailures.unavailable(failure)) throw failure;
+                SecurityContextHolder.clearContext();
+                response.setStatus(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
+                response.setContentType("application/json;charset=UTF-8");
+                response.getWriter().write("{\"code\":503,\"msg\":\"认证服务暂不可用，请稍后重试\"}");
+                return;
             }
         }
         // 访问请求不延长任何 Token 的有效期；续期只能通过 Refresh Token 轮换。

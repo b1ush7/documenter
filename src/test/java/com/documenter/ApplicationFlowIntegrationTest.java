@@ -845,6 +845,477 @@ class ApplicationFlowIntegrationTest {
         try { release.await(); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
     }
 
+    @Test
+    void templateHistoryFailureRollsBackMetadataAndStoredFiles() throws Exception {
+        var service=app.getBean(com.documenter.service.DocTemplateService.class);
+        var dto=new com.documenter.dto.SaveDocTemplateDTO(); dto.setCode("tx_template"); dto.setName("transaction test");
+        byte[] bytes=transactionDocx();
+        var file=new org.springframework.mock.web.MockMultipartFile("file","test.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",bytes);
+        jdbc.execute("CREATE TRIGGER reject_template_history BEFORE INSERT ON doc_template_version FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='injected history failure'");
+        assertThrows(RuntimeException.class,()->service.create(dto,file));
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM doc_template",Integer.class));
+        assertEquals(0,storedFileCount());
+        jdbc.execute("DROP TRIGGER reject_template_history");
+        var template=service.create(dto,file);
+        String key=jdbc.queryForObject("SELECT storage_key FROM doc_template WHERE id=?",String.class,template.getId());
+        jdbc.execute("CREATE TRIGGER reject_template_history BEFORE INSERT ON doc_template_version FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='injected history failure'");
+        assertThrows(RuntimeException.class,()->service.replaceContent(template.getId(),file));
+        assertEquals(key,jdbc.queryForObject("SELECT storage_key FROM doc_template WHERE id=?",String.class,template.getId()));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM doc_template_version",Integer.class));
+        assertEquals(1,storedFileCount());
+        jdbc.execute("DROP TRIGGER reject_template_history");
+        assertThrows(IllegalStateException.class,()->transactions().executeWithoutResult(status->{
+            service.replaceContent(template.getId(),file); throw new IllegalStateException("outer rollback");
+        }));
+        assertEquals(1,jdbc.queryForObject("SELECT version_no FROM doc_template WHERE id=?",Integer.class,template.getId()));
+        assertEquals(1,storedFileCount());
+    }
+
+    @Test
+    void defaultModelSwitchFailureRestoresPreviousDefaultAndConcurrentSwitchesStayUnique() throws Exception {
+        var models=app.getBean(com.documenter.service.ModelConfigService.class);
+        var first=modelDto("first",true); var second=modelDto("second",false);
+        long original=models.create(first).getId(), replacement=models.create(second).getId();
+        jdbc.execute("CREATE TRIGGER reject_new_default BEFORE UPDATE ON model_config FOR EACH ROW BEGIN IF NEW.id="+replacement+
+                " AND NEW.is_default=1 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='injected default failure'; END IF; END");
+        second.setIsDefault(true);
+        assertThrows(RuntimeException.class,()->models.update(replacement,second));
+        assertEquals(original,jdbc.queryForObject("SELECT id FROM model_config WHERE is_default=1 AND scope='TEXT'",Long.class));
+        jdbc.execute("DROP TRIGGER reject_new_default");
+        var start=new CountDownLatch(1);
+        try(var workers=java.util.concurrent.Executors.newFixedThreadPool(4)) {
+            var results=new ArrayList<java.util.concurrent.Future<?>>();
+            for(int i=0;i<8;i++) { final boolean useFirst=i%2==0;
+                results.add(workers.submit(()->{ awaitRelease(start);
+                    try { models.update(useFirst?original:replacement,modelDto(useFirst?"first":"second",true)); }
+                    catch(org.springframework.dao.DataAccessException conflict) {
+                        assertEquals(409,app.getBean(com.documenter.exception.GlobalExceptionHandler.class).handleException(conflict).getBody().getCode());
+                    }
+                    catch(com.documenter.exception.BusinessException conflict) { assertEquals(409,conflict.getCode()); }
+                }));
+            }
+            start.countDown(); for(var result:results) result.get(15,TimeUnit.SECONDS);
+        }
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM model_config WHERE is_default=1 AND scope='TEXT'",Integer.class));
+        assertEquals(2,jdbc.queryForObject("SELECT COUNT(*) FROM model_config",Integer.class));
+    }
+
+    @Test
+    void uploadAndGenerationCleanStoredFilesWhenCommitFailsAfterServiceReturns() throws Exception {
+        var files=app.getBean(com.documenter.service.FileService.class);
+        long owner=transactionOwner();
+        byte[] bytes=transactionDocx();
+        for(boolean generated:List.of(false,true)) {
+            assertThrows(IllegalStateException.class,()->transactions().executeWithoutResult(status->{
+                if(generated) files.createGeneratedDocx(owner,"generated.docx",bytes,"transaction test");
+                else files.upload(owner,new org.springframework.mock.web.MockMultipartFile("file","upload.docx",
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",bytes));
+                org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                        new org.springframework.transaction.support.TransactionSynchronization() {
+                            @Override public void beforeCommit(boolean readOnly) { throw new IllegalStateException("injected commit failure"); }
+                        });
+            }));
+            assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM file_asset",Integer.class));
+            assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM document_version",Integer.class));
+            assertEquals(0,storedFileCount(),"提交前失败必须同时回收上传/生成文件");
+        }
+    }
+
+    @Test
+    void localOcrCorrectionInsertAndUpdateRollBackWithoutChangingDocument() throws Exception {
+        var files=app.getBean(com.documenter.service.FileService.class);
+        long owner=transactionOwner();
+        long file=files.createGeneratedDocx(owner,"ocr.docx",transactionDocx(),"test").getId();
+        var corrections=app.getBean(com.documenter.service.OcrCorrectionService.class);
+        var request=new com.documenter.dto.SaveOcrCorrectionsDTO(); request.setFingerprint("a".repeat(64));
+        var page=new com.documenter.dto.SaveOcrCorrectionsDTO.PageCorrection(); page.setPageNo(1); page.setText("original correction");
+        request.setPages(List.of(page));
+        assertThrows(IllegalStateException.class,()->transactions().executeWithoutResult(status->{
+            corrections.save(owner,file,1,request); throw new IllegalStateException("rollback insert");
+        }));
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM ocr_correction",Integer.class));
+        corrections.save(owner,file,1,request); page.setText("must rollback");
+        assertThrows(IllegalStateException.class,()->transactions().executeWithoutResult(status->{
+            corrections.save(owner,file,1,request); throw new IllegalStateException("rollback update");
+        }));
+        assertEquals("original correction",corrections.get(owner,file,1,request.getFingerprint()).pages().get(0).text());
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM document_version",Integer.class));
+    }
+
+    @Test
+    void accountMutationRollbackPreservesPasswordRoleAndStatusAndRevokesOldSessions() throws Exception {
+        String username="account_tx";
+        api("POST","/user/register",Map.of("username",username,"password","IntegrationOnly123!"));
+        long owner=jdbc.queryForObject("SELECT id FROM `user` WHERE username=?",Long.class,username);
+        var admin=app.getBean(com.documenter.service.AdminUserService.class);
+        var users=app.getBean(com.documenter.service.UserService.class);
+        for(String action:List.of("status","role","password")) {
+            token=api("POST","/user/login",Map.of("account",username,"password","IntegrationOnly123!")).path("accessToken").asText();
+            assertThrows(IllegalStateException.class,()->transactions().executeWithoutResult(status->{
+                switch(action) {
+                    case "status" -> admin.updateStatus(owner+1,owner,"DISABLED");
+                    case "role" -> admin.updateRole(owner+1,owner,"ADMIN");
+                    default -> users.changePassword(owner,"IntegrationOnly123!","ReplacementOnly123!");
+                }
+                throw new IllegalStateException("rollback account mutation");
+            }));
+            assertEquals("ENABLED",jdbc.queryForObject("SELECT status FROM `user` WHERE id=?",String.class,owner));
+            assertEquals("USER",jdbc.queryForObject("SELECT role FROM `user` WHERE id=?",String.class,owner));
+            assertEquals(401,send("GET","/user/me",null,null).statusCode(),"回滚不能恢复已撤销的旧凭据");
+        }
+        token=api("POST","/user/login",Map.of("account",username,"password","IntegrationOnly123!")).path("accessToken").asText();
+        assertEquals(owner,api("GET","/user/me",null).path("id").asLong());
+        assertNotEquals(0,jsonRequest("POST","/user/login",Map.of("account",username,"password","ReplacementOnly123!")).path("code").asInt());
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM audit_log WHERE action IN ('ADMIN_ROLE_CHANGE','ADMIN_USER_DISABLE','USER_PASSWORD_CHANGED') AND result='SUCCESS'",Integer.class));
+    }
+
+    @Test
+    void aiConfirmationDatabaseFailureRollsBackVersionAndConcurrentReplayCreatesOnlyOne() throws Exception {
+        api("POST","/user/register",Map.of("username","confirm_tx","password","IntegrationOnly123!"));
+        token=api("POST","/user/login",Map.of("account","confirm_tx","password","IntegrationOnly123!")).path("accessToken").asText();
+        long owner=api("GET","/user/me",null).path("id").asLong();
+        byte[] original=docx();
+        long file=upload(original,"confirm.docx","application/vnd.openxmlformats-officedocument.wordprocessingml.document").path("id").asLong();
+        String target=null;
+        for(var block:api("GET","/file/"+file+"/versions/1/structure",null).path("blocks"))
+            if("原始内容".equals(block.path("text").asText())) target=block.path("blockId").asText();
+        assertNotNull(target);
+        long session=api("POST","/ai/sessions",Map.of("title","confirm transaction","fileId",file)).path("id").asLong();
+        String instruction="[stub-tool] edit_paragraph "+json.writeValueAsString(Map.of("operation","REPLACE_TEXT","target",target,"content","committed once","reason","transaction check"));
+        long reply=api("POST","/ai/sessions/"+session+"/replies",Map.of("content",instruction,"versionNo",1,"idempotencyKey",UUID.randomUUID().toString())).path("message").path("id").asLong();
+        var replies=app.getBean(com.documenter.service.AiReplyService.class);
+        jdbc.execute("CREATE TRIGGER reject_confirmation BEFORE UPDATE ON ai_message FOR EACH ROW BEGIN IF NEW.plan_status='CONFIRMED' THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='injected confirmation failure'; END IF; END");
+        assertThrows(RuntimeException.class,()->replies.confirm(owner,session,reply));
+        assertEquals("PENDING",jdbc.queryForObject("SELECT plan_status FROM ai_message WHERE id=?",String.class,reply));
+        assertEquals(1,jdbc.queryForObject("SELECT latest_version FROM file_asset WHERE id=?",Integer.class,file));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM document_version",Integer.class));
+        assertEquals(1,storedFileCount());
+        assertArrayEquals(original,download("/file/"+file+"/versions/1/download"));
+        jdbc.execute("DROP TRIGGER reject_confirmation");
+        var start=new CountDownLatch(1);
+        try(var workers=java.util.concurrent.Executors.newFixedThreadPool(4)) {
+            var results=new ArrayList<java.util.concurrent.Future<Integer>>();
+            for(int i=0;i<4;i++) results.add(workers.submit(()->{awaitRelease(start);return replies.confirm(owner,session,reply).outputVersion();}));
+            start.countDown(); for(var result:results) assertEquals(2,result.get(15,TimeUnit.SECONDS));
+        }
+        assertEquals(2,jdbc.queryForObject("SELECT COUNT(*) FROM document_version",Integer.class));
+        assertEquals("CONFIRMED",jdbc.queryForObject("SELECT plan_status FROM ai_message WHERE id=?",String.class,reply));
+        assertEquals(2,storedFileCount());
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named="DOCUMENTER_LOAD_TEST_ENABLED",matches="true")
+    void sustainedConcurrentUploadDownloadAndHistoryPreserveEveryVersion() throws Exception {
+        app.close(); app=null;
+        configuration.put("res.storage.upload.hourly-limit",10000); start();
+        long owner=transactionOwner();
+        String username=jdbc.queryForObject("SELECT username FROM `user` WHERE id=?",String.class,owner);
+        token=api("POST","/user/login",Map.of("account",username,"password","IntegrationOnly123!")).path("accessToken").asText();
+        Path input=workspace.resolve("sustained.png"); writePng(input,512,512,true);
+        byte[] bytes=Files.readAllBytes(input); String digest=sha256(input);
+        var uploads=new java.util.concurrent.ConcurrentLinkedQueue<Long>();
+        var downloads=new java.util.concurrent.ConcurrentLinkedQueue<Long>();
+        var histories=new java.util.concurrent.ConcurrentLinkedQueue<Long>();
+        var ids=java.util.concurrent.ConcurrentHashMap.<Long>newKeySet();
+        var start=new CountDownLatch(1);
+        int workers=4, rounds=40;
+        long started=System.nanoTime();
+        try(var pool=java.util.concurrent.Executors.newFixedThreadPool(workers)) {
+            var results=new ArrayList<java.util.concurrent.Future<?>>();
+            for(int worker=0;worker<workers;worker++) results.add(pool.submit(()->{
+                awaitRelease(start); long origin=System.nanoTime();
+                try {
+                    for(int round=0;round<rounds;round++) {
+                        long begin=System.nanoTime();
+                        var created=upload(bytes,"sustained.png","image/png"); uploads.add(elapsedMillis(begin));
+                        long id=created.path("id").asLong(); assertTrue(ids.add(id));
+                        assertEquals(digest,created.path("sha256").asText());
+                        begin=System.nanoTime(); assertArrayEquals(bytes,download("/file/"+id+"/versions/1/download")); downloads.add(elapsedMillis(begin));
+                        begin=System.nanoTime(); assertEquals(1,api("GET","/file/"+id+"/versions",null).size()); histories.add(elapsedMillis(begin));
+                        long remaining=origin+Duration.ofMillis(750L*(round+1)).toNanos()-System.nanoTime();
+                        if(remaining>0) TimeUnit.NANOSECONDS.sleep(remaining);
+                    }
+                } catch(Exception failure) { throw new IllegalStateException(failure); }
+            }));
+            start.countDown(); for(var result:results) result.get(60,TimeUnit.SECONDS);
+        }
+        long elapsed=elapsedMillis(started); assertTrue(elapsed>=30000);
+        assertEquals(workers*rounds,ids.size());
+        assertEquals(ids.size(),jdbc.queryForObject("SELECT COUNT(*) FROM file_asset WHERE user_id=? AND latest_version=1",Integer.class,owner));
+        assertEquals(ids.size(),jdbc.queryForObject("SELECT COUNT(*) FROM document_version",Integer.class));
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM document_version WHERE sha256<>?",Integer.class,digest));
+        assertEquals(ids.size(),storedFileCount(),"持续读写后不应有孤儿文件");
+        var report=new LinkedHashMap<String,Object>(); report.put("scope","30-second paced loopback HTTP baseline; not a production capacity test");
+        report.put("timestamp",java.time.Instant.now().toString()); report.put("concurrency",workers); report.put("roundsPerWorker",rounds);
+        report.put("elapsedMs",elapsed); report.put("files",ids.size()); report.put("requests",ids.size()*3); report.put("failedRequests",0);
+        report.put("sampleBytes",bytes.length); report.put("transferredBytes",2L*bytes.length*ids.size());
+        report.put("uploadMs",latencySummary(uploads)); report.put("downloadMs",latencySummary(downloads)); report.put("historyMs",latencySummary(histories));
+        Path output=Path.of("target/sustained-load-report.json"); Files.createDirectories(output.getParent());
+        Files.writeString(output,json.writerWithDefaultPrettyPrinter().writeValueAsString(report));
+    }
+
+    private static Map<String,Long> latencySummary(java.util.Collection<Long> values) {
+        var sorted=values.stream().sorted().toList();
+        return Map.of("p50",sorted.get(sorted.size()/2),"p95",sorted.get(Math.min(sorted.size()-1,(int)Math.ceil(sorted.size()*0.95)-1)),"max",sorted.getLast());
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named="DOCUMENTER_TEST_REDIS_SERVER",matches=".+")
+    void isolatedRedisOutageFailsClosedAndRecoversWithoutRevivingTokens() throws Exception {
+        Path executable=Path.of(System.getenv("DOCUMENTER_TEST_REDIS_SERVER")).toAbsolutePath();
+        assertTrue(Files.isRegularFile(executable));
+        int port; try(var socket=new java.net.ServerSocket(0,1,java.net.InetAddress.getByName("127.0.0.1"))) {port=socket.getLocalPort();}
+        Path directory=Files.createDirectories(workspace.resolve("private-redis"));
+        Files.writeString(directory.resolve("redis.conf"),"bind 127.0.0.1\nport "+port+"\nprotected-mode yes\nsave \"\"\nappendonly no\ndir ./\ndaemonize no\nlogfile \"\"\n");
+        var builder=new ProcessBuilder(executable.toString(),"redis.conf").directory(directory.toFile()).redirectErrorStream(true)
+                .redirectOutput(directory.resolve("redis.log").toFile());
+        Process child=builder.start();
+        try {
+            awaitRedisPort(child,port);
+            app.close(); app=null;
+            configuration.put("spring.data.redis.port",port); configuration.put("spring.data.redis.timeout","500ms");
+            configuration.put("spring.data.redis.connect-timeout","500ms"); start();
+            api("POST","/user/register",Map.of("username","redis_outage","password","IntegrationOnly123!"));
+            var login=api("POST","/user/login",Map.of("account","redis_outage","password","IntegrationOnly123!"));
+            token=login.path("accessToken").asText(); String oldAccess=token, oldRefresh=login.path("refreshToken").asText();
+            long owner=api("GET","/user/me",null).path("id").asLong();
+            child.destroyForcibly(); assertTrue(child.waitFor(5,TimeUnit.SECONDS));
+            var denied=send("GET","/user/me",null,null);
+            assertEquals(503,denied.statusCode(),"Redis 不可用应返回明确 503，不能绕过认证或成为普通 500");
+            assertEquals(503,json.readTree(denied.body()).path("code").asInt());
+            assertEquals(503,jsonRequest("POST","/user/login",Map.of("account","redis_outage","password","IntegrationOnly123!")).path("code").asInt());
+            assertEquals(503,uploadResponse(docx(),"denied.docx","application/vnd.openxmlformats-officedocument.wordprocessingml.document").path("code").asInt());
+            assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM file_asset",Integer.class));
+            assertEquals(0,storedFileCount());
+            child=builder.start(); awaitRedisPort(child,port);
+            long deadline=System.nanoTime()+Duration.ofSeconds(8).toNanos();
+            JsonNode recovered=null;
+            while(System.nanoTime()<deadline) {
+                recovered=jsonRequest("POST","/user/login",Map.of("account","redis_outage","password","IntegrationOnly123!"));
+                if(recovered.path("code").asInt(-1)==0) break;
+                assertEquals(503,recovered.path("code").asInt()); Thread.sleep(100);
+            }
+            assertNotNull(recovered); assertEquals(0,recovered.path("code").asInt(-1));
+            String newAccess=recovered.path("data").path("accessToken").asText();
+            token=oldAccess; assertEquals(401,send("GET","/user/me",null,null).statusCode());
+            assertEquals(401,jsonRequest("POST","/user/refresh",Map.of("refreshToken",oldRefresh)).path("code").asInt());
+            token=newAccess; assertEquals(owner,api("GET","/user/me",null).path("id").asLong());
+            byte[] bytes=docx(); long file=upload(bytes,"recovered.docx","application/vnd.openxmlformats-officedocument.wordprocessingml.document").path("id").asLong();
+            assertArrayEquals(bytes,download("/file/"+file+"/versions/1/download"));
+        } finally {
+            if(app!=null) {app.close(); app=null;}
+            if(child.isAlive()) {child.destroyForcibly(); assertTrue(child.waitFor(5,TimeUnit.SECONDS));}
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings={"aof","rdb"})
+    @EnabledIfEnvironmentVariable(named="DOCUMENTER_TEST_REDIS_SERVER",matches=".+")
+    void redisPersistencePreservesSessionsRevocationsAndQuotaAfterForcedRestart(String mode) throws Exception {
+        Path executable=Path.of(System.getenv("DOCUMENTER_TEST_REDIS_SERVER")).toAbsolutePath();
+        assertTrue(Files.isRegularFile(executable));
+        int port; try(var socket=new java.net.ServerSocket(0,1,java.net.InetAddress.getByName("127.0.0.1"))) {port=socket.getLocalPort();}
+        Path directory=Files.createDirectories(workspace.resolve("persistent-redis"));
+        Files.writeString(directory.resolve("redis.conf"),"bind 127.0.0.1\nport "+port+"\nprotected-mode yes\nsave \"\"\n"+
+                (mode.equals("aof")?"appendonly yes\nappendfsync always\n":"appendonly no\n")+"dir ./\ndaemonize no\nlogfile \"\"\n");
+        var builder=new ProcessBuilder(executable.toString(),"redis.conf").directory(directory.toFile()).redirectErrorStream(true)
+                .redirectOutput(directory.resolve("redis.log").toFile());
+        Process child=builder.start();
+        var privateFactory=new LettuceConnectionFactory(new RedisStandaloneConfiguration("127.0.0.1",port),
+                LettuceClientConfiguration.builder().commandTimeout(Duration.ofSeconds(2)).shutdownTimeout(Duration.ZERO).build());
+        try {
+            awaitRedisPort(child,port); privateFactory.afterPropertiesSet(); privateFactory.start();
+            var privateRedis=new StringRedisTemplate(privateFactory);
+            app.close(); app=null; configuration.put("spring.data.redis.port",port);
+            configuration.put("spring.data.redis.timeout","500ms"); configuration.put("spring.data.redis.connect-timeout","500ms"); start();
+            api("POST","/user/register",Map.of("username","persist_test","password","IntegrationOnly123!"));
+            var first=api("POST","/user/login",Map.of("account","persist_test","password","IntegrationOnly123!"));
+            String oldRefresh=first.path("refreshToken").asText();
+            var rotated=api("POST","/user/refresh",Map.of("refreshToken",oldRefresh));
+            String liveAccess=rotated.path("accessToken").asText(),liveRefresh=rotated.path("refreshToken").asText();
+            var revoked=api("POST","/user/login",Map.of("account","persist_test","password","IntegrationOnly123!"));
+            token=revoked.path("accessToken").asText(); String revokedAccess=token,revokedRefresh=revoked.path("refreshToken").asText();
+            api("POST","/user/logout",null);
+            token=liveAccess; long owner=api("GET","/user/me",null).path("id").asLong();
+            byte[] bytes=docx(); long file=upload(bytes,"persist.docx","application/vnd.openxmlformats-officedocument.wordprocessingml.document").path("id").asLong();
+            long session=api("POST","/ai/sessions",Map.of("title","persist quota")).path("id").asLong();
+            assertEquals("COMPLETED",api("POST","/ai/sessions/"+session+"/replies",Map.of("content","hello","idempotencyKey",UUID.randomUUID().toString())).path("runStatus").asText());
+            var keys=new ArrayList<String>();
+            for(String pattern:List.of("upload:quota:"+owner+":*","ai:daily-call:"+owner+":*"))
+                try(var cursor=privateRedis.scan(ScanOptions.scanOptions().match(pattern).count(100).build())) {while(cursor.hasNext()) keys.add(cursor.next());}
+            assertEquals(2,keys.size());
+            var quotas=new HashMap<String,String>(); for(String key:keys) {quotas.put(key,privateRedis.opsForValue().get(key));assertEquals("1",quotas.get(key));}
+            var sessions=privateRedis.opsForSet().members("login:user_sessions:"+owner); assertNotNull(sessions); assertEquals(1,sessions.size());
+            var ttlKeys=new ArrayList<>(keys);ttlKeys.add("login:user_sessions:"+owner);
+            for(String id:sessions) ttlKeys.add("login:session:"+id);
+            var ttls=new HashMap<String,Long>();
+            for(String key:ttlKeys) {long ttl=privateRedis.getExpire(key);assertTrue(ttl>0);ttls.put(key,ttl);}
+            if(mode.equals("rdb")) {
+                privateRedis.execute((org.springframework.data.redis.core.RedisCallback<Void>) connection->{connection.serverCommands().save();return null;});
+                assertTrue(Files.isRegularFile(directory.resolve("dump.rdb")));
+            } else try(var paths=Files.walk(directory)) {
+                assertTrue(paths.anyMatch(path->path.toString().endsWith(".aof")),"AOF 文件必须实际生成");
+            }
+            child.destroyForcibly(); assertTrue(child.waitFor(5,TimeUnit.SECONDS)); child=builder.start(); awaitRedisPort(child,port);
+            long deadline=System.nanoTime()+Duration.ofSeconds(8).toNanos();
+            HttpResponse<byte[]> restored=null;
+            while(System.nanoTime()<deadline) {
+                restored=send("GET","/user/me",null,null); if(restored.statusCode()==200) break;
+                assertEquals(503,restored.statusCode()); Thread.sleep(100);
+            }
+            assertNotNull(restored); assertEquals(200,restored.statusCode());
+            assertEquals(owner,json.readTree(restored.body()).path("data").path("id").asLong());
+            for(var quota:quotas.entrySet()) assertEquals(quota.getValue(),privateRedis.opsForValue().get(quota.getKey()));
+            assertEquals(sessions,privateRedis.opsForSet().members("login:user_sessions:"+owner));
+            for(var ttl:ttls.entrySet()) {
+                long restoredTtl=privateRedis.getExpire(ttl.getKey());
+                assertTrue(restoredTtl>0 && restoredTtl<=ttl.getValue(),"恢复后不能丢失或延长原 TTL");
+            }
+            assertEquals(401,jsonRequest("POST","/user/refresh",Map.of("refreshToken",oldRefresh)).path("code").asInt());
+            token=revokedAccess; assertEquals(401,send("GET","/user/me",null,null).statusCode());
+            assertEquals(401,jsonRequest("POST","/user/refresh",Map.of("refreshToken",revokedRefresh)).path("code").asInt());
+            token=api("POST","/user/refresh",Map.of("refreshToken",liveRefresh)).path("accessToken").asText();
+            assertArrayEquals(bytes,download("/file/"+file+"/versions/1/download"));
+            assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM document_version",Integer.class));
+        } finally {
+            if(app!=null) {app.close();app=null;}
+            privateFactory.destroy();
+            if(child.isAlive()) {child.destroyForcibly();assertTrue(child.waitFor(5,TimeUnit.SECONDS));}
+        }
+    }
+
+    @Test
+    @org.junit.jupiter.api.condition.EnabledOnOs(org.junit.jupiter.api.condition.OS.WINDOWS)
+    @EnabledIfEnvironmentVariable(named="DOCUMENTER_TEST_REDIS_SERVER",matches=".+")
+    void staleRdbRecoveryInvalidatesRestoredSessionsBeforeApplicationStarts() throws Exception {
+        Path executable=Path.of(System.getenv("DOCUMENTER_TEST_REDIS_SERVER")).toAbsolutePath();
+        Path cli=executable.resolveSibling("redis-cli.exe"); assertTrue(Files.isRegularFile(cli));
+        int port; try(var socket=new java.net.ServerSocket(0,1,java.net.InetAddress.getByName("127.0.0.1"))) {port=socket.getLocalPort();}
+        Path directory=Files.createDirectories(workspace.resolve("stale-redis"));
+        Files.writeString(directory.resolve("redis.conf"),"bind 127.0.0.1\nport "+port+"\nprotected-mode yes\nsave \"\"\nappendonly no\ndir ./\ndaemonize no\nlogfile \"\"\n");
+        var builder=new ProcessBuilder(executable.toString(),"redis.conf").directory(directory.toFile()).redirectErrorStream(true)
+                .redirectOutput(directory.resolve("redis.log").toFile());
+        Process child=builder.start();
+        var privateFactory=new LettuceConnectionFactory(new RedisStandaloneConfiguration("127.0.0.1",port),
+                LettuceClientConfiguration.builder().commandTimeout(Duration.ofSeconds(2)).shutdownTimeout(Duration.ZERO).build());
+        try {
+            awaitRedisPort(child,port); privateFactory.afterPropertiesSet(); privateFactory.start();
+            var privateRedis=new StringRedisTemplate(privateFactory);
+            app.close();app=null;configuration.put("spring.data.redis.port",port);start();
+            api("POST","/user/register",Map.of("username","stale_test","password","IntegrationOnly123!"));
+            var login=api("POST","/user/login",Map.of("account","stale_test","password","IntegrationOnly123!"));
+            token=login.path("accessToken").asText(); String oldAccess=token,oldRefresh=login.path("refreshToken").asText();
+            long owner=api("GET","/user/me",null).path("id").asLong();
+            byte[] bytes=docx(); long file=upload(bytes,"stale.docx","application/vnd.openxmlformats-officedocument.wordprocessingml.document").path("id").asLong();
+            String quota="upload:quota:"+owner+":"+java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE);
+            privateRedis.execute((org.springframework.data.redis.core.RedisCallback<Void>) connection->{connection.serverCommands().save();return null;});
+            api("POST","/user/logout",null);assertEquals(401,send("GET","/user/me",null,null).statusCode());
+            app.close();app=null;
+            child.destroyForcibly();assertTrue(child.waitFor(5,TimeUnit.SECONDS));child=builder.start();awaitRedisPort(child,port);
+            // 应用保持停止；先证明旧快照恢复了本应撤销的会话，再执行恢复前清理。
+            privateFactory.resetConnection();
+            assertEquals(1,privateRedis.opsForSet().size("login:user_sessions:"+owner));
+            var preview=runSessionRecovery(cli,port,false); assertFalse(preview.path("applied").asBoolean());
+            assertEquals(2,preview.path("matched").asInt());assertEquals(0,preview.path("deleted").asInt());
+            assertEquals(1,privateRedis.opsForSet().size("login:user_sessions:"+owner));
+            var applied=runSessionRecovery(cli,port,true);assertEquals(2,applied.path("deleted").asInt());
+            assertEquals(0,runSessionRecovery(cli,port,true).path("deleted").asInt(),"恢复清理应可重复执行");
+            assertEquals("1",privateRedis.opsForValue().get(quota));assertTrue(privateRedis.getExpire(quota)>0);
+            assertEquals(0,privateRedis.opsForSet().size("login:user_sessions:"+owner));
+            start();token=oldAccess;
+            assertEquals(401,send("GET","/user/me",null,null).statusCode());
+            assertEquals(401,jsonRequest("POST","/user/refresh",Map.of("refreshToken",oldRefresh)).path("code").asInt());
+            token=api("POST","/user/login",Map.of("account","stale_test","password","IntegrationOnly123!")).path("accessToken").asText();
+            assertArrayEquals(bytes,download("/file/"+file+"/versions/1/download"));
+            privateRedis.execute((org.springframework.data.redis.core.RedisCallback<Void>) connection->{
+                connection.execute("ACL","SETUSER".getBytes(StandardCharsets.UTF_8),"default".getBytes(StandardCharsets.UTF_8),"-scan".getBytes(StandardCharsets.UTF_8));return null;
+            });
+            runSessionRecovery(cli,port,true,false);
+        } finally {
+            if(app!=null) {app.close();app=null;}privateFactory.destroy();
+            if(child.isAlive()) {child.destroyForcibly();assertTrue(child.waitFor(5,TimeUnit.SECONDS));}
+        }
+    }
+
+    private JsonNode runSessionRecovery(Path cli,int port,boolean apply) throws Exception {
+        return runSessionRecovery(cli,port,apply,true);
+    }
+
+    private JsonNode runSessionRecovery(Path cli,int port,boolean apply,boolean expectedSuccess) throws Exception {
+        Path shell=Path.of(System.getenv().getOrDefault("DOCUMENTER_TEST_POWERSHELL","pwsh"));
+        var command=new ArrayList<>(List.of(shell.toString(),"-NoProfile","-NonInteractive","-File",
+                Path.of("scripts/invalidate-restored-sessions.ps1").toAbsolutePath().toString(),"-RedisCli",cli.toString(),"-Port",Integer.toString(port)));
+        if(apply) command.add("-Apply");
+        Path log=workspace.resolve(apply?"session-recovery-apply.json":"session-recovery-preview.json");
+        var builder=new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(log.toFile());builder.environment().remove("REDISCLI_AUTH");
+        Process helper=builder.start();
+        try {
+            assertTrue(helper.waitFor(15,TimeUnit.SECONDS));
+            if(!expectedSuccess) {assertNotEquals(0,helper.exitValue(),"缺少 Redis 权限时恢复脚本必须失败");return null;}
+            assertEquals(0,helper.exitValue(),()->{try{return Files.readString(log);}catch(Exception failure){return "Recovery script failed";}});
+            return json.readTree(Files.readAllBytes(log));
+        } finally {if(helper.isAlive()) {helper.destroyForcibly();assertTrue(helper.waitFor(5,TimeUnit.SECONDS));}}
+    }
+
+    @Test
+    void unavailableStorageDirectoryLeavesExistingVersionUntouchedAndRecovers() throws Exception {
+        long owner=transactionOwner(); String username=jdbc.queryForObject("SELECT username FROM `user` WHERE id=?",String.class,owner);
+        token=api("POST","/user/login",Map.of("account",username,"password","IntegrationOnly123!")).path("accessToken").asText();
+        byte[] bytes=docx(); long file=upload(bytes,"original.docx","application/vnd.openxmlformats-officedocument.wordprocessingml.document").path("id").asLong();
+        String key=jdbc.queryForObject("SELECT storage_key FROM file_asset WHERE id=?",String.class,file);
+        Path root=workspace.resolve("storage"),backup=workspace.resolve("storage-offline");
+        Files.move(root,backup);
+        try {
+            Files.writeString(root,"isolated unavailable directory fixture");
+            var rejected=uploadResponse(bytes,"failed.docx","application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+            assertEquals(500,rejected.path("code").asInt());
+            assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM file_asset",Integer.class));
+            assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM document_version",Integer.class));
+            assertEquals(com.documenter.util.Digests.sha256Hex(bytes),sha256(backup.resolve(key)));
+        } finally {
+            if(Files.exists(root)) {assertTrue(Files.isRegularFile(root));Files.delete(root);}
+            Files.move(backup,root);
+        }
+        assertArrayEquals(bytes,download("/file/"+file+"/versions/1/download"));
+        upload(bytes,"recovered.docx","application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+        assertEquals(2,jdbc.queryForObject("SELECT COUNT(*) FROM document_version",Integer.class));
+        assertEquals(2,storedFileCount());
+    }
+
+    private static void awaitRedisPort(Process child,int port) throws Exception {
+        long deadline=System.nanoTime()+Duration.ofSeconds(5).toNanos();
+        while(child.isAlive() && System.nanoTime()<deadline) {
+            try(var socket=new java.net.Socket()) {socket.connect(new java.net.InetSocketAddress("127.0.0.1",port),100); return;}
+            catch(java.io.IOException unavailable) {Thread.sleep(50);}
+        }
+        fail("Isolated Redis did not start");
+    }
+
+    private long transactionOwner() {
+        var request=new com.documenter.dto.UserRegisterDTO();
+        request.setUsername("tx_"+UUID.randomUUID().toString().replace("-", "").substring(0,12));
+        request.setPassword("IntegrationOnly123!");
+        return app.getBean(com.documenter.service.UserService.class).register(request).getId();
+    }
+
+    private org.springframework.transaction.support.TransactionTemplate transactions() {
+        return new org.springframework.transaction.support.TransactionTemplate(app.getBean(org.springframework.transaction.PlatformTransactionManager.class));
+    }
+    private byte[] transactionDocx() throws Exception {
+        try(var document=new XWPFDocument(); var output=new ByteArrayOutputStream()) {
+            document.createParagraph().createRun().setText("transaction fixture {{name}}"); document.write(output); return output.toByteArray();
+        }
+    }
+    private long storedFileCount() throws Exception {
+        Path root=workspace.resolve("storage"); if(!Files.exists(root)) return 0;
+        try(var paths=Files.walk(root)) { return paths.filter(Files::isRegularFile).count(); }
+    }
+    private com.documenter.dto.SaveModelConfigDTO modelDto(String code,boolean isDefault) {
+        var dto=new com.documenter.dto.SaveModelConfigDTO(); dto.setCode(code); dto.setName(code); dto.setScope("TEXT");
+        dto.setProvider("local-test"); dto.setModelName("unused"); dto.setIsDefault(isDefault); return dto;
+    }
+
     private void start() {
         app = new SpringApplicationBuilder(DocumenterApplication.class).initializers(context ->
                 context.getEnvironment().getPropertySources().addFirst(new MapPropertySource("isolated-http-test", configuration)))

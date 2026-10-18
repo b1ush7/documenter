@@ -42,8 +42,4 @@ public class DocTemplate implements Serializable {
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
 
-    /** 是否启用（仅业务判断，不入库）。 */
-    public boolean isEnabled() {
-        return Boolean.TRUE.equals(enabled);
-    }
 }

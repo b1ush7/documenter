@@ -91,6 +91,16 @@ class SecurityFilterChainTest {
     }
 
     @Test
+    void redisTimeoutFailsClosedWith503AndNeverLooksUpOrAuthenticatesUser() throws Exception {
+        var pair=jwt.createTokenPair("7");
+        when(redis.opsForValue().get(anyString())).thenThrow(new org.springframework.dao.QueryTimeoutException("private redis endpoint"));
+        mvc.perform(get("/private/who").header("Authorization","Bearer "+pair.accessToken()))
+                .andExpect(status().isServiceUnavailable()).andExpect(jsonPath("$.code").value(503));
+        verify(users,never()).selectById(anyLong());
+        assertNull(SecurityContextHolder.getContext().getAuthentication());
+    }
+
+    @Test
     void storageRecycleRequiresAdminAndDefaultsToPreview() throws Exception {
         mvc.perform(post("/admin/storage/recycle")).andExpect(status().isUnauthorized());
         var tokens = jwt.createTokenPair("7");

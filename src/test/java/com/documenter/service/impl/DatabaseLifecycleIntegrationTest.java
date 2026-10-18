@@ -47,6 +47,7 @@ class DatabaseLifecycleIntegrationTest {
     private LocalFileStorage storage;
     private VersionWriter writer;
     private DocumentVersionService versions;
+    private com.documenter.mapper.StorageRecycleMapper recycleMapper;
 
     @BeforeEach
     void createIsolatedSchema() {
@@ -185,6 +186,104 @@ class DatabaseLifecycleIntegrationTest {
         assertEquals(0, restoredFlyway.migrate().migrationsExecuted);
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings={"storage","before","after"})
+    void forcedJvmDeathAtWriteAndCommitBoundariesPreservesAtomicVersions(String phase) throws Exception {
+        prepareVersionService();
+        var entries=new java.util.LinkedHashSet<String>();
+        String testClasspath=System.getProperty("surefire.test.class.path");
+        if(testClasspath!=null) entries.addAll(List.of(testClasspath.split(java.util.regex.Pattern.quote(java.io.File.pathSeparator))));
+        for(ClassLoader loader=getClass().getClassLoader();loader!=null;loader=loader.getParent()) {
+            if(loader instanceof java.net.URLClassLoader urls) for(var url:urls.getURLs())
+                if(url.getProtocol().equals("file")) entries.add(Path.of(url.toURI()).toString());
+        }
+        assertFalse(entries.isEmpty(),"Missing child JVM test classpath");
+        Path javaExecutable=Path.of(System.getProperty("java.home"),"bin",System.getProperty("os.name").toLowerCase().contains("win")?"java.exe":"java");
+        Path signal=workspace.resolve("boundary-ready"), log=workspace.resolve("crash-child.log");
+        var builder=new ProcessBuilder(javaExecutable.toString(),"-cp",String.join(java.io.File.pathSeparator,entries),
+                "com.documenter.support.CrashWriteProbe",workspace.resolve("storage").toString(),signal.toString(),phase);
+        builder.environment().put("DOCUMENTER_CRASH_DB_URL",System.getenv("DOCUMENTER_LIFECYCLE_DB_TEST_URL")+schema);
+        Process child=builder.redirectErrorStream(true).redirectOutput(log.toFile()).start();
+        try {
+            long deadline=System.nanoTime()+Duration.ofSeconds(20).toNanos();
+            while(!Files.exists(signal) && child.isAlive() && System.nanoTime()<deadline) Thread.sleep(50);
+            assertTrue(Files.exists(signal),()->{ try{return Files.readString(log);}catch(Exception failure){return "Child did not reach boundary";} });
+            assertTrue(child.isAlive()); child.destroyForcibly(); assertTrue(child.waitFor(10,TimeUnit.SECONDS));
+            // 等待已被杀进程的数据库连接释放行锁，防止只读快照掩盖未结束事务。
+            jdbc.queryForObject("SELECT latest_version FROM file_asset WHERE id=1 FOR UPDATE WAIT 5",Integer.class);
+            int expected=phase.equals("after")?2:1; assertEquals(expected,latest()); assertEquals(expected,versionCount());
+            jdbc.query("SELECT storage_key,sha256 FROM document_version",row->{
+                try(var input=storage.read(row.getString(1))) { assertEquals(row.getString(2),Digests.sha256Hex(input)); }
+                catch(java.io.IOException failure) { throw new IllegalStateException(failure); }
+            });
+            try(var input=versions.downloadVersion(1L,1L,1).resource().getInputStream()) {
+                assertArrayEquals("original".getBytes(java.nio.charset.StandardCharsets.UTF_8),input.readAllBytes());
+            }
+            try(var paths=Files.walk(workspace.resolve("storage"))) {
+                assertEquals(2,paths.filter(Files::isRegularFile).count(),"强杀遗留候选文件与已提交原文件均可追踪");
+            }
+            if(!phase.equals("storage")) {
+                String candidate=Files.readString(signal);
+                assertEquals(phase.equals("after")?1:0,jdbc.queryForObject("SELECT COUNT(*) FROM document_version WHERE storage_key=?",Integer.class,candidate));
+            }
+            Flyway.configure().dataSource(datasource).load().validate();
+            // 真实回收只清理强杀后的无引用候选文件，已提交版本即使很旧也必须保留。
+            try(var paths=Files.walk(workspace.resolve("storage"))) {
+                for(var path:paths.filter(Files::isRegularFile).toList())
+                    Files.setLastModifiedTime(path,java.nio.file.attribute.FileTime.from(java.time.Instant.now().minus(Duration.ofDays(2))));
+            }
+            var policy=new StorageProperties(); policy.getLocal().setRoot(workspace.resolve("storage").toString());
+            policy.getLocal().setTemp(workspace.resolve("temp").toString());
+            policy.getRecycle().setEnabled(true); policy.getRecycle().setDryRun(false);
+            var report=new StorageRecycleService(storage,policy,recycleMapper).recycle(false);
+            assertEquals(phase.equals("after")?0:1,report.deletedBlobs());
+            assertEquals(expected,versionCount());
+            jdbc.query("SELECT storage_key,sha256 FROM document_version",row->{
+                try(var input=storage.read(row.getString(1))) { assertEquals(row.getString(2),Digests.sha256Hex(input)); }
+                catch(java.io.IOException failure) { throw new IllegalStateException(failure); }
+            });
+        } finally {
+            if(child.isAlive()) { child.destroyForcibly(); assertTrue(child.waitFor(10,TimeUnit.SECONDS)); }
+        }
+    }
+
+    @Test
+    void disconnectedWriterRollsBackAndRetryProducesExactlyOneVersion() throws Exception {
+        prepareVersionService();
+        var candidate=content("connection-loss candidate");
+        var ready=new CountDownLatch(1); var release=new CountDownLatch(1);
+        var connectionId=new java.util.concurrent.atomic.AtomicLong();
+        var transactions=new org.springframework.transaction.support.TransactionTemplate(new DataSourceTransactionManager(datasource));
+        var pool=Executors.newSingleThreadExecutor();
+        try {
+            var result=pool.submit(()->transactions.executeWithoutResult(status->{
+                writer.appendVersion(1L,1L,candidate,ChangeType.CONVERT,null,"disconnect",1,9001L,1);
+                connectionId.set(jdbc.queryForObject("SELECT CONNECTION_ID()",Long.class)); ready.countDown();
+                try { if(!release.await(10,TimeUnit.SECONDS)) throw new IllegalStateException("disconnect barrier timeout"); }
+                catch(InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new IllegalStateException(interrupted); }
+                jdbc.queryForObject("SELECT 1",Integer.class);
+            }));
+            assertTrue(ready.await(10,TimeUnit.SECONDS));
+            assertEquals(1,latest()); assertEquals(1,versionCount());
+            // 只终止本测试事务报告的连接，且先由数据库核对它确实属于随机隔离库。
+            assertTrue(connectionId.get()>0);
+            assertEquals(schema,jdbc.queryForObject("SELECT DB FROM information_schema.PROCESSLIST WHERE ID=?",String.class,connectionId.get()));
+            jdbc.execute("KILL CONNECTION "+connectionId.get()); release.countDown();
+            assertThrows(ExecutionException.class,()->result.get(10,TimeUnit.SECONDS));
+            jdbc.queryForObject("SELECT latest_version FROM file_asset WHERE id=1 FOR UPDATE WAIT 5",Integer.class);
+            assertEquals(1,latest()); assertEquals(1,versionCount());
+            var retried=writer.appendVersion(1L,1L,candidate,ChangeType.CONVERT,null,"retry",1,9001L,1);
+            var replay=writer.appendVersion(1L,1L,candidate,ChangeType.CONVERT,null,"replay",1,9001L,1);
+            assertEquals(retried.getId(),replay.getId()); assertEquals(2,latest()); assertEquals(2,versionCount());
+            jdbc.query("SELECT storage_key,sha256 FROM document_version",row->{
+                try(var input=storage.read(row.getString(1))) { assertEquals(row.getString(2),Digests.sha256Hex(input)); }
+                catch(java.io.IOException failure) { throw new IllegalStateException(failure); }
+            });
+        } finally {
+            release.countDown(); pool.shutdownNow(); assertTrue(pool.awaitTermination(10,TimeUnit.SECONDS));
+        }
+    }
+
     private void prepareVersionService() throws Exception {
         migrate(schema, null);
         var properties = new StorageProperties();
@@ -206,7 +305,9 @@ class DatabaseLifecycleIntegrationTest {
         assertNotNull(sessions);
         sessions.getConfiguration().addMapper(FileAssetMapper.class);
         sessions.getConfiguration().addMapper(DocumentVersionMapper.class);
+        sessions.getConfiguration().addMapper(com.documenter.mapper.StorageRecycleMapper.class);
         var template = new SqlSessionTemplate(sessions);
+        recycleMapper=template.getMapper(com.documenter.mapper.StorageRecycleMapper.class);
         var files = template.getMapper(FileAssetMapper.class);
         var fileService = new FileServiceImpl(files, storage, properties, null, null, null);
         var target = new DocumentVersionServiceImpl(template.getMapper(DocumentVersionMapper.class), files, fileService, storage);

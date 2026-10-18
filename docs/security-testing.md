@@ -36,4 +36,4 @@ Docker 不可用时，可以自行启动等效的临时本机 Redis，再设置�
 
 2026-10-17 本机验证情况：JWT 完整过滤链及验证码 Java 服务回归已运行；使用用户提供的本地 `127.0.0.1:6379`、默认用户且无密码连接，`RedisSecurityIntegrationTest` 的 7 项真实 Redis 用例全部通过，无失败、错误或跳过。验证包括验证码 TTL/错误上限/用途隔离/原子消费、24 路 Refresh Token 轮换与退出撤销，以及 24 路 AI 日额度竞争。测试仅写入随机标识的测试键，结束时清理自身键，未执行 FLUSHDB/FLUSHALL，也未发送真实短信。
 
-本地 MariaDB 13.0.2 的 V8 迁移与回收 SQL/隔离磁盘流程另见 [正式存储回收](storage-recycling.md)。带旧数据的 V1→V9 完整升级、真实文档版本服务事务/16 路并发，以及 mariadb-dump 与文件存储配套恢复也已在隔离库通过，见 [数据库生命周期验收](database-lifecycle-testing.md)。执行租约和双实例失联恢复见 [租约验收](execution-leases.md)。已有业务数据副本、其他业务事务及跨主机部署恢复仍未验收；真实短信和云 OCR 按当前范围暂缓。
+本地 MariaDB 13.0.2 的 V8 迁移与回收 SQL/隔离磁盘流程另见 [正式存储回收](storage-recycling.md)。带旧数据的 V1→V9 完整升级、真实文档版本服务事务/16 路并发，以及 mariadb-dump 与文件存储配套恢复也已在隔离库通过，见 [数据库生命周期验收](database-lifecycle-testing.md)。主要业务事务、提交边界强杀另见 [业务事务验收](business-transaction-testing.md)；独立 Redis 停止期间认证明确 503、恢复后空库旧令牌不复活，见 [依赖恢复验收](dependency-recovery-testing.md)。执行租约和双实例失联恢复见 [租约验收](execution-leases.md)。已有业务数据副本、Redis 持久化与跨主机部署恢复仍需验收；真实短信和云 OCR 按当前范围暂缓。

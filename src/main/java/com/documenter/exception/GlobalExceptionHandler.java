@@ -86,6 +86,19 @@ public class GlobalExceptionHandler {
 	 */
 	@ExceptionHandler(Exception.class)
 	public ResponseEntity<ApiResponse<Object>> handleException(Exception ex) {
+        for (Throwable cause = ex; cause != null; cause = cause.getCause()) {
+            if (cause instanceof org.springframework.dao.ConcurrencyFailureException
+                    || cause instanceof java.sql.SQLException sql &&
+                    (sql.getErrorCode() == 1020 || sql.getErrorCode() == 1205 || sql.getErrorCode() == 1213
+                            || "40001".equals(sql.getSQLState()))) {
+                return ResponseEntity.ok(ApiResponse.error(409, "数据已被其他请求修改，请刷新后重试"));
+            }
+            if (cause.getCause() == cause) break;
+        }
+        if (com.documenter.util.DependencyFailures.unavailable(ex)) {
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                    .body(ApiResponse.error(503, "依赖服务暂不可用，请稍后重试"));
+        }
 		String errorMessage = ex.getMessage();
 		log.error("系统异常: {}", errorMessage, ex);  // 使用日志框架记录异常，包含完整堆栈
 		ApiResponse<Object> apiResponse = ApiResponse.error(500, "服务器发生内部错误，您可以尝试刷新，如果问题依旧，请联系我们");

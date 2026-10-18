@@ -105,6 +105,7 @@ public class FileServiceImpl implements FileService {
             try (InputStream input = new BufferedInputStream(file.getInputStream());
                  DigestInputStream digestInput = new DigestInputStream(input, sha256)) {
                 storageKey = fileStorage.store(digestInput, detected.extension());
+                cleanupOnRollback(userId, storageKey);
             }
             digest = sha256.digest();
 
@@ -172,6 +173,7 @@ public class FileServiceImpl implements FileService {
         String storageKey = null;
         try {
             storageKey = fileStorage.store(content, "docx");
+            cleanupOnRollback(userId, storageKey);
             FileAsset asset = new FileAsset();
             asset.setUserId(userId);
             asset.setOriginalName(safeName);
@@ -313,12 +315,28 @@ public class FileServiceImpl implements FileService {
         return total == null ? 0L : total;
     }
 
+    private void cleanupOnRollback(Long userId, String storageKey) {
+        if (org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()
+                && org.springframework.transaction.support.TransactionSynchronizationManager.isSynchronizationActive()) {
+            org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                    new org.springframework.transaction.support.TransactionSynchronization() {
+                        @Override public void afterCompletion(int status) {
+                            if (status == STATUS_ROLLED_BACK) cleanupOrphan(userId, storageKey);
+                        }
+                    });
+        }
+    }
+
     /** 落盘成功但入库失败时清理磁盘文件，避免产生无法被任何记录引用的孤儿文件。 */
     private void cleanupOrphan(Long userId, String storageKey) {
         if (storageKey == null) {
             return;
         }
-        boolean deleted = fileStorage.delete(storageKey);
-        log.warn("文件保存失败，已清理落盘文件, userId={}, storageKey={}, deleted={}", userId, storageKey, deleted);
+        try {
+            boolean deleted = fileStorage.delete(storageKey);
+            log.warn("文件保存失败，清理落盘文件, userId={}, storageKey={}, deleted={}", userId, storageKey, deleted);
+        } catch (RuntimeException failure) {
+            log.warn("清理未提交文件失败，将由正式回收重试, userId={}, storageKey={}", userId, storageKey, failure);
+        }
     }
 }
