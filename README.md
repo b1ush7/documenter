@@ -23,6 +23,8 @@ mvn spring-boot:run
 
 具体数据库准备、环境变量注入、构建运行、Office 运行时、备份与演示步骤见 [部署说明](docs/deployment.md)。
 
+正式文件可通过 `STORAGE_TYPE=oss` 切换到阿里云 OSS，配置和服务器启动示例见 [OSS 部署说明](docs/oss-deployment.md)。预览和转换仍使用本地临时目录。
+
 ## 项目文档
 
 - [开发 TODO 与真实验收边界](TODO.md)

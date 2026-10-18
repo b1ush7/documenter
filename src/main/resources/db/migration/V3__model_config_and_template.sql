@@ -1,7 +1,7 @@
 -- =============================================================================
 -- 模型配置与公共模板（TODO 3.2：管理员可管理公共模板和模型配置；模型密钥不得返回前端）
 --
--- 目标库：MariaDB 10.6+ / 11.x（沿用 utf8mb4_uca1400_ai_ci 排序规则）
+-- 目标库：MariaDB 10.6+ / 11.x（沿用 utf8mb4_0900_ai_ci 排序规则）
 -- =============================================================================
 
 -- -----------------------------------------------------------------------------
@@ -14,6 +14,7 @@
 -- api_key_hint 只保存密钥末尾若干位，仅用于前端显示「已配置哪把密钥」，
 -- 不足以还原密钥。
 -- -----------------------------------------------------------------------------
+USE documenter;
 CREATE TABLE `model_config`
 (
     `id`                  BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
@@ -46,7 +47,7 @@ CREATE TABLE `model_config`
         CHECK (`temperature` IS NULL OR (`temperature` >= 0 AND `temperature` <= 2))
 )
     COMMENT ='模型配置'
-    COLLATE = 'utf8mb4_uca1400_ai_ci'
+    COLLATE = 'utf8mb4_0900_ai_ci'
     ENGINE = InnoDB;
 
 -- -----------------------------------------------------------------------------
@@ -80,5 +81,5 @@ CREATE TABLE `doc_template`
     INDEX `idx_doc_template_enabled` (`enabled`, `category`) USING BTREE
 )
     COMMENT ='公共模板'
-    COLLATE = 'utf8mb4_uca1400_ai_ci'
+    COLLATE = 'utf8mb4_0900_ai_ci'
     ENGINE = InnoDB;

@@ -43,4 +43,7 @@ public interface FileStorage {
      * @throws UnsupportedOperationException 非本地存储实现不支持
      */
     Path resolvePath(String storageKey);
+
+    /** 预览、转换和上传缓冲使用的本地临时目录，不存放正式文件。 */
+    Path tempDirectory();
 }

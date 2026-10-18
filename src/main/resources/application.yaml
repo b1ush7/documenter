@@ -3,7 +3,7 @@ spring:
     name: documenter
   profiles:
     active:
-      - dev
+      - service
   # 数据库迁移（TODO 3.4）：启动时自动执行 src/main/resources/db/migration 下未执行的脚本
   flyway:
     enabled: true
@@ -42,9 +42,17 @@ res:
     max-attempts: ${VERIFICATION_MAX_ATTEMPTS:5}
     # true 时验证码写入服务端日志而不真正发送；上线前必须改为 false 并接入真实渠道
     mock-enabled: ${VERIFICATION_MOCK_ENABLED:true}
-  # 文件存储（TODO 3.3）。各环境只需覆盖 local.root / local.temp 两个路径。
+  # 正式文件支持 local / oss；转换、预览和上传缓冲始终需要本地可写临时目录。
   storage:
-    type: local
+    type: ${STORAGE_TYPE:local}
+    oss:
+      endpoint: ${OSS_ENDPOINT:}
+      region: ${OSS_REGION:}
+      bucket: ${OSS_BUCKET:}
+      access-key-id: ${OSS_ACCESS_KEY_ID:}
+      access-key-secret: ${OSS_ACCESS_KEY_SECRET:}
+      security-token: ${OSS_SECURITY_TOKEN:}
+      prefix: ${OSS_PREFIX:documenter}
     # 正式存储回收默认关闭且仅预演；活跃文件及模板的全部历史版本永久保留。
     recycle:
       enabled: ${STORAGE_RECYCLE_ENABLED:false}
@@ -140,7 +148,7 @@ res:
     # Office 渲染后端：none / kit
     # libreoffice 使用独立 Office 进程及 UNO Python；kit 为已有 Node CLI 后端。
     # PDF 与图片预览不需要它；DOCX/XLSX 版式预览与兼容性验收需要。
-    office-backend: ${PREVIEW_OFFICE_BACKEND:none}
+    office-backend: ${PREVIEW_OFFICE_BACKEND:kit}
     office-executable: ${PREVIEW_OFFICE_EXECUTABLE:}
     office-python: ${PREVIEW_OFFICE_PYTHON:}
     office-kit-node: ${PREVIEW_OFFICE_KIT_NODE:}

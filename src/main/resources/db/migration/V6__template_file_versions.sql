@@ -23,7 +23,7 @@ CREATE TABLE doc_template_version
     )
 )
     COMMENT = '公共模板文件历史；不包含变量、分类及启用状态'
-    COLLATE = 'utf8mb4_uca1400_ai_ci'
+    COLLATE = 'utf8mb4_0900_ai_ci'
     ENGINE = InnoDB;
 
 -- Only the current indexed file is known. Older unindexed disk files cannot be reconstructed safely.

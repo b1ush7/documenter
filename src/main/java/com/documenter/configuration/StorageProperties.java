@@ -16,8 +16,23 @@ import java.time.Duration;
 @ConfigurationProperties(prefix = "res.storage")
 public class StorageProperties {
 
-    /** 存储实现类型，目前只实现 local。 */
+    /** 正式文件存储：local / oss。临时文件始终使用本地目录。 */
     private String type = "local";
+
+    private Oss oss = new Oss();
+
+    @Getter
+    @Setter
+    public static class Oss {
+        private String endpoint;
+        private String region;
+        private String bucket;
+        private String accessKeyId;
+        private String accessKeySecret;
+        /** 可选 STS Token；到期后需替换凭据并重启。 */
+        private String securityToken;
+        private String prefix = "documenter";
+    }
 
     private Local local = new Local();
 

@@ -1,6 +1,7 @@
 package com.documenter.service.impl;
 
 import com.documenter.configuration.StorageProperties;
+import com.documenter.service.FileStorage;
 import com.documenter.exception.BusinessException;
 import com.documenter.mapper.StorageRecycleMapper;
 import com.documenter.vo.StorageRecycleReport;
@@ -29,11 +30,11 @@ import java.util.regex.Pattern;
 public class StorageRecycleService {
     private static final Pattern MANAGED_KEY = Pattern.compile(
             "\\d{4}/\\d{2}/\\d{2}/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\.[a-z0-9]{1,10}");
-    private final LocalFileStorage storage;
+    private final FileStorage storage;
     private final StorageProperties properties;
     private final StorageRecycleMapper mapper;
 
-    public StorageRecycleService(LocalFileStorage storage, StorageProperties properties, StorageRecycleMapper mapper) {
+    public StorageRecycleService(FileStorage storage, StorageProperties properties, StorageRecycleMapper mapper) {
         this.storage = storage;
         this.properties = properties;
         this.mapper = mapper;
@@ -41,6 +42,7 @@ public class StorageRecycleService {
 
     @Scheduled(fixedDelayString = "${res.storage.recycle.interval:24h}")
     public void scheduledRecycle() {
+        if (!(storage instanceof LocalFileStorage)) return;
         if (!properties.getRecycle().isEnabled()) return;
         try {
             var report = recycle(properties.getRecycle().isDryRun());
@@ -52,6 +54,9 @@ public class StorageRecycleService {
     }
 
     public StorageRecycleReport recycle(boolean dryRun) {
+        if (!(storage instanceof LocalFileStorage)) {
+            throw new BusinessException(409, "OSS 存储暂不支持正式文件永久回收，历史版本继续保留");
+        }
         var policy = properties.getRecycle();
         validate(policy);
         if (!dryRun && (!policy.isEnabled() || policy.isDryRun())) {

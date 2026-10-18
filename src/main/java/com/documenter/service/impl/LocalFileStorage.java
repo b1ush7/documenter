@@ -5,6 +5,7 @@ import com.documenter.exception.BusinessException;
 import com.documenter.service.FileStorage;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -32,6 +33,7 @@ import java.util.UUID;
  */
 @Slf4j
 @Component
+@ConditionalOnProperty(prefix = "res.storage", name = "type", havingValue = "local", matchIfMissing = true)
 public class LocalFileStorage implements FileStorage {
 
     private static final DateTimeFormatter DATE_DIR = DateTimeFormatter.ofPattern("yyyy/MM/dd");
@@ -160,6 +162,7 @@ public class LocalFileStorage implements FileStorage {
     }
 
     /** 临时目录，供后续转换流程隔离使用。 */
+    @Override
     public Path tempDirectory() {
         return temp;
     }

@@ -17,5 +17,5 @@ CREATE TABLE ocr_correction
     CONSTRAINT ck_ocr_correction_version_positive CHECK (version_no > 0)
 )
     COMMENT = 'OCR 逐页人工校正文本；不覆盖源文件，不创建新版本'
-    COLLATE = 'utf8mb4_uca1400_ai_ci'
+    COLLATE = 'utf8mb4_0900_ai_ci'
     ENGINE = InnoDB;

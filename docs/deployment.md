@@ -1,5 +1,7 @@
 # 本地部署与演示
 
+阿里云 OSS 正式文件存储配置见 [OSS 部署说明](oss-deployment.md)。当前本机 service 配置默认使用 OSS，需设置 Bucket、Endpoint、地域与访问凭据；本地磁盘存储可用 `STORAGE_TYPE=local` 显式选择。
+
 本文对应当前单实例后端。命令以 PowerShell 为例；本地 MariaDB 完整迁移、版本事务/并发和配套备份恢复已在随机隔离库验证，见 [数据库生命周期验收](database-lifecycle-testing.md)。完整运行实例的 HTTP 闭环、单实例重启、受控故障和可执行 JAR 强杀后的持久化状态恢复也已通过，见 [完整应用验收](application-flow-testing.md)。正式部署环境、Office 版式和真实模型效果仍需单独验收。默认配置用于本地演示，不能作为已完成生产验收的证明。
 
 ## 1. 运行依赖和数据库

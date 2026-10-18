@@ -1,4 +1,5 @@
 -- 为每个版本保存格式；此前同一文件的各版本格式一致，按文件元数据回填。
+USE documenter;
 ALTER TABLE document_version
     ADD COLUMN content_type VARCHAR(128) NULL AFTER storage_key,
     ADD COLUMN extension VARCHAR(16) NULL AFTER content_type;
