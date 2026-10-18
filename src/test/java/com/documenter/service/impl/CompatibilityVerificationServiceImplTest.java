@@ -1,6 +1,7 @@
 package com.documenter.service.impl;
 
 import com.documenter.component.LibreOfficeKitRenderService;
+import com.documenter.component.LibreOfficeRenderService;
 import com.documenter.configuration.PreviewProperties;
 import com.documenter.entity.FileAsset;
 import com.documenter.exception.BusinessException;
@@ -294,7 +295,7 @@ class CompatibilityVerificationServiceImplTest {
      */
     @Test
     void generatedDocumentActuallyRendersInOfficeBackend() throws IOException {
-        LibreOfficeKitRenderService renderService = kitRenderService();
+        OfficeRenderService renderService = kitRenderService();
         Assumptions.assumeTrue(renderService.available(),
                 "Office kit 不可用，跳过真实渲染验收");
 
@@ -367,8 +368,16 @@ class CompatibilityVerificationServiceImplTest {
     }
 
     /** 按与生产配置相同的方式构造 kit 后端，确保验收走的是真实链路。 */
-    private static LibreOfficeKitRenderService kitRenderService() {
+    private static OfficeRenderService kitRenderService() {
         PreviewProperties properties = new PreviewProperties();
+        if ("true".equals(System.getenv("DOCUMENTER_OFFICE_TEST_ENABLED"))) {
+            properties.setOfficeBackend("libreoffice");
+            properties.setOfficeExecutable(System.getenv("DOCUMENTER_OFFICE_EXECUTABLE"));
+            properties.setOfficePython(System.getenv("DOCUMENTER_OFFICE_PYTHON"));
+            var nativeOffice = new LibreOfficeRenderService(properties);
+            assertTrue(nativeOffice.available(), "已显式启用 Office 验收，但运行时不可用");
+            return nativeOffice;
+        }
         properties.setOfficeBackend("kit");
         properties.setOfficeTimeout(java.time.Duration.ofSeconds(120));
         properties.setOfficeMaxInputBytes(50L * 1024 * 1024);
@@ -402,7 +411,7 @@ class CompatibilityVerificationServiceImplTest {
      */
     @Test
     void chineseDocumentRendersAndMissingFontsAreReported() throws IOException {
-        LibreOfficeKitRenderService renderService = kitRenderService();
+        OfficeRenderService renderService = kitRenderService();
         Assumptions.assumeTrue(renderService.available(),
                 "Office kit 不可用，跳过中文渲染验收");
 

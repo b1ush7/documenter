@@ -60,6 +60,8 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 
 业务异常和参数校验异常当前通常仍返回 HTTP `200`，调用方必须同时判断响应体中的 `code`。认证入口直接拒绝请求时会返回 HTTP `401`，权限不足时返回 HTTP `403`。
 
+容器 multipart 上传超限返回 HTTP `413` 且响应体 `code=413`；畸形 multipart 或缺少必填文件返回 HTTP `400` 且 `code=400`，均保持统一 JSON 错误体。
+
 常见业务码：
 
 | code | 含义 |
@@ -195,6 +197,7 @@ X-Request-ID: 1f82ac53ac0f45e8a95e9e8a429f0d31
 | 管理员 | GET | `/admin/tasks/{taskId}` | 管理员 | 任意用户任务与步骤详情 |
 | 管理员 | POST | `/admin/tasks/{taskId}/cancel` | 管理员 | 取消任意用户任务 |
 | 管理员 | POST | `/admin/tasks/{taskId}/retry` | 管理员 | 重试任意用户任务 |
+| 管理员 | POST | `/admin/storage/recycle?dryRun=true` | 管理员 | 预演或执行正式存储回收 |
 
 ## 2. 用户与认证
 
@@ -566,6 +569,10 @@ POST /file/10/versions/2/restore?expectVersion=5
 | `pages` | 否 | PDF 页码数组，最多 50 项且不能重复；为空时识别全部页，超过部署页数上限返回 413；图片只能传 `[1]` 或省略 |
 | `dpi` | 否 | PDF 扫描页渲染 DPI，100～部署上限，默认 200；图片始终使用原始像素 |
 | `enhance` | 否 | true 时转灰度并按 1%～99% 分位拉伸对比度；尺寸、坐标和区域不变 |
+| `rotationDegrees` | 否 | 默认 0，支持顺时针 0/90/180/270 度；在所选区域内旋转，行和单元格框会映射回完整原图像素坐标 |
+| `lowLight` | 否 | 默认 false；白底灰度后以 Gamma 曲线提亮暗部 |
+| `denoise` | 否 | 默认 false；3×3 中值滤波去除轻度散点噪声 |
+| `sharpen` | 否 | 默认 false；轻度反差锐化，不能保证恢复严重失焦或运动模糊文字 |
 | `region` | 否 | 相对实际渲染页面或原始图片的矩形，`x/y ≥ 0`、`width/height ≥ 1` 且不能越界；同一请求的所有页使用相同区域 |
 
 接口支持 PDF、PNG 和 JPEG 的明确版本。PDF 中已有原生文字的页面直接复用 PDFBox 结果，`source=NATIVE` 且不调用云服务；无原生文字页渲染后发送到云端，图片页直接编码 PNG 发送。响应统一返回 `OcrResult`：
@@ -1497,7 +1504,7 @@ ADD 在目标段落末尾添加脚注引用，并创建独立 footnote part；UP
 | `title` | 否 | 最多 100 字符，默认“目录”；空字符串表示不添加标题段 |
 | `instruction` | 否 | 最多 2000 字符，写入版本说明 |
 
-文档没有 TOC 时插入独立复杂域和占位提示；已有 TOC 时不重复插入，只设置 `w:updateFields` 请求办公软件下次打开时刷新已有域和页码。服务端不会直接计算标题页码，也不会把静态文字冒充可更新目录。真实 Word/LibreOffice 的自动更新和最终分页仍需人工验收。
+文档没有 TOC 时插入独立复杂域和占位提示；已有 TOC 时不重复插入，只设置 `w:updateFields` 请求办公软件下次打开时刷新已有域和页码。编辑保存本身不计算标题页码。启用 `libreoffice` 后端后，PDF 导出与预览会在只读副本中用 Writer 更新目录与最终页码，不覆盖源 DOCX；本机固定中文样本已实跑，见 [Office 验收](docs/office-rendering-testing.md)。Microsoft Word 和业务模板的版式仍需对应环境验收。
 
 ## 5. 异步任务
 
@@ -1506,6 +1513,8 @@ ADD 在目标段落末尾添加脚注引用，并创建独立 footnote part；UP
 IMAGE_GEN 已停用：不接受新建或重试（业务码 400），历史记录、步骤、列表筛选和取消仍保留。旧排队记录在执行/重启恢复时以 FAILED / TASK_TYPE_DISABLED 收尾，不调用处理器或自动重试，也不改写已终态的记录。图片基础操作直接使用第 3.20 节接口，无需异步生成任务。数据库中的历史枚举和记录继续保留，不做删除迁移。
 
 调度与实际处理使用独立的有界线程池，`res.task` 的线程数和队列容量分别应用于两个池。队列满或执行器关闭时，不在请求线程中执行耗时处理，而是将任务记录为 `FAILED`，`errorCode=QUEUE_FULL`，并提示稍后通过现有重试入口重试。若提交时已发生拒绝，创建任务响应中的任务状态也会反映该失败；接受入队后的状态变化通过任务查询获取。
+
+可选执行租约默认关闭。启用 `TASK_CLUSTER_ENABLED=true` 后，失联或过期执行的任务及运行中步骤变为 `FAILED`，任务错误码为 `LEASE_EXPIRED`；运行中任务不自动重放，需通过现有重试入口创建新任务。过期 AI 回复变为 `FAILED/NONE`，重新发送需要新的幂等键，迟到执行者写入返回业务码 `409`。PENDING 由维护器分批重新入队，恢复扫描遇到队列满时保留 PENDING，下轮继续；普通提交的 QUEUE_FULL 规则不变。模式切换和共享部署要求见 [执行租约](docs/execution-leases.md)。
 
 自动重试仅针对非业务处理异常，最多重试 `maxRetry` 次；扫描页需 OCR、版本冲突、输入非法等 `BusinessException` 以 `BUSINESS_ERROR` 立即终止，超时、取消、执行线程中断和队列拒绝也不自动重试。自动重试沿用同一任务 ID 与尝试序号，已写出的版本会被幂等复用。步骤号接续同一任务的历史步骤，失败现场保留。取消任务保留实际进度，成功任务才以 100% 收尾。
 
@@ -1914,9 +1923,15 @@ variables 是 **JSON 数组字符串**，null、空白或 JSON null 代表无变
 
 changeType 为 BASELINE（迁移回填）、CREATE、REPLACE 或 RESTORE；只有 RESTORE 的 restoredFromVersion 有值。出参不包含 storageKey 或变量定义。创建/替换文件会在同一事务中写入不可变历史索引；恢复复用被选中历史文件，新增当前版本号加一的 RESTORE 记录，不覆盖原记录、不复制文件。跨格式恢复保留历史格式。恢复与替换都通过 SQL 版本号乐观锁拒绝并发覆盖；冲突返回业务码 `409`，不增加成功历史记录。用旧 expectVersion 重发恢复也会返回 409，不会再追加版本，客户端应先刷新状态。
 
-模板或该模板下的版本不存在返回 `404`，无效版本号/分页/expectVersion 返回 `400`，历史文件缺失或元数据不完整返回 `500`。历史下载和恢复写审计。删除模板后，历史接口也返回 404；当前删除仍保留底层内容和历史索引，不提供已删除模板恢复或正式存储回收。
+模板或该模板下的版本不存在返回 `404`，无效版本号/分页/expectVersion 返回 `400`，历史文件缺失或元数据不完整返回 `500`。历史下载和恢复写审计。删除模板后，历史接口也返回 404；模板底层内容和历史索引长期保留，不提供已删除模板恢复；正式存储回收保护这些模板历史引用。
 
 V6 迁移只为有内容且 versionNo 大于 0 的当前模板回填一条 BASELINE，保留已有版本号，createTime 表示建立索引的时间；版本号小于当前号的旧文件没有可靠索引，不能据磁盘文件推断或补造历史。普通用户的 DOCX 变量填充见第 4.2 节；临时目录清理任务不处理这些正式内容。
+
+### 7.14 正式存储回收
+
+`POST /admin/storage/recycle?dryRun=true`，仅 ADMIN；省略参数也只预演。响应为 `StorageRecycleReport`，包含 `dryRun`、`expiredFiles`、`scannedFiles`、`deletedBlobs`、`deletedBytes`、`truncated` 和本批 `entries[{storageKey,sizeBytes,outcome}]`。存储标识只在此管理员入口返回，不提供给普通用户。
+
+默认关闭实际回收、默认仅预演。实际执行需同时配置 `STORAGE_RECYCLE_ENABLED=true`、`STORAGE_RECYCLE_DRY_RUN=false`，并显式请求 `dryRun=false`，否则返回业务码 409。默认软删除保留 30 天、孤儿宽限 24 小时；活跃文件全部版本和模板全部历史长期保留。过期文件先写回收墓碑，再删除无保护引用的物理文件，用户及管理员访问已回收文件均返回 404。预演不写业务墓碑、不删除文件。并发回收返回 409；无效保留配置返回 400。详见 [正式回收规则与部署验证](docs/storage-recycling.md)。
 
 ## 8. AI 回复与确认编辑
 

@@ -48,6 +48,51 @@ class OcrServiceImplTest {
             versions, engine, properties, storage);
 
     @Test
+    void preprocessesRegionAndMapsRotatedLinesAndTablesToOriginalPixels() throws Exception {
+        when(versions.downloadVersion(USER_ID, FILE_ID, VERSION))
+                .thenReturn(download(png(), "png", "image/png"));
+        when(engine.available()).thenReturn(true);
+        when(engine.name()).thenReturn("cloud-vision");
+        when(engine.recognize(any(byte[].class), any())).thenAnswer(invocation -> {
+            var input = ImageIO.read(new java.io.ByteArrayInputStream(invocation.getArgument(0)));
+            assertEquals(12, input.getWidth());
+            assertEquals(30, input.getHeight());
+            return new OcrEngine.Result(List.of(new OcrEngine.Line("旋转文字", 2, 3, 5, 8, 90, false)),
+                    List.of(new OcrEngine.Table(1, 1, 90, false, List.of(
+                            new OcrEngine.Cell(0, 0, 1, 1, "单元格", 2, 3, 5, 8, 90, false)))), false);
+        });
+        var request = new OcrRequestDTO();
+        request.setRotationDegrees(90);
+        request.setLowLight(true);
+        request.setDenoise(true);
+        request.setSharpen(true);
+        var region = new OcrRequestDTO.Region();
+        region.setX(5); region.setY(4); region.setWidth(30); region.setHeight(12);
+        request.setRegion(region);
+        var page = service.recognize(USER_ID, FILE_ID, VERSION, request).pages().getFirst();
+        var line = page.lines().getFirst();
+        assertEquals(8, line.left());
+        assertEquals(9, line.top());
+        assertEquals(8, line.width());
+        assertEquals(5, line.height());
+        var cell = page.tables().getFirst().cells().getFirst();
+        assertEquals(line.left(), cell.left());
+        assertEquals(line.top(), cell.top());
+        assertEquals(line.width(), cell.width());
+        assertEquals(line.height(), cell.height());
+        assertEquals(30, page.region().width());
+    }
+
+    @Test
+    void invalidRotationFailsBeforeReadingOrCallingCloud() {
+        var request = new OcrRequestDTO();
+        request.setRotationDegrees(-90);
+        assertThrows(BusinessException.class, () -> service.recognize(USER_ID, FILE_ID, VERSION, request));
+        verify(versions, never()).downloadVersion(any(), any(), any());
+        verify(engine, never()).recognize(any(), any());
+    }
+
+    @Test
     void recognizesImageAndReturnsCoordinatesAndReviewFlag() throws Exception {
         when(versions.downloadVersion(USER_ID, FILE_ID, VERSION))
                 .thenReturn(download(png(), "png", "image/png"));

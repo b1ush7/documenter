@@ -6,6 +6,10 @@
 
 ## 本地开始
 
+当前阶段验证码和 OCR 不接入远程服务：保持 `VERIFICATION_MOCK_ENABLED=true`、`OCR_ENABLED=false`。验证码只走本地 Mock，云 OCR 不发送页面；PDF 原生文本提取及本地图片预处理实现保留。真实短信/OCR 供应商选择与质量验收暂缓，后续明确启用时再配置。
+
+Excel 保留已有基础编辑、支持的公式与基础图表；复杂公式引擎扩展不在当前交付范围，动态数组等不支持能力继续返回明确提示。
+
 1. 准备 JDK 21、Maven、支持迁移脚本排序规则的 MariaDB 和 Redis。
 2. 按 [.env.example](.env.example) 设置进程环境变量；Spring Boot **不会自动读取 .env**。
 3. 创建专用空数据库，运行测试并启动应用：
@@ -27,5 +31,12 @@ mvn spring-boot:run
 - [前端规划](docs/frontend-plan.md)
 - [安全与专用 Redis 集成测试](docs/security-testing.md)
 - [固定验收样本与人工检查步骤](docs/acceptance-samples.md)
+- [真实 LibreOffice 排版、预览与导出验收](docs/office-rendering-testing.md)
+- [OCR 图片预处理](docs/ocr-preprocessing.md)
+- [正式文件回收与保留规则](docs/storage-recycling.md)
+- [数据库升级、版本事务与备份恢复验收](docs/database-lifecycle-testing.md)
+- [完整 HTTP 流程、重启与受控故障验收](docs/application-flow-testing.md)
+- [大文件、并发传输与双应用实例验收](docs/load-and-multi-instance-testing.md)
+- [可选执行租约、多实例失联恢复与写入隔离](docs/execution-leases.md)
 
 离线依赖已缓存时可用 `mvn -o test`。Redis 和 Office 集成测试有独立前置条件，跳过不等于验收通过。

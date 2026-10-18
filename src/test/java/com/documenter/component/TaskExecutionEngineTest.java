@@ -28,6 +28,13 @@ import static org.mockito.Mockito.*;
 
 class TaskExecutionEngineTest {
 
+    @Test
+    void recoveryQueueBackpressureKeepsPendingTaskAvailableForNextScan() {
+        doThrow(new RejectedExecutionException("controlled saturation")).when(coordinators).execute(any(Runnable.class));
+        assertFalse(engine.submitRecovered(10L));
+        verify(tasks, never()).finish(anyLong(), anyString(), anyInt(), any(), any(), anyList());
+    }
+
     private final ProcessingTaskMapper tasks = mock(ProcessingTaskMapper.class);
     private final TaskStepMapper steps = mock(TaskStepMapper.class);
     private final ThreadPoolTaskExecutor workers = mock(ThreadPoolTaskExecutor.class);

@@ -1718,6 +1718,7 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         for (int rowIndex = startRow; rowIndex <= endRow; rowIndex++) {
             XWPFTableRow row = table.getRow(rowIndex);
             if (width > 1) {
+                mergePreferredWidths(row, startColumn, endColumn);
                 setGridSpan(row.getTableCells().get(startColumn), width);
                 for (int columnIndex = endColumn; columnIndex > startColumn; columnIndex--) {
                     row.removeCell(columnIndex);
@@ -1728,6 +1729,20 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                         rowIndex == startRow ? STMerge.RESTART : STMerge.CONTINUE);
             }
         }
+    }
+
+    /** 合并后保留原列宽总和，否则办公软件可能按原单格宽度重新分配整行。 */
+    private static void mergePreferredWidths(XWPFTableRow row, int start, int end) {
+        TableWidthType type = safeCellWidthType(row.getCell(start));
+        if (type != TableWidthType.DXA && type != TableWidthType.PCT) return;
+        long sum = 0;
+        for (int column = start; column <= end; column++) {
+            var cell = row.getCell(column);
+            int width = safeCellWidth(cell);
+            if (safeCellWidthType(cell) != type || width <= 0) return;
+            sum += width;
+        }
+        if (sum <= Integer.MAX_VALUE) cellProperties(row.getCell(start)).getTcW().setW(BigInteger.valueOf(sum));
     }
 
     /**

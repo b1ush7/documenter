@@ -18,13 +18,13 @@ import com.documenter.vo.FileDownload;
 import com.documenter.vo.VersionVO;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pdfbox.Loader;
+import org.apache.pdfbox.contentstream.PDFGraphicsStreamEngine;
 import org.apache.pdfbox.cos.COSBase;
+import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
-import org.apache.pdfbox.pdmodel.PDResources;
-import org.apache.pdfbox.pdmodel.graphics.PDXObject;
 import org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject;
-import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
+import org.apache.pdfbox.pdmodel.graphics.image.PDImage;
 import org.apache.pdfbox.rendering.ImageType;
 import org.apache.pdfbox.rendering.PDFRenderer;
 import org.apache.pdfbox.text.PDFTextStripper;
@@ -115,6 +115,14 @@ public class PdfToDocxServiceImpl implements PdfToDocxService {
         }
 
         String storageKey = storage.store(docx, "docx");
+        if (org.springframework.transaction.support.TransactionSynchronizationManager.isSynchronizationActive()) {
+            org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                    new org.springframework.transaction.support.TransactionSynchronization() {
+                        @Override public void afterCompletion(int status) {
+                            if (status == STATUS_ROLLED_BACK) storage.delete(storageKey);
+                        }
+                    });
+        }
         DocumentVersion created = null;
         try {
             String modeLabel = request.getMode() == PdfConversionMode.LAYOUT ? "版式优先" : "可编辑优先";
@@ -166,10 +174,10 @@ public class PdfToDocxServiceImpl implements PdfToDocxService {
                     Math.min(properties.getPdf().getMaxConversionImagePixelsTotal(),
                             Math.max(0L, properties.getUpload().getMaxImagePixels())));
             List<Integer> scannedPages = new ArrayList<>();
-            Set<COSBase> visitedImages = new HashSet<>();
             boolean wrotePage = false;
             for (int pageIndex = 0; pageIndex < pageCount; pageIndex++) {
                 PDPage page = pdf.getPage(pageIndex);
+                PageImages images = extractImages(page);
                 PageText text = extractPage(pdf, pageIndex + 1);
                 int pageChars = text.text.codePointCount(0, text.text.length());
                 if (pageChars > properties.getPdf().getMaxExtractedCharsPerPage()) {
@@ -181,7 +189,7 @@ public class PdfToDocxServiceImpl implements PdfToDocxService {
                     throw new BusinessException(413, "PDF 提取文字总量超过转换限制");
                 }
                 if (text.lines.isEmpty()) {
-                    if (countImages(page.getResources(), new HashSet<>()) > 0) {
+                    if (!images.images.isEmpty()) {
                         if (ocrLanguage == null) {
                             scannedPages.add(pageIndex + 1);
                         } else {
@@ -213,7 +221,6 @@ public class PdfToDocxServiceImpl implements PdfToDocxService {
                     docx.createParagraph().setPageBreak(true);
                 }
                 totalLines += appendTextPage(docx, text.lines, page, mode);
-                PageImages images = extractImages(page.getResources(), visitedImages);
                 totalImages += appendImages(docx, images, page, imageBudget);
                 wrotePage = true;
             }
@@ -323,7 +330,8 @@ public class PdfToDocxServiceImpl implements PdfToDocxService {
     private int appendImages(XWPFDocument docx, PageImages images, PDPage page,
                              ImageBudget budget) {
         int inserted = 0;
-        for (PDImageXObject image : images.images) {
+        for (PaintedImage painted : images.images) {
+            PDImage image = painted.image;
             if (budget.remainingImages <= 0) {
                 break;
             }
@@ -343,8 +351,8 @@ public class PdfToDocxServiceImpl implements PdfToDocxService {
                         continue;
                     }
                     float availableWidth = (float) page.getCropBox().getWidth() - 2 * POINTS_PER_INCH;
-                    float width = Math.max(1f, Math.min(availableWidth, image.getWidth()));
-                    float height = width * image.getHeight() / Math.max(1, image.getWidth());
+                    float width = Math.max(1f, Math.min(availableWidth, painted.width));
+                    float height = width * painted.height / Math.max(1, painted.width);
                     XWPFParagraph paragraph = docx.createParagraph();
                     paragraph.setAlignment(ParagraphAlignment.CENTER);
                     XWPFRun run = paragraph.createRun();
@@ -364,47 +372,43 @@ public class PdfToDocxServiceImpl implements PdfToDocxService {
         return inserted;
     }
 
-    private static PageImages extractImages(PDResources resources, Set<COSBase> visited) throws IOException {
-        List<PDImageXObject> images = new ArrayList<>();
-        collectImages(resources, visited, images);
-        return new PageImages(images);
+    private PageImages extractImages(PDPage page) throws IOException {
+        // 资源字典可能由多页共享，只有内容流实际绘制的图片才属于当前页面。
+        var collector = new PaintedImageCollector(page, Math.max(1, Math.min(1000, properties.getPdf().getMaxConversionImages())));
+        collector.processPage(page);
+        return new PageImages(List.copyOf(collector.images));
     }
 
-    private static void collectImages(PDResources resources, Set<COSBase> visited,
-                                      List<PDImageXObject> images) throws IOException {
-        if (resources == null) {
-            return;
-        }
-        for (var name : resources.getXObjectNames()) {
-            PDXObject object = resources.getXObject(name);
-            if (object == null || !visited.add(object.getCOSObject())) {
-                continue;
-            }
-            if (object instanceof PDImageXObject image) {
-                images.add(image);
-            } else if (object instanceof PDFormXObject form) {
-                collectImages(form.getResources(), visited, images);
+    private static final class PaintedImageCollector extends PDFGraphicsStreamEngine {
+        private final List<PaintedImage> images = new ArrayList<>();
+        private final Set<COSBase> activeForms = new HashSet<>();
+        private final int limit;
+        private java.awt.geom.Point2D current = new java.awt.geom.Point2D.Float();
+        PaintedImageCollector(PDPage page, int limit) { super(page); this.limit = limit; }
+        @Override public void drawImage(PDImage image) {
+            var transform = getGraphicsState().getCurrentTransformationMatrix();
+            float width = (float) Math.hypot(transform.getScaleX(), transform.getShearY());
+            float height = (float) Math.hypot(transform.getShearX(), transform.getScaleY());
+            if (images.size() < limit && Float.isFinite(width) && Float.isFinite(height) && width > 0 && height > 0) {
+                images.add(new PaintedImage(image, width, height));
             }
         }
-    }
-
-    private static int countImages(PDResources resources, Set<COSBase> visited) throws IOException {
-        if (resources == null) {
-            return 0;
+        @Override public void showForm(PDFormXObject form) throws IOException {
+            if (activeForms.size() >= 32 || !activeForms.add(form.getCOSObject())) return;
+            try { super.showForm(form); } finally { activeForms.remove(form.getCOSObject()); }
         }
-        int count = 0;
-        for (var name : resources.getXObjectNames()) {
-            PDXObject object = resources.getXObject(name);
-            if (object == null || !visited.add(object.getCOSObject())) {
-                continue;
-            }
-            if (object instanceof PDImageXObject) {
-                count++;
-            } else if (object instanceof PDFormXObject form) {
-                count += countImages(form.getResources(), visited);
-            }
-        }
-        return count;
+        @Override public void appendRectangle(java.awt.geom.Point2D a, java.awt.geom.Point2D b, java.awt.geom.Point2D c, java.awt.geom.Point2D d) { current = a; }
+        @Override public void moveTo(float x, float y) { current = new java.awt.geom.Point2D.Float(x, y); }
+        @Override public void lineTo(float x, float y) { moveTo(x, y); }
+        @Override public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) { moveTo(x3, y3); }
+        @Override public java.awt.geom.Point2D getCurrentPoint() { return current; }
+        @Override public void clip(int rule) {}
+        @Override public void closePath() {}
+        @Override public void endPath() {}
+        @Override public void strokePath() {}
+        @Override public void fillPath(int rule) {}
+        @Override public void fillAndStrokePath(int rule) {}
+        @Override public void shadingFill(COSName name) {}
     }
 
     private static String normalizeFont(String name) {
@@ -466,7 +470,8 @@ public class PdfToDocxServiceImpl implements PdfToDocxService {
     }
 
     private record PageText(String text, List<PdfLine> lines) { }
-    private record PageImages(List<PDImageXObject> images) { }
+    private record PaintedImage(PDImage image, float width, float height) { }
+    private record PageImages(List<PaintedImage> images) { }
     private record PdfLine(String text, float x, float y, float fontSize,
                            boolean bold, boolean italic, String fontName) { }
     private static final class ImageBudget {

@@ -43,15 +43,27 @@ public class TaskExecutorProperties {
 
     /**
      * 是否在启动时把中断的 RUNNING 任务标记为失败（TODO 3.4「重启恢复」）。
-     * 默认开启；多实例部署时只应有一个实例执行，或改用分布式锁。
+     * 默认开启，仅适用于未启用 cluster 的单实例。cluster 开启后跳过本启动恢复，改为扫描过期租约。
      */
     private boolean recoverOnStartup = true;
 
     /**
      * 是否在启动时重新入队 PENDING 任务。
      *
-     * <p>默认关闭：P0 阶段任务处理器还是占位实现，重新入队没有实际意义；
-     * 接入真实处理器后开启，否则重启前排队中的任务会永远停在 PENDING。
+     * <p>属性类默认关闭；部署 YAML 对单实例默认开启。该开关仅在 recoverOnStartup 开启时生效。
      */
     private boolean requeuePendingOnStartup = false;
+
+    private Cluster cluster = new Cluster();
+
+    @Getter
+    @Setter
+    public static class Cluster {
+        /** 所有共享数据库的实例必须采用一致模式；切换前停止旧执行者。 */
+        private boolean enabled;
+        private Duration heartbeat = Duration.ofSeconds(10);
+        private Duration leaseDuration = Duration.ofSeconds(60);
+        private int batchSize = 100;
+        private boolean requeuePending = true;
+    }
 }

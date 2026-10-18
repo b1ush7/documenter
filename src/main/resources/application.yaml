@@ -45,6 +45,14 @@ res:
   # 文件存储（TODO 3.3）。各环境只需覆盖 local.root / local.temp 两个路径。
   storage:
     type: local
+    # 正式存储回收默认关闭且仅预演；活跃文件及模板的全部历史版本永久保留。
+    recycle:
+      enabled: ${STORAGE_RECYCLE_ENABLED:false}
+      dry-run: ${STORAGE_RECYCLE_DRY_RUN:true}
+      interval: ${STORAGE_RECYCLE_INTERVAL:24h}
+      deleted-retention: ${STORAGE_DELETED_RETENTION:720h}
+      orphan-grace: ${STORAGE_ORPHAN_GRACE:24h}
+      batch-size: ${STORAGE_RECYCLE_BATCH_SIZE:100}
     local:
       root: ${STORAGE_LOCAL_ROOT:./data/storage}
       temp: ${STORAGE_LOCAL_TEMP:./data/tmp}
@@ -108,12 +116,18 @@ res:
     default-timeout: ${TASK_DEFAULT_TIMEOUT:10m}
     default-max-retry: ${TASK_DEFAULT_MAX_RETRY:2}
     shutdown-await: ${TASK_SHUTDOWN_AWAIT:30s}
-    # 启动时把中断的 RUNNING 任务标记为失败，避免前端永远看到「运行中」
+    # 仅未启用 cluster 的单实例：启动时结束中断任务/回复；cluster 模式自动跳过本恢复。
     recover-on-startup: ${TASK_RECOVER_ON_STARTUP:true}
     # CONVERT/EXPORT 已有真实处理器，未开始的 PENDING 任务可在单实例重启后重新入队
     requeue-pending-on-startup: ${TASK_REQUEUE_PENDING_ON_STARTUP:true}
     # 仅保留历史任务兼容；CONVERT/EXPORT 已由真实处理器接管
     placeholder-enabled: ${TASK_PLACEHOLDER_ENABLED:false}
+    cluster:
+      enabled: ${TASK_CLUSTER_ENABLED:false}
+      heartbeat: ${TASK_CLUSTER_HEARTBEAT:10s}
+      lease-duration: ${TASK_CLUSTER_LEASE_DURATION:60s}
+      batch-size: ${TASK_CLUSTER_BATCH_SIZE:100}
+      requeue-pending: ${TASK_CLUSTER_REQUEUE_PENDING:true}
   # 页面版式预览（TODO 3.3）与兼容性验收（TODO 4.1）
   preview:
     # 预览渲染的默认 DPI 与上限
@@ -124,9 +138,11 @@ res:
     cache-enabled: ${PREVIEW_CACHE_ENABLED:true}
     cache-directory: ${PREVIEW_CACHE_DIRECTORY:preview-cache}
     # Office 渲染后端：none / kit
-    # kit 指打包好的 LibreOffice kit（Node CLI），同时提供页面渲染与格式转换。
+    # libreoffice 使用独立 Office 进程及 UNO Python；kit 为已有 Node CLI 后端。
     # PDF 与图片预览不需要它；DOCX/XLSX 版式预览与兼容性验收需要。
     office-backend: ${PREVIEW_OFFICE_BACKEND:none}
+    office-executable: ${PREVIEW_OFFICE_EXECUTABLE:}
+    office-python: ${PREVIEW_OFFICE_PYTHON:}
     office-kit-node: ${PREVIEW_OFFICE_KIT_NODE:}
     office-kit-cli: ${PREVIEW_OFFICE_KIT_CLI:}
     office-timeout: ${PREVIEW_OFFICE_TIMEOUT:120s}

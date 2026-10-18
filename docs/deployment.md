@@ -1,6 +1,6 @@
 # 本地部署与演示
 
-本文对应当前单实例后端。命令以 PowerShell 为例；尚未在真实 MariaDB、完整 Office 运行时与真实模型上完成部署联调。默认配置用于本地演示，不能作为已完成生产验收的证明。
+本文对应当前单实例后端。命令以 PowerShell 为例；本地 MariaDB 完整迁移、版本事务/并发和配套备份恢复已在随机隔离库验证，见 [数据库生命周期验收](database-lifecycle-testing.md)。完整运行实例的 HTTP 闭环、单实例重启、受控故障和可执行 JAR 强杀后的持久化状态恢复也已通过，见 [完整应用验收](application-flow-testing.md)。正式部署环境、Office 版式和真实模型效果仍需单独验收。默认配置用于本地演示，不能作为已完成生产验收的证明。
 
 ## 1. 运行依赖和数据库
 
@@ -21,11 +21,13 @@ CREATE DATABASE documenter CHARACTER SET utf8mb4 COLLATE utf8mb4_uca1400_ai_ci;
 SELECT version, description, success FROM flyway_schema_history ORDER BY installed_rank;
 ```
 
-当前迁移为 V1～V6，包含版本格式、任务幂等、AI 回复确认和模板文件历史。V6 只为已有模板的当前文件建立 BASELINE 历史，保留其版本号，不能恢复此前未索引的旧文件。升级前备份数据库与正式存储，并在恢复副本上验证迁移、模板替换/恢复及并发冲突；本轮尚未执行真实 MariaDB 验收。不要修改已经执行过的迁移脚本；后续变更追加新版本。`clean-disabled=true` 不能代替备份。
+当前迁移为 V1～V9，包含版本格式、任务幂等、AI 回复确认、模板文件历史、OCR 人工校正、正式回收墓碑/引用索引和执行租约。V6 只为已有模板的当前文件建立 BASELINE 历史，保留其版本号，不能恢复此前未索引的旧文件。升级前备份数据库与正式存储，并在恢复副本上验证迁移、模板替换/恢复及并发冲突；随机隔离库已验证完整升级，已有业务数据恢复副本仍需单独验收。不要修改已经执行过的迁移脚本；后续变更追加新版本。`clean-disabled=true` 不能代替备份。
 
 Redis 用于登录会话及撤销、验证码、上传限流、AI 日额度。应用数据与测试 Redis 分开；不要对运行实例执行 FLUSHDB/FLUSHALL。真实 Redis 测试另见 [安全测试说明](security-testing.md)。
 
 ## 2. 环境变量与启动
+
+多实例执行租约默认关闭。需要启用时，所有节点统一设置 `TASK_CLUSTER_ENABLED=true`，按 [执行租约部署与模式切换](execution-leases.md) 处理历史执行记录、共享存储和 JWT 配置；不能混用旧执行者或不同租约模式。
 
 `.env.example` 是参数清单，不会被 Spring Boot 自动加载。可在 IDE 的运行配置或部署平台设置变量；下面的写法只影响当前 PowerShell 及其子进程，不会写入版本库：
 
@@ -93,7 +95,7 @@ application-service.yaml 是本地维护的部署统一配置，放在 src/main/
 | TASK_CORE_POOL_SIZE / TASK_MAX_POOL_SIZE / TASK_QUEUE_CAPACITY | 两个独立有界线程池各使用同样容量；队列满返回任务 QUEUE_FULL 失败，通过原有重试接口处理 |
 | TASK_DEFAULT_TIMEOUT / TASK_DEFAULT_MAX_RETRY / TASK_KEEP_ALIVE / TASK_SHUTDOWN_AWAIT | 默认超时、处理重试、线程空闲和停机等待；外部强制终止时间要留足余量 |
 | TASK_PLACEHOLDER_ENABLED | 默认 false。CONVERT/EXPORT 已有真实处理器；该开关仅用于历史 OCR/AI_EDIT 兼容排查，不应在正常部署中开启 |
-| TASK_RECOVER_ON_STARTUP / TASK_REQUEUE_PENDING_ON_STARTUP | 默认把中断的运行任务/回复标为失败，并把尚未开始的 CONVERT/EXPORT 重新入队；当前恢复逻辑面向单实例，多实例部署必须谨慎启用 |
+| TASK_RECOVER_ON_STARTUP / TASK_REQUEUE_PENDING_ON_STARTUP | 未启用 cluster 的单实例默认进行启动恢复；cluster 开启后自动跳过这两个启动选项，由执行租约维护器恢复过期工作，见 execution-leases.md |
 | AI_ENABLED / AI_PROVIDER | 默认关闭 AI；本地演示显式设 true/stub。真实调用设 provider=openai，避免 auto 缺配置时回退桩模型 |
 | AI_BASE_URL / AI_API_KEY / AI_MODEL_NAME | 真实兼容协议客户端的地址、密钥和模型；不保证目标服务的工具调用效果，需单独验收 |
 | AI_DAILY_CALL_LIMIT / AI_QUOTA_ZONE | 每 ChatModel 调用尝试计数，含失败和智能体重试；0 不限额，默认 Asia/Shanghai 自然日，不扣余额 |
@@ -118,16 +120,18 @@ application-service.yaml 是本地维护的部署统一配置，放在 src/main/
 PDF 原生文本、PDF/图片预览不需要 Office 后端。DOCX/XLSX 页面预览、Office 导出 PDF 和版式兼容性检查需要：
 
 ```powershell
-$env:PREVIEW_OFFICE_BACKEND = 'kit'
-$env:PREVIEW_OFFICE_KIT_NODE = 'C:/documenter-runtime/node.exe'
-$env:PREVIEW_OFFICE_KIT_CLI = 'C:/documenter-runtime/libreoffice-kit/lib/cli.js'
+$env:PREVIEW_OFFICE_BACKEND = 'libreoffice'
+$env:PREVIEW_OFFICE_EXECUTABLE = 'C:/documenter-runtime/program/soffice.com'
+$env:PREVIEW_OFFICE_PYTHON = 'C:/documenter-runtime/program/python.exe'
 ```
 
-这是部署路径的占位示例，运行时不包含在 Maven JAR 中，需自行准备与当前 CLI 协议匹配的 Node、kit 及其 native 依赖。普通 LibreOffice 的 soffice 路径不能直接填为 cli.js。代码保留了开发机路径作为回退，但部署必须显式配置；设置 kit 并不代表渲染成功，应执行现有 compatibility-check 接口并检查结果。
+这是部署路径的占位示例，Office 运行时不包含在 Maven JAR 中。Windows 可运行 `./scripts/prepare-office-runtime.ps1`，从官方站点获取固定版本，校验 SHA-256 和签名，再提取独立运行时到 Git 忽略的 `data/tools/libreoffice/runtime`。脚本不注册文件关联，输出可配置的环境变量；本机现有运行时与 UNO Python 已实跑通过。Linux 需安装 LibreOffice 和可 `import uno` 的 Python，并显式设置两个可执行文件路径。转换脚本随 JAR 打包。
+
+每次转换使用独立用户配置及本机命名管道，源文件只读，禁用宏与链接更新；XLSX 外部数据连接和网络公式明确拒绝。DOCX 在导出前更新目录，XLSX 重算支持的公式并刷新图表。转换不会保存回原 DOCX/XLSX，计算结果体现在本次 PDF/预览中。原有 `kit` 后端仍可使用，分别配置 `PREVIEW_OFFICE_KIT_NODE` 和 `PREVIEW_OFFICE_KIT_CLI`，不可把 soffice 路径填为 CLI。
 
 默认 backend=none 时 Office 相关接口返回 503，其他能力可用。PREVIEW_OFFICE_TIMEOUT、PREVIEW_OFFICE_MAX_INPUT_BYTES、PREVIEW_MAX_PAGE_PIXELS 控制资源规模；超时、文档损坏、超限分别映射 504、422、413。
 
-中文排版依赖宿主机字体。PREVIEW_FONT_DIRECTORY、PREVIEW_FONT_FALLBACKS、PREVIEW_INITIAL_FONT_FAMILY 用于字体设置与缺字诊断；Windows native 后端实际仍使用系统字体，不能靠填写目录保证显示正确。逐页检查中文、分页和表格，缺字诊断和真实 Office 跨平台兼容性仍需验收。
+中文排版依赖宿主机字体。PREVIEW_FONT_DIRECTORY、PREVIEW_FONT_FALLBACKS、PREVIEW_INITIAL_FONT_FAMILY 用于已有 kit 字体设置；标准 LibreOffice 使用宿主字体。缺字诊断读取 OOXML 字体名称并与宿主字体对比，不能替代逐页检查。Windows LibreOffice 中文固定样本的实跑记录见 [Office 验收](office-rendering-testing.md)；Microsoft Word、其他平台和业务模板需在对应环境另行验证。
 
 ## 4. 使用现有 API 演示
 
@@ -197,12 +201,12 @@ Write-Host "已下载明确版本 $outputVersion 到 $downloadPath"
 
 下载的文件是确认后的明确版本。再次确认同一回复应返回相同 outputVersion，不生成重复版本；需要放弃时使用现有 discard 入口。确认前若其他操作已更新文件，应得到业务码 409，重新读取版本并发送新要求。所有 JSON 接口都要检查响应体 code，不能只看 HTTP 200。没有新增健康检查或演示专用 HTTP 接口。
 
-管理员不是通过公开注册获得：在受控测试数据库中将已注册账号的 role 改为 ADMIN，重新登录后再访问 /admin/**。不要开放管理员匿名初始化。下载后用 Word 或已配置的 Office 后端核对文件；当前文档步骤尚未在完整运行实例上逐条执行。
+管理员不是通过公开注册获得：在受控测试数据库中将已注册账号的 role 改为 ADMIN，重新登录后再访问 /admin/**。不要开放管理员匿名初始化。下载后用 Word 或已配置的 Office 后端核对文件；对应的上传/AI 差异确认/版本下载恢复路径已通过真实 HTTP 自动验收；上方手工 PowerShell 脚本本身未逐行人工执行。
 
 ## 5. 备份、恢复与退出演示环境
 
 暂停新请求并停止单实例后，保存同一时点的 MariaDB 数据和 STORAGE_LOCAL_ROOT 正式内容，以及可恢复的部署配置、稳定加密密钥。只备份数据库会丢文档内容，只备份文件会丢归属、版本与会话；MODEL_CONFIG_SECRET 丢失会使模型密文不可读。备份介质、访问控制与保存期限由部署环境制定。
 
-恢复时先在隔离环境还原数据库及同一备份的正式存储，配置相同密钥与正确目录，核对 Flyway 历史，再启动一个实例验证登录、明确版本下载及文档内容。Redis 丢失将使现有会话不可用，也可能使未过期验证码、限流和额度计数丢失；不得用空 Redis 恢复证明配额连续性。备份恢复演练仍待真实环境验收。
+恢复时先在隔离环境还原数据库及同一备份的正式存储，配置相同密钥与正确目录，核对 Flyway 历史，再启动一个实例验证登录、明确版本下载及文档内容。Redis 丢失将使现有会话不可用，也可能使未过期验证码、限流和额度计数丢失；不得用空 Redis 恢复证明配额连续性。本地随机隔离库已通过 mariadb-dump 与配套文件归档恢复、逐版本 SHA-256 和 Flyway 校验；正式数据、Redis 持久化恢复及部署副本仍需单独演练。
 
-STORAGE_LOCAL_TEMP 只用于转换/预览等临时内容，默认 24 小时后回收。不要把正式内容目录当作临时目录清空。软删除文件和旧模板内容仍可能被保留，当前没有正式存储的全量孤儿文件回收；不要按文件日期批量删除。关闭演示终端、清理剪贴板和临时输出，不将密码、Token 或验证码日志提交 Git。
+STORAGE_LOCAL_TEMP 只用于转换/预览等临时内容，默认 24 小时后回收。不要把正式内容目录当作临时目录清空。正式回收默认关闭且仅预演：软删除默认保留 30 天，活跃文件全部版本和模板全部历史长期保留，无保护引用的 blob 经过 24 小时宽限后才可回收。管理员入口、配置、V8 迁移及验收步骤见 [正式文件回收](storage-recycling.md)；不要按文件日期批量删除。关闭演示终端、清理剪贴板和临时输出，不将密码、Token 或验证码日志提交 Git。

@@ -9,9 +9,9 @@ import com.documenter.mapper.OcrCorrectionMapper;
 import com.documenter.service.DocumentVersionService;
 import com.documenter.service.OcrCorrectionService;
 import com.documenter.vo.OcrCorrectionVO;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.ObjectMapper;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -93,7 +93,7 @@ public class OcrCorrectionServiceImpl implements OcrCorrectionService {
         try {
             pages = objectMapper.readValue(correction.getCorrectionsJson(),
                     new TypeReference<>() { });
-        } catch (JsonProcessingException invalid) {
+        } catch (JacksonException invalid) {
             throw new BusinessException(500, "OCR 校正文本数据损坏");
         }
         return new OcrCorrectionVO(fileId, versionNo, fingerprint, pages,
@@ -205,7 +205,7 @@ public class OcrCorrectionServiceImpl implements OcrCorrectionService {
                     .map(page -> new OcrCorrectionVO.Page(
                             page.getPageNo(), page.getText(),
                             toTables(page.getTables()))).toList());
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             throw new BusinessException(500, "OCR 校正文本序列化失败");
         }
     }

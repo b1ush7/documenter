@@ -1,6 +1,7 @@
 package com.documenter.service.impl;
 
 import com.documenter.entity.ProcessingTask;
+import com.documenter.component.ExecutionLeaseService;
 import com.documenter.entity.TaskStep;
 import com.documenter.enums.TaskStepStatus;
 import com.documenter.exception.BusinessException;
@@ -27,6 +28,7 @@ public class TaskExecutionContextImpl implements TaskExecutionContext {
     private final ProcessingTaskMapper taskMapper;
     private final TaskStepMapper stepMapper;
     private final Long taskId;
+    private final ExecutionLeaseService leases;
     /** 当前执行尝试序号，从 1 开始；用于任务级版本幂等（TODO 3.4）。 */
     private final int attemptNo;
 
@@ -54,9 +56,15 @@ public class TaskExecutionContextImpl implements TaskExecutionContext {
 
     public TaskExecutionContextImpl(ProcessingTaskMapper taskMapper, TaskStepMapper stepMapper,
                                    ProcessingTask task, int attemptNo) {
+        this(taskMapper, stepMapper, task, attemptNo, null);
+    }
+
+    public TaskExecutionContextImpl(ProcessingTaskMapper taskMapper, TaskStepMapper stepMapper,
+                                   ProcessingTask task, int attemptNo, ExecutionLeaseService leases) {
         this.taskMapper = taskMapper;
         this.stepMapper = stepMapper;
         this.taskId = task.getId();
+        this.leases = leases;
         this.attemptNo = attemptNo;
         this.stepCounter = stepMapper.selectMaxStepNo(taskId);
     }
@@ -94,14 +102,15 @@ public class TaskExecutionContextImpl implements TaskExecutionContext {
         step.setStatus(TaskStepStatus.RUNNING.name());
         step.setDetail(detail);
         step.setStartTime(currentStepStart);
-        stepMapper.insert(step);
+        mutate(() -> {
+            stepMapper.insert(step);
+            // 同时更新任务的当前步骤，供前端轮询展示
+            ProcessingTask update = new ProcessingTask();
+            update.setId(taskId);
+            update.setCurrentStep(stepName);
+            taskMapper.updateById(update);
+        });
         currentStepId = step.getId();
-
-        // 同时更新任务的当前步骤，供前端轮询展示
-        ProcessingTask update = new ProcessingTask();
-        update.setId(taskId);
-        update.setCurrentStep(stepName);
-        taskMapper.updateById(update);
     }
 
     @Override
@@ -118,7 +127,7 @@ public class TaskExecutionContextImpl implements TaskExecutionContext {
         update.setFinishTime(now);
         update.setDurationMs(currentStepStart == null ? null
                 : Duration.between(currentStepStart, now).toMillis());
-        stepMapper.updateById(update);
+        mutate(() -> stepMapper.updateById(update));
 
         currentStepId = null;
         currentStepStart = null;
@@ -135,7 +144,7 @@ public class TaskExecutionContextImpl implements TaskExecutionContext {
         ProcessingTask update = new ProcessingTask();
         update.setId(taskId);
         update.setProgress(bounded);
-        taskMapper.updateById(update);
+        mutate(() -> taskMapper.updateById(update));
         lastReportedProgress = bounded;
     }
 
@@ -144,6 +153,7 @@ public class TaskExecutionContextImpl implements TaskExecutionContext {
         if (stopped || Thread.currentThread().isInterrupted()) {
             return true;
         }
+        if (leases != null && !leases.taskActive(taskId)) return true;
         Boolean flag = taskMapper.selectCancelRequested(taskId);
         return Boolean.TRUE.equals(flag);
     }
@@ -161,9 +171,14 @@ public class TaskExecutionContextImpl implements TaskExecutionContext {
             throw new IllegalArgumentException("任务输出版本号必须为正数");
         }
         assertNotCancelled();
-        if (taskMapper.setOutputVersion(taskId, versionNo) != 1) {
-            throw new TaskStateException("记录任务输出版本失败");
-        }
+        mutate(() -> {
+            if (taskMapper.setOutputVersion(taskId, versionNo) != 1) throw new TaskStateException("记录任务输出版本失败");
+        });
+    }
+
+    private void mutate(Runnable mutation) {
+        if (leases == null) mutation.run();
+        else leases.mutateTask(taskId, mutation);
     }
 
     /** 当前处理中的步骤名，便于日志定位。 */

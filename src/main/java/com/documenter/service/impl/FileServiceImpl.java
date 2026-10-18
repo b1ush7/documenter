@@ -301,7 +301,7 @@ public class FileServiceImpl implements FileService {
         }
         FileAsset asset = fileAssetMapper.selectById(fileId);
         // 他人的文件统一按「不存在」处理：若返回 403，攻击者可据此枚举出哪些 ID 是真实存在的
-        if (asset == null || !userId.equals(asset.getUserId())) {
+        if (asset == null || !userId.equals(asset.getUserId()) || asset.getStoragePurgedTime() != null) {
             throw new BusinessException(404, "文件不存在");
         }
         return asset;

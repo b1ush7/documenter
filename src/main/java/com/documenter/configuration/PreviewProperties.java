@@ -40,15 +40,20 @@ public class PreviewProperties {
     private boolean cacheEnabled = true;
 
     /**
-     * Office 渲染/转换后端：none / kit。
+     * Office 渲染/转换后端：none / kit / libreoffice。
      *
-     * <p>kit 指打包好的 LibreOffice kit（Node CLI）。它同时提供两件本服务需要的能力：
-     * 页面渲染与格式转换，因此比让运维单独安装 LibreOffice 更可控 ——
-     * 版本固定、无需桌面会话、不依赖 office 是否被激活。
+     * <p>libreoffice 使用标准独立 Office 进程和 UNO Python；kit 使用已有 Node CLI。
+     * 两者均提供页面渲染与格式转换，运行时须在部署环境另行准备。
      *
      * <p>PDF 与图片预览不需要它；DOCX/XLSX 的版式预览与 4.1 的兼容性验收需要。
      */
     private String officeBackend = "none";
+
+    /** 标准 LibreOffice 的 soffice.com（Windows）或 soffice 可执行文件。 */
+    private String officeExecutable;
+
+    /** 含 UNO 模块的 Python；Windows 独立 LibreOffice 默认使用同目录 python.exe。 */
+    private String officePython;
 
     /** Office kit 的 Node 可执行文件路径。 */
     private String officeKitNode;

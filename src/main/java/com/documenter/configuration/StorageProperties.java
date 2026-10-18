@@ -21,6 +21,21 @@ public class StorageProperties {
 
     private Local local = new Local();
 
+    private Recycle recycle = new Recycle();
+
+    @Getter
+    @Setter
+    public static class Recycle {
+        /** 必须显式开启才允许永久回收；未开启时仍可预演。 */
+        private boolean enabled;
+        private boolean dryRun = true;
+        private Duration interval = Duration.ofHours(24);
+        private Duration deletedRetention = Duration.ofDays(30);
+        /** 防止回收已落盘但尚未提交元数据的文件。 */
+        private Duration orphanGrace = Duration.ofHours(24);
+        private int batchSize = 100;
+    }
+
     /** 上传限制。 */
     private Upload upload = new Upload();
 

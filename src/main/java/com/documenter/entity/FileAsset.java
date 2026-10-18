@@ -39,4 +39,6 @@ public class FileAsset implements Serializable {
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
     private LocalDateTime deleteTime;
+    /** 正式回收墓碑；只保留审计元数据，文件和历史版本不再可访问。 */
+    private LocalDateTime storagePurgedTime;
 }

@@ -28,7 +28,7 @@ public interface AiMessageMapper extends BaseMapper<AiMessage> {
     @Update("""
             UPDATE ai_message SET run_status = 'FAILED', plan_status = 'NONE',
                 content = '服务重启导致本次回复中断，请使用新的幂等键重新发送'
-            WHERE run_status = 'RUNNING'
+            WHERE run_status = 'RUNNING' AND execution_owner IS NULL
             """)
     int failInterruptedReplies();
 

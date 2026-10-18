@@ -96,6 +96,7 @@ public interface ProcessingTaskMapper extends BaseMapper<ProcessingTask> {
                    finish_time = NOW(3),
                    current_step = NULL
              WHERE status = 'RUNNING'
+               AND execution_owner IS NULL
             """)
     int failInterruptedTasks();
 

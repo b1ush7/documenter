@@ -1,6 +1,7 @@
 package com.documenter.service.impl;
 
 import com.documenter.component.EditPlanValidator;
+import com.documenter.component.ExecutionLeaseService;
 import com.documenter.configuration.AiModelProperties;
 import com.documenter.dto.CreateAiReplyDTO;
 import com.documenter.entity.AiMessage;
@@ -28,6 +29,10 @@ import java.util.function.Consumer;
 @Slf4j
 @Service
 public class AiReplyServiceImpl implements AiReplyService {
+    private ExecutionLeaseService leases;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setExecutionLeases(ExecutionLeaseService leases) { this.leases = leases; }
     private final AiChatService chats;
     private final AiSessionMapper sessions;
     private final AiMessageMapper messages;
@@ -89,6 +94,15 @@ public class AiReplyServiceImpl implements AiReplyService {
                     reservation.reply().getId(), null));
             return existing;
         }
+        try (var registration = leases == null ? ExecutionLeaseService.NOOP
+                : leases.trackReply(reservation.reply().getId())) {
+            return executeReservedReply(userId, sessionId, request, events, cancelled, streaming, reservation);
+        }
+    }
+
+    private AiReplyVO executeReservedReply(Long userId, Long sessionId, CreateAiReplyDTO request,
+                                          Consumer<StreamEvent> events, BooleanSupplier cancelled,
+                                          boolean streaming, Reservation reservation) {
         events.accept(new StreamEvent(StreamEvent.Type.STARTED,
                 reservation.reply().getId(), null));
 
@@ -137,6 +151,7 @@ public class AiReplyServiceImpl implements AiReplyService {
         }
         AgentRunResult completed = result;
         AiMessage reply = transactions.execute(status -> {
+            if (leases != null) leases.fenceReply(reservation.reply().getId());
             AiSession session = lockedSession(userId, sessionId, false);
             AiMessage current = requireReply(sessionId, reservation.reply().getId());
             if (!"RUNNING".equals(current.getRunStatus())) {
@@ -209,6 +224,10 @@ public class AiReplyServiceImpl implements AiReplyService {
         reply.setRunStatus("RUNNING");
         reply.setPlanStatus("NONE");
         insert(reply);
+        if (leases != null) {
+            leases.claimReply(reply.getId());
+            leases.fenceReply(reply.getId());
+        }
         touch(session);
         return new Reservation(session, reply, history, true);
     }

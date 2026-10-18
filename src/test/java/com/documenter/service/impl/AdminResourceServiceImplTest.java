@@ -58,6 +58,15 @@ class AdminResourceServiceImplTest {
             taskService, auditService);
 
     @Test
+    void purgedFileCannotBeDownloadedThroughAdministratorEntry() {
+        var asset = file(10L, 7L);
+        asset.setStoragePurgedTime(java.time.LocalDateTime.now());
+        when(fileAssetMapper.selectById(10L)).thenReturn(asset);
+        assertThrows(BusinessException.class, () -> service.downloadVersion(10L, 1));
+        verify(versionService, never()).downloadVersion(7L, 10L, 1);
+    }
+
+    @Test
     void readsXlsxWithActualOwnerAndWritesAudit() {
         FileAsset asset = file(10L, 7L);
         XlsxStructureVO expected = new XlsxStructureVO(10L, 1, 0, 0, false, List.of());

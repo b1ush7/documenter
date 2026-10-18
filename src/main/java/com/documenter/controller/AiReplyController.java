@@ -5,6 +5,9 @@ import com.documenter.configuration.AiStreamExecutionConfiguration;
 import com.documenter.dto.CreateAiReplyDTO;
 import com.documenter.exception.BusinessException;
 import com.documenter.service.AiReplyService;
+import com.documenter.service.VerificationRequestContextHolder;
+import org.slf4j.MDC;
+import org.springframework.security.concurrent.DelegatingSecurityContextRunnable;
 import com.documenter.util.SecurityUtil;
 import com.documenter.vo.AiReplyVO;
 import com.documenter.vo.AgentRunResult;
@@ -60,8 +63,12 @@ public class AiReplyController {
         emitter.onCompletion(() -> cancelled.set(true));
         emitter.onTimeout(() -> cancelled.set(true));
         emitter.onError(error -> cancelled.set(true));
+        var requestContext = VerificationRequestContextHolder.get();
+        var loggingContext = MDC.getCopyOfContextMap();
         try {
-            streamExecutor.execute(() -> {
+            streamExecutor.execute(new DelegatingSecurityContextRunnable(() -> {
+                VerificationRequestContextHolder.set(requestContext);
+                if (loggingContext != null) MDC.setContextMap(loggingContext);
                 try {
                     AiReplyVO reply = service.createStreaming(userId, sessionId, request, event -> {
                         try {
@@ -90,8 +97,11 @@ public class AiReplyController {
                         // 客户端已经断开时无需再次写响应。
                     }
                     emitter.completeWithError(failure);
+                } finally {
+                    VerificationRequestContextHolder.clear();
+                    MDC.clear();
                 }
-            });
+            }));
         } catch (RejectedExecutionException rejected) {
             try {
                 emitter.send(SseEmitter.event().name("error")

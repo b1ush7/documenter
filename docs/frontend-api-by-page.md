@@ -469,7 +469,7 @@ POST /file/{fileId}/versions/{versionNo}/ocr/corrections/{fingerprint}/organize 
  "region":{"x":40,"y":80,"width":900,"height":600}}
 ```
 
-响应 `pages[]` 的 `source` 为 `NATIVE`、`OCR` 或 `EMPTY`；OCR 页返回完整页面宽高、区域、整页文字、平均置信度、`needsReview`、启发式 `paragraphs[]`、经校验的 `tables[]` 和按阅读顺序排列的 `lines[]`。每行和表格单元格包含完整页面坐标及置信度；低于阈值的项应进入人工复核。`enhance=true` 会转灰度并拉伸对比度但不改坐标；`paragraphs[]` 只用于复制或文本导出。`tables[]` 仅在云端明确返回且完整覆盖、不重叠、跨度合法时出现，否则错误结构返回 502，前端不要自行猜测表格。传入 `region` 时只上传该矩形，但仍返回完整页面坐标；未传区域时，PDF 有原生文字的页直接返回，不发送云端。顶层 `fingerprint` 是当前 OCR 结果指纹；用户编辑后可把逐页最终文本以及 `tableIndex` 对应的校正表格行列/跨度/单元格文本保存到 `PUT .../ocr/corrections`，之后用同一指纹读取。保存不会修改源文件或创建版本。保存后可调用 `POST .../ocr/corrections/{fingerprint}/organize` 进入现有文本模型流程，响应沿用 `AgentRunResult`；该入口不绑定文档、不开放写工具，但会消耗现有 AI 日额度并受上下文上限限制。云 OCR 默认关闭且只使用管理端启用、设为默认的 `scope=OCR` 模型；启用后页面会上传云端，界面必须提示数据外发风险。`POST .../ocr/text` 用相同请求返回带换页符的 UTF-8 文本附件。原生 PDF 结果、失败码和配置见 [API.md 第 3.11.1 节](../API.md#3111-云端-ocr)。
+响应 `pages[]` 的 `source` 为 `NATIVE`、`OCR` 或 `EMPTY`；OCR 页返回完整页面宽高、区域、整页文字、平均置信度、`needsReview`、启发式 `paragraphs[]`、经校验的 `tables[]` 和按阅读顺序排列的 `lines[]`。每行和表格单元格包含完整页面坐标及置信度；低于阈值的项应进入人工复核。`enhance=true` 会转灰度并拉伸对比度；还可显式指定 `rotationDegrees=0/90/180/270`、`lowLight`、`denoise` 和 `sharpen`，行/单元格坐标始终映射回完整原图，见 [预处理说明](ocr-preprocessing.md)；`paragraphs[]` 只用于复制或文本导出。`tables[]` 仅在云端明确返回且完整覆盖、不重叠、跨度合法时出现，否则错误结构返回 502，前端不要自行猜测表格。传入 `region` 时只上传该矩形，但仍返回完整页面坐标；未传区域时，PDF 有原生文字的页直接返回，不发送云端。顶层 `fingerprint` 是当前 OCR 结果指纹；用户编辑后可把逐页最终文本以及 `tableIndex` 对应的校正表格行列/跨度/单元格文本保存到 `PUT .../ocr/corrections`，之后用同一指纹读取。保存不会修改源文件或创建版本。保存后可调用 `POST .../ocr/corrections/{fingerprint}/organize` 进入现有文本模型流程，响应沿用 `AgentRunResult`；该入口不绑定文档、不开放写工具，但会消耗现有 AI 日额度并受上下文上限限制。云 OCR 默认关闭且只使用管理端启用、设为默认的 `scope=OCR` 模型；启用后页面会上传云端，界面必须提示数据外发风险。`POST .../ocr/text` 用相同请求返回带换页符的 UTF-8 文本附件。原生 PDF 结果、失败码和配置见 [API.md 第 3.11.1 节](../API.md#3111-云端-ocr)。
 
 **PDF 页面预览**返回**图片字节流**，不是 JSON。前端用 `URL.createObjectURL` 渲染。
 页数有限制，超大 PDF 只会渲染部分页。
@@ -1150,7 +1150,7 @@ POST   /admin/templates/{id}/versions/{versionNo}/restore?expectVersion=当前�
 
 恢复前先读取模板当前 versionNo，作为必填 expectVersion 提交。恢复只新增文件版本，原历史保留，变量、分类、名称和启停状态不变；可跨历史格式恢复。成功后使用响应中的新 versionNo 刷新页面；并发变化返回业务码 409，先刷新再处理，不要自动更换 expectVersion 重复恢复。缺失历史返回 404，文件缺失返回 500，不能回退为下载最新内容。历史下载和恢复仅限管理员并记录审计。
 
-V6 仅回填已有模板的当前文件版本（BASELINE），保留原版本号，不补造更早历史；其 createTime 是建立索引时间。删除模板后历史接口不可再访问，底层文件与索引仍保留。启用的 DOCX 模板可由普通用户填变量生成，见 P11；生成文件复用按版本预览，管理端没有直接模板预览入口。正式存储回收尚未实现，现有后台任务只清理临时目录。
+V6 仅回填已有模板的当前文件版本（BASELINE），保留原版本号，不补造更早历史；其 createTime 是建立索引时间。删除模板后历史接口不可再访问，底层文件与索引仍保留。启用的 DOCX 模板可由普通用户填变量生成，见 P11；生成文件复用按版本预览，管理端没有直接模板预览入口。正式存储回收已实现，默认关闭且仅预演；模板全部历史引用仍长期保留，配置和管理员预演接口见 [storage-recycling.md](storage-recycling.md)。
 
 ## P22 审计日志页
 
