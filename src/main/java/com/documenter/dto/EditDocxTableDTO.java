@@ -2,6 +2,8 @@ package com.documenter.dto;
 
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
@@ -25,14 +27,19 @@ public class EditDocxTableDTO {
     public static class Operation {
 
         @NotNull(message = "操作类型不能为空")
-        @Pattern(regexp = "^(SET_CELL_TEXT|INSERT_ROW_BEFORE|INSERT_ROW_AFTER|DELETE_ROW)$",
+        @Pattern(regexp = "^(SET_CELL_TEXT|INSERT_ROW_BEFORE|INSERT_ROW_AFTER|DELETE_ROW|"
+                + "SET_ROW_HEIGHT|REPEAT_HEADER_ROW|SET_COLUMN_WIDTH|MERGE_CELLS|SPLIT_CELL)$",
                 message = "不支持的表格操作")
         private String type;
 
-        /** SET_CELL_TEXT 指向 CELL，其余操作指向 ROW。 */
+        /** 单元格操作指向 CELL，行操作指向 ROW。 */
         @NotNull(message = "目标块 ID 不能为空")
         @Size(max = 512, message = "目标块 ID 过长")
         private String blockId;
+
+        /** MERGE_CELLS 的矩形右下单元格；SPLIT_CELL 不使用。 */
+        @Size(max = 512, message = "结束块 ID 过长")
+        private String endBlockId;
 
         /** SET_CELL_TEXT 使用，允许空字符串清空单元格。 */
         @Size(max = 100000, message = "单元格文本过长")
@@ -42,5 +49,13 @@ public class EditDocxTableDTO {
         @Size(max = 100, message = "单行不能超过 100 个单元格")
         private List<@NotNull(message = "单元格文本不能为空")
                 @Size(max = 100000, message = "单元格文本过长") String> values;
+
+        /** SET_COLUMN_WIDTH / SET_ROW_HEIGHT 使用，单位为 twips。 */
+        @Min(value = 1, message = "表格尺寸必须大于 0")
+        @Max(value = 20000, message = "表格尺寸过大")
+        private Integer dimensionTwips;
+
+        /** REPEAT_HEADER_ROW 使用。 */
+        private Boolean repeatHeader;
     }
 }

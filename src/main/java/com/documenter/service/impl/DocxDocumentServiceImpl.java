@@ -1,11 +1,14 @@
 package com.documenter.service.impl;
 
 import com.documenter.dto.EditDocxParagraphsDTO;
+import com.documenter.dto.EditDocxFootnotesDTO;
+import com.documenter.dto.CreateDocxTableOfContentsDTO;
 import com.documenter.dto.EditDocxTableDTO;
 import com.documenter.dto.FormatDocxParagraphsDTO;
 import com.documenter.dto.GenerateDocxDTO;
 import com.documenter.dto.InsertDocxImagesDTO;
 import com.documenter.dto.ReplaceDocxTextDTO;
+import com.documenter.dto.UpdateDocxHeaderFooterLinkDTO;
 import com.documenter.entity.DocumentVersion;
 import com.documenter.enums.ChangeType;
 import com.documenter.exception.BusinessException;
@@ -16,6 +19,10 @@ import com.documenter.service.FileStorage;
 import com.documenter.service.VersionWriter;
 import com.documenter.util.Digests;
 import com.documenter.vo.DocxStructureVO;
+import com.documenter.vo.DocxHeaderFooterLinksVO;
+import com.documenter.vo.DocxFootnotesVO;
+import com.documenter.vo.DocxTableOfContentsVO;
+import com.documenter.vo.DocumentEditPlan;
 import com.documenter.vo.FileAssetVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.VersionVO;
@@ -30,6 +37,12 @@ import org.apache.poi.xwpf.usermodel.XWPFRun;
 import org.apache.poi.xwpf.usermodel.XWPFTable;
 import org.apache.poi.xwpf.usermodel.XWPFTableCell;
 import org.apache.poi.xwpf.usermodel.XWPFTableRow;
+import org.apache.poi.xwpf.usermodel.XWPFFootnote;
+import org.apache.poi.xwpf.usermodel.TableRowHeightRule;
+import org.apache.poi.xwpf.usermodel.TableWidthType;
+import org.apache.poi.xwpf.model.XWPFHeaderFooterPolicy;
+import org.apache.poi.wp.usermodel.HeaderFooterType;
+import org.w3c.dom.Node;
 import org.apache.poi.xwpf.usermodel.XWPFAbstractNum;
 import org.apache.poi.xwpf.usermodel.XWPFNumbering;
 import org.apache.poi.xwpf.usermodel.ParagraphAlignment;
@@ -37,15 +50,25 @@ import org.apache.poi.util.Units;
 import org.apache.poi.xwpf.usermodel.Document;
 import org.apache.poi.openxml4j.exceptions.InvalidFormatException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.apache.xmlbeans.XmlCursor;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTSectPr;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTTc;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTTcPr;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STHdrFtr;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STFldCharType;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STMerge;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -65,19 +88,23 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
     private final FileStorage fileStorage;
     private final VersionWriter versionWriter;
     private final FileService fileService;
+    private final DocxTemplateGenerationService templates;
 
     public DocxDocumentServiceImpl(DocumentVersionService versionService,
                                    FileStorage fileStorage,
                                    VersionWriter versionWriter,
-                                   FileService fileService) {
+                                   FileService fileService, DocxTemplateGenerationService templates) {
         this.versionService = versionService;
         this.fileStorage = fileStorage;
         this.versionWriter = versionWriter;
         this.fileService = fileService;
+        this.templates = templates;
     }
 
     @Override
     public FileAssetVO generate(Long userId, GenerateDocxDTO request) {
+        if (request != null && (request.getTemplateId() != null || request.getTemplateVersion() != null
+                || request.getVariables() != null)) return templates.generate(userId, request);
         validateGeneration(request);
         byte[] content;
         try (XWPFDocument document = new XWPFDocument();
@@ -112,6 +139,14 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         try (InputStream input = version.resource().getInputStream();
              XWPFDocument document = new XWPFDocument(input)) {
             List<DocxStructureVO.Block> blocks = readBody(document.getBodyElements(), "body");
+            for (int index = 0; index < document.getHeaderList().size(); index++) {
+                blocks.add(new DocxStructureVO.Block("header" + index, "HEADER", null, null, null,
+                        null, null, null, readBody(document.getHeaderList().get(index).getBodyElements(), "header" + index)));
+            }
+            for (int index = 0; index < document.getFooterList().size(); index++) {
+                blocks.add(new DocxStructureVO.Block("footer" + index, "FOOTER", null, null, null,
+                        null, null, null, readBody(document.getFooterList().get(index).getBodyElements(), "footer" + index)));
+            }
             return new DocxStructureVO(fileId, versionNo, blocks);
         } catch (IOException | RuntimeException e) {
             if (e instanceof BusinessException businessException) {
@@ -123,13 +158,400 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
     }
 
     @Override
+    public DocxHeaderFooterLinksVO readHeaderFooterLinks(Long userId, Long fileId,
+                                                          Integer versionNo) {
+        FileDownload version = versionService.downloadVersion(userId, fileId, versionNo);
+        if (!isDocx(version)) {
+            throw new BusinessException(400, "当前版本不是 DOCX 文档");
+        }
+        try (InputStream input = version.resource().getInputStream();
+             XWPFDocument document = new XWPFDocument(input)) {
+            List<CTSectPr> sections = sectionProperties(document);
+            List<DocxHeaderFooterLinksVO.Section> result = new ArrayList<>();
+            for (int index = 0; index < sections.size(); index++) {
+                CTSectPr section = sections.get(index);
+                int sectionNo = index + 1;
+                boolean canInherit = sectionNo > 1;
+                result.add(new DocxHeaderFooterLinksVO.Section(sectionNo,
+                        canInherit && !hasReference(section, true, HeaderFooterType.DEFAULT),
+                        canInherit && !hasReference(section, true, HeaderFooterType.FIRST),
+                        canInherit && !hasReference(section, true, HeaderFooterType.EVEN),
+                        canInherit && !hasReference(section, false, HeaderFooterType.DEFAULT),
+                        canInherit && !hasReference(section, false, HeaderFooterType.FIRST),
+                        canInherit && !hasReference(section, false, HeaderFooterType.EVEN)));
+            }
+            return new DocxHeaderFooterLinksVO(fileId, versionNo, result.size(), result);
+        } catch (IOException | RuntimeException failure) {
+            if (failure instanceof BusinessException business) throw business;
+            log.warn("读取 DOCX 页眉页脚链接失败, fileId={}, versionNo={}", fileId, versionNo, failure);
+            throw new BusinessException(422, "DOCX 页眉页脚链接无法读取或内容已损坏");
+        }
+    }
+
+    @Override
+    public DocxFootnotesVO readFootnotes(Long userId, Long fileId, Integer versionNo) {
+        FileDownload version = versionService.downloadVersion(userId, fileId, versionNo);
+        if (!isDocx(version)) {
+            throw new BusinessException(400, "当前版本不是 DOCX 文档");
+        }
+        try (InputStream input = version.resource().getInputStream();
+             XWPFDocument document = new XWPFDocument(input)) {
+            return new DocxFootnotesVO(fileId, versionNo, readFootnoteItems(document));
+        } catch (IOException | RuntimeException failure) {
+            if (failure instanceof BusinessException business) throw business;
+            log.warn("读取 DOCX 脚注失败, fileId={}, versionNo={}", fileId, versionNo, failure);
+            throw new BusinessException(422, "DOCX 脚注无法读取或内容已损坏");
+        }
+    }
+
+    @Override
+    public VersionVO editFootnotes(Long userId, Long fileId, Integer sourceVersion,
+                                   EditDocxFootnotesDTO request) {
+        validateFootnoteOperations(request);
+        return editAndSave(userId, fileId, sourceVersion, request.getInstruction(),
+                "执行 " + request.getOperations().size() + " 个脚注操作", document -> {
+                    Map<Integer, List<String>> references = footnoteReferences(document);
+                    for (var operation : request.getOperations()) {
+                        switch (operation.getType()) {
+                            case "ADD" -> addFootnote(document, operation);
+                            case "UPDATE" -> {
+                                requireReferencedFootnote(document, references, operation.getFootnoteId());
+                                updateFootnoteText(document, operation.getFootnoteId(), operation.getText());
+                            }
+                            case "DELETE" -> {
+                                requireReferencedFootnote(document, references, operation.getFootnoteId());
+                                removeFootnoteReferences(document, operation.getFootnoteId());
+                                removeFootnoteById(document, operation.getFootnoteId());
+                            }
+                            default -> throw new BusinessException(400, "不支持的脚注操作");
+                        }
+                    }
+                });
+    }
+
+    @Override
+    public DocxTableOfContentsVO readTableOfContents(Long userId, Long fileId,
+                                                      Integer versionNo) {
+        FileDownload version = versionService.downloadVersion(userId, fileId, versionNo);
+        if (!isDocx(version)) {
+            throw new BusinessException(400, "当前版本不是 DOCX 文档");
+        }
+        try (InputStream input = version.resource().getInputStream();
+             XWPFDocument document = new XWPFDocument(input)) {
+            TocField toc = findTocField(document);
+            boolean updateFields = document.getSettings() != null
+                    && document.getSettings().getCTSettings().isSetUpdateFields();
+            return new DocxTableOfContentsVO(fileId, versionNo, toc != null,
+                    toc == null ? null : toc.blockId(),
+                    toc == null ? null : toc.instruction(), updateFields);
+        } catch (IOException | RuntimeException failure) {
+            if (failure instanceof BusinessException business) throw business;
+            log.warn("读取 DOCX 目录失败, fileId={}, versionNo={}", fileId, versionNo, failure);
+            throw new BusinessException(422, "DOCX 目录无法读取或内容已损坏");
+        }
+    }
+
+    @Override
+    public VersionVO createOrRefreshTableOfContents(
+            Long userId, Long fileId, Integer sourceVersion,
+            CreateDocxTableOfContentsDTO request) {
+        if (request == null) throw new BusinessException(400, "目录参数不能为空");
+        String position = request.getPosition() == null ? "END" : request.getPosition();
+        if (!(position.equals("START") || position.equals("END"))) {
+            throw new BusinessException(400, "目录位置只支持 START 或 END");
+        }
+        int maxLevel = request.getMaxLevel() == null ? 3 : request.getMaxLevel();
+        if (maxLevel < 1 || maxLevel > 9) {
+            throw new BusinessException(400, "目录标题级别必须在 1 到 9 之间");
+        }
+        boolean hyperlinks = request.getHyperlinks() == null || request.getHyperlinks();
+        String instruction = "TOC \\o \"1-" + maxLevel + "\""
+                + (hyperlinks ? " \\h" : "") + " \\z \\u";
+        String title = normalizeTocTitle(request.getTitle());
+        return editAndSave(userId, fileId, sourceVersion, request.getInstruction(),
+                "插入或刷新 DOCX 目录域", document -> {
+                    TocField existing = findTocField(document);
+                    if (existing != null) {
+                        document.getSettings().setUpdateFields();
+                        return;
+                    }
+                    XWPFParagraph fieldParagraph;
+                    if (position.equals("START")) {
+                        fieldParagraph = insertParagraphAtStart(document);
+                        if (!title.isEmpty()) {
+                            XWPFParagraph titleParagraph = document.createParagraph();
+                            writeTocTitle(titleParagraph, title);
+                            moveBefore(titleParagraph, fieldParagraph);
+                        }
+                    } else {
+                        if (!title.isEmpty()) writeTocTitle(document.createParagraph(), title);
+                        fieldParagraph = document.createParagraph();
+                    }
+                    writeTocField(fieldParagraph, instruction);
+                    document.getSettings().setUpdateFields();
+                });
+    }
+
+    private static String normalizeTocTitle(String title) {
+        if (title == null) return "";
+        String normalized = title.strip();
+        if (normalized.length() > 100) {
+            throw new BusinessException(400, "目录标题不能超过 100 字符");
+        }
+        return normalized;
+    }
+
+    private static XWPFParagraph insertParagraphAtStart(XWPFDocument document) {
+        XWPFParagraph paragraph;
+        if (document.getBodyElements().isEmpty()) {
+            paragraph = document.createParagraph();
+        } else {
+            IBodyElement first = document.getBodyElements().getFirst();
+            try (XmlCursor cursor = first instanceof XWPFParagraph value
+                    ? value.getCTP().newCursor()
+                    : ((XWPFTable) first).getCTTbl().newCursor()) {
+                paragraph = document.insertNewParagraph(cursor);
+            }
+        }
+        if (paragraph == null) throw new BusinessException(422, "无法在文档开头插入目录");
+        return paragraph;
+    }
+
+    private static void moveBefore(XWPFParagraph paragraph, XWPFParagraph reference) {
+        Node parent = reference.getCTP().getDomNode().getParentNode();
+        parent.insertBefore(paragraph.getCTP().getDomNode(), reference.getCTP().getDomNode());
+    }
+
+    private static void writeTocTitle(XWPFParagraph paragraph, String title) {
+        paragraph.setAlignment(ParagraphAlignment.CENTER);
+        XWPFRun run = paragraph.createRun();
+        run.setBold(true);
+        run.setFontSize(16);
+        run.setText(title);
+    }
+
+    private static void writeTocField(XWPFParagraph paragraph, String instruction) {
+        XWPFRun begin = paragraph.createRun();
+        begin.getCTR().addNewFldChar().setFldCharType(STFldCharType.BEGIN);
+        XWPFRun instr = paragraph.createRun();
+        instr.getCTR().addNewInstrText().setStringValue(instruction);
+        XWPFRun separate = paragraph.createRun();
+        separate.getCTR().addNewFldChar().setFldCharType(STFldCharType.SEPARATE);
+        XWPFRun placeholder = paragraph.createRun();
+        placeholder.setText("目录将在 Word 中打开并更新域后生成");
+        XWPFRun end = paragraph.createRun();
+        end.getCTR().addNewFldChar().setFldCharType(STFldCharType.END);
+    }
+
+    private static TocField findTocField(XWPFDocument document) {
+        int paragraphIndex = 0;
+        for (IBodyElement element : document.getBodyElements()) {
+            if (!(element instanceof XWPFParagraph paragraph)) continue;
+            String blockId = "body/p" + paragraphIndex++;
+            StringBuilder instruction = new StringBuilder();
+            for (XWPFRun run : paragraph.getRuns()) {
+                for (var text : run.getCTR().getInstrTextList()) {
+                    if (!instruction.isEmpty()) instruction.append(' ');
+                    instruction.append(text.getStringValue());
+                }
+            }
+            String normalized = instruction.toString().strip();
+            if (normalized.matches("(?is)^TOC(?:\\s.*)?$")) {
+                return new TocField(blockId, normalized);
+            }
+        }
+        return null;
+    }
+
+    private record TocField(String blockId, String instruction) { }
+
+    private static void validateFootnoteOperations(EditDocxFootnotesDTO request) {
+        if (request == null || request.getOperations() == null
+                || request.getOperations().isEmpty() || request.getOperations().size() > 50) {
+            throw new BusinessException(400, "脚注操作数量不合法");
+        }
+        Set<Integer> changedExisting = new HashSet<>();
+        for (var operation : request.getOperations()) {
+            if (operation == null || operation.getType() == null) {
+                throw new BusinessException(400, "脚注操作不能为空");
+            }
+            switch (operation.getType()) {
+                case "ADD" -> {
+                    if (operation.getTargetBlockId() == null || operation.getTargetBlockId().isBlank()
+                            || operation.getFootnoteId() != null
+                            || operation.getText() == null || operation.getText().isBlank()) {
+                        throw new BusinessException(400, "ADD 必须提供正文目标段落和脚注文字");
+                    }
+                }
+                case "UPDATE", "DELETE" -> {
+                    if (operation.getFootnoteId() == null || operation.getFootnoteId() < 1
+                            || operation.getTargetBlockId() != null
+                            || !changedExisting.add(operation.getFootnoteId())) {
+                        throw new BusinessException(400, "UPDATE/DELETE 必须提供唯一正数脚注 ID");
+                    }
+                    if (operation.getType().equals("UPDATE")
+                            && (operation.getText() == null || operation.getText().isBlank())) {
+                        throw new BusinessException(400, "UPDATE 必须提供脚注文字");
+                    }
+                    if (operation.getType().equals("DELETE") && operation.getText() != null) {
+                        throw new BusinessException(400, "DELETE 不能提供脚注文字");
+                    }
+                }
+                default -> throw new BusinessException(400, "脚注操作只支持 ADD、UPDATE、DELETE");
+            }
+        }
+    }
+
+    private static List<DocxFootnotesVO.Footnote> readFootnoteItems(XWPFDocument document) {
+        Map<Integer, List<String>> references = footnoteReferences(document);
+        List<DocxFootnotesVO.Footnote> result = new ArrayList<>();
+        for (var entry : references.entrySet()) {
+            XWPFFootnote footnote = document.getFootnoteByID(entry.getKey());
+            if (footnote == null) {
+                throw new BusinessException(422, "正文引用了不存在的脚注：" + entry.getKey());
+            }
+            String text = footnote.getParagraphs().stream()
+                    .map(XWPFParagraph::getText)
+                    .filter(value -> value != null && !value.isBlank())
+                    .reduce((left, right) -> left + "\n" + right)
+                    .orElse("");
+            result.add(new DocxFootnotesVO.Footnote(entry.getKey(), text, entry.getValue()));
+        }
+        return List.copyOf(result);
+    }
+
+    private static Map<Integer, List<String>> footnoteReferences(XWPFDocument document) {
+        Map<Integer, List<String>> references = new LinkedHashMap<>();
+        collectFootnoteReferences(document.getBodyElements(), "body", references);
+        return references;
+    }
+
+    private static void collectFootnoteReferences(List<IBodyElement> elements, String parent,
+                                                  Map<Integer, List<String>> references) {
+        int paragraphIndex = 0;
+        int tableIndex = 0;
+        for (IBodyElement element : elements) {
+            if (element instanceof XWPFParagraph paragraph) {
+                String blockId = parent + "/p" + paragraphIndex++;
+                for (XWPFRun run : paragraph.getRuns()) {
+                    for (var reference : run.getCTR().getFootnoteReferenceList()) {
+                        int id;
+                        try {
+                            id = reference.getId().intValueExact();
+                        } catch (ArithmeticException invalid) {
+                            throw new BusinessException(422, "脚注 ID 超出支持范围");
+                        }
+                        references.computeIfAbsent(id, ignored -> new ArrayList<>()).add(blockId);
+                    }
+                }
+            } else if (element instanceof XWPFTable table) {
+                String tablePath = parent + "/t" + tableIndex++;
+                for (int rowIndex = 0; rowIndex < table.getRows().size(); rowIndex++) {
+                    var row = table.getRow(rowIndex);
+                    for (int cellIndex = 0; cellIndex < row.getTableCells().size(); cellIndex++) {
+                        collectFootnoteReferences(row.getCell(cellIndex).getBodyElements(),
+                                tablePath + "/r" + rowIndex + "/c" + cellIndex, references);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void requireReferencedFootnote(XWPFDocument document,
+                                                   Map<Integer, List<String>> references,
+                                                   int id) {
+        if (!references.containsKey(id) || document.getFootnoteByID(id) == null) {
+            throw new BusinessException(404, "脚注不存在或未被正文引用：" + id);
+        }
+    }
+
+    private static void addFootnote(XWPFDocument document,
+                                    EditDocxFootnotesDTO.Operation operation) {
+        XWPFParagraph target = requireParagraph(document, operation.getTargetBlockId());
+        if (target.getCTP().isSetPPr() && target.getCTP().getPPr().isSetSectPr()) {
+            throw new BusinessException(422, "不能在分节边界段落上新增脚注");
+        }
+        XWPFFootnote footnote = document.createFootnote();
+        XWPFParagraph paragraph = footnote.createParagraph();
+        footnote.ensureFootnoteRef(paragraph);
+        appendTextWithBreaks(paragraph, operation.getText());
+
+        XWPFRun reference = target.createRun();
+        reference.getCTR().addNewRPr().addNewRStyle().setVal("FootnoteReference");
+        reference.getCTR().addNewFootnoteReference().setId(footnote.getId());
+    }
+
+    private static void updateFootnoteText(XWPFDocument document, int id, String text) {
+        XWPFFootnote footnote = document.getFootnoteByID(id);
+        if (footnote.getBodyElements().stream().anyMatch(element -> element instanceof XWPFTable)) {
+            throw new BusinessException(422, "包含表格的脚注不能通过文字接口整体修改");
+        }
+        if (footnote.getParagraphs().size() != 1) {
+            throw new BusinessException(422, "多段落脚注不能通过文字接口整体修改");
+        }
+        XWPFParagraph paragraph = footnote.getParagraphs().getFirst();
+        while (!paragraph.getRuns().isEmpty()) {
+            paragraph.removeRun(0);
+        }
+        footnote.ensureFootnoteRef(paragraph);
+        appendTextWithBreaks(paragraph, text);
+    }
+
+    private static void appendTextWithBreaks(XWPFParagraph paragraph, String text) {
+        String[] lines = text.replace("\r\n", "\n").replace('\r', '\n').split("\\n", -1);
+        XWPFRun run = paragraph.createRun();
+        for (int index = 0; index < lines.length; index++) {
+            if (index > 0) run.addBreak();
+            run.setText(lines[index]);
+        }
+    }
+
+    private static void removeFootnoteReferences(XWPFDocument document, int id) {
+        removeFootnoteReferences(document.getBodyElements(), id);
+    }
+
+    private static void removeFootnoteReferences(List<IBodyElement> elements, int id) {
+        for (IBodyElement element : elements) {
+            if (element instanceof XWPFParagraph paragraph) {
+                for (XWPFRun run : paragraph.getRuns()) {
+                    var references = run.getCTR().getFootnoteReferenceList();
+                    for (int index = references.size() - 1; index >= 0; index--) {
+                        if (references.get(index).getId().intValue() == id) {
+                            run.getCTR().removeFootnoteReference(index);
+                        }
+                    }
+                }
+            } else if (element instanceof XWPFTable table) {
+                for (var row : table.getRows()) {
+                    for (var cell : row.getTableCells()) {
+                        removeFootnoteReferences(cell.getBodyElements(), id);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void removeFootnoteById(XWPFDocument document, int id) {
+        List<XWPFFootnote> footnotes = document.getFootnotes();
+        for (int index = 0; index < footnotes.size(); index++) {
+            if (footnotes.get(index).getId().intValueExact() == id) {
+                if (!document.removeFootnote(index)) {
+                    throw new BusinessException(422, "无法删除脚注：" + id);
+                }
+                return;
+            }
+        }
+        throw new BusinessException(404, "脚注不存在：" + id);
+    }
+
+    @Override
     public VersionVO replaceParagraphText(Long userId, Long fileId, Integer sourceVersion,
                                           ReplaceDocxTextDTO request) {
         ensureDistinctBlockIds(request.getOperations());
         return editAndSave(userId, fileId, sourceVersion, request.getInstruction(),
                 "替换 " + request.getOperations().size() + " 个段落的文本", document -> {
             for (ReplaceDocxTextDTO.Operation operation : request.getOperations()) {
-                XWPFParagraph paragraph = requireParagraph(document, operation.getBlockId());
+                XWPFParagraph paragraph = requireReplacementParagraph(document, operation.getBlockId());
                 replaceSimpleParagraph(paragraph, operation.getBlockId(), operation.getText());
             }
         });
@@ -147,6 +569,13 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                     .toList();
             for (ResolvedParagraphEdit edit : edits) {
                 switch (edit.operation().getType()) {
+                    // REPLACE_TEXT 与插入、删除放在同一批执行（TODO 4.2）。
+                    // 一个编辑计划里常同时包含「改一段 + 删一段」；分成两次调用的话，
+                    // 第一次成功、第二次失败会留下半成品：文档既不是原样也不是
+                    // 用户期望的结果，而且用户无法判断改到了哪一步。
+                    // 放在同一批里由同一个版本写入收口，要么整体生效要么整体不生效。
+                    case "REPLACE_TEXT" -> replaceSimpleParagraph(edit.paragraph(),
+                            edit.operation().getBlockId(), edit.operation().getText());
                     case "INSERT_BEFORE" -> insertParagraph(edit.paragraph(), edit.operation().getText(), false);
                     case "INSERT_AFTER" -> insertParagraph(edit.paragraph(), edit.operation().getText(), true);
                     case "DELETE" -> deleteParagraph(edit.paragraph(), edit.operation().getBlockId());
@@ -174,6 +603,16 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                     case "INSERT_ROW_AFTER" -> insertRow(edit.table(), edit.row(),
                             edit.operation().getValues(), true);
                     case "DELETE_ROW" -> deleteRow(edit.table(), edit.row(), edit.operation().getBlockId());
+                    case "SET_ROW_HEIGHT" -> setRowHeight(edit.row(), edit.operation().getDimensionTwips());
+                    case "REPEAT_HEADER_ROW" -> setRepeatHeader(edit.row(),
+                            Boolean.TRUE.equals(edit.operation().getRepeatHeader()));
+                    case "SET_COLUMN_WIDTH" -> setColumnWidth(edit.table(), edit.cell(),
+                            edit.operation().getDimensionTwips());
+                    case "MERGE_CELLS" -> mergeCells(edit.table(), edit.cell(),
+                            requireCell(document, edit.operation().getEndBlockId()),
+                            edit.operation().getBlockId(), edit.operation().getEndBlockId());
+                    case "SPLIT_CELL" -> splitCell(edit.table(), edit.cell(),
+                            edit.operation().getBlockId());
                     default -> throw new BusinessException(400, "不支持的表格操作");
                 }
             }
@@ -185,7 +624,7 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                                       FormatDocxParagraphsDTO request) {
         validateParagraphFormats(request.getOperations());
         return editAndSave(userId, fileId, sourceVersion, request.getInstruction(),
-                "设置 " + request.getOperations().size() + " 个段落的标题或列表格式", document -> {
+                "设置 " + request.getOperations().size() + " 个段落的格式或段前分页", document -> {
             List<ResolvedParagraphFormat> formats = request.getOperations().stream()
                     .map(operation -> new ResolvedParagraphFormat(
                             operation, requireParagraph(document, operation.getBlockId())))
@@ -197,21 +636,8 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                     item -> "SET_NUMBERED".equals(item.operation().getType()))
                     ? createNumbering(document, false) : null;
             for (ResolvedParagraphFormat format : formats) {
-                XWPFParagraph paragraph = format.paragraph();
-                switch (format.operation().getType()) {
-                    case "SET_HEADING" -> {
-                        clearNumbering(paragraph);
-                        paragraph.setStyle("Heading" + format.operation().getLevel());
-                    }
-                    case "SET_NORMAL" -> {
-                        clearNumbering(paragraph);
-                        paragraph.setStyle("Normal");
-                    }
-                    case "SET_BULLET" -> applyNumbering(paragraph, bulletNumId);
-                    case "SET_NUMBERED" -> applyNumbering(paragraph, numberedNumId);
-                    case "CLEAR_LIST" -> clearNumbering(paragraph);
-                    default -> throw new BusinessException(400, "不支持的段落格式操作");
-                }
+                applyParagraphFormat(format.paragraph(), format.operation().getType(),
+                        format.operation().getLevel(), bulletNumId, numberedNumId);
             }
         });
     }
@@ -231,8 +657,222 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         });
     }
 
+    @Override
+    public VersionVO updateHeaderFooterLink(Long userId, Long fileId, Integer sourceVersion,
+                                            UpdateDocxHeaderFooterLinkDTO request) {
+        if (request == null || request.getSectionNo() == null || request.getSectionNo() < 1
+                || request.getLocation() == null
+                || !(request.getLocation().equals("HEADER") || request.getLocation().equals("FOOTER"))
+                || request.getType() == null
+                || request.getLinkedToPrevious() == null) {
+            throw new BusinessException(400, "页眉页脚链接参数不完整");
+        }
+        boolean unlink = !request.getLinkedToPrevious();
+        if (unlink && (request.getText() == null || request.getText().isBlank())) {
+            throw new BusinessException(400, "取消页眉页脚链接时必须提供新文字");
+        }
+        if (!unlink && request.getText() != null && !request.getText().isBlank()) {
+            throw new BusinessException(400, "重新链接到上一节时不能提供页眉页脚文字");
+        }
+        HeaderFooterType type;
+        try {
+            type = HeaderFooterType.valueOf(request.getType());
+        } catch (IllegalArgumentException invalid) {
+            throw new BusinessException(400, "不支持的页眉页脚类型");
+        }
+        boolean header = request.getLocation().equals("HEADER");
+        return editAndSave(userId, fileId, sourceVersion, request.getInstruction(),
+                (unlink ? "取消" : "恢复") + "第 " + request.getSectionNo() + " 节 "
+                        + request.getType() + (header ? " 页眉" : " 页脚") + "链接",
+                document -> {
+                    List<CTSectPr> sections = sectionProperties(document);
+                    if (request.getSectionNo() > sections.size()) {
+                        throw new BusinessException(404, "指定分节不存在");
+                    }
+                    if (!unlink && request.getSectionNo() == 1) {
+                        throw new BusinessException(400, "第一节没有上一节，不能设置链接");
+                    }
+                    CTSectPr section = sections.get(request.getSectionNo() - 1);
+                    if (unlink) {
+                        if (hasReference(section, header, type)) {
+                            throw new BusinessException(409, "该分节页眉页脚已经是独立内容");
+                        }
+                        createIndependentHeaderFooter(document, section, header, type, request.getText());
+                    } else {
+                        if (!hasReference(section, header, type)) {
+                            throw new BusinessException(409, "该分节页眉页脚已经链接到上一节");
+                        }
+                        removeReference(section, header, type);
+                    }
+                });
+    }
+
+    private static List<CTSectPr> sectionProperties(XWPFDocument document) {
+        List<CTSectPr> sections = new ArrayList<>();
+        for (IBodyElement element : document.getBodyElements()) {
+            if (element instanceof XWPFParagraph paragraph
+                    && paragraph.getCTP().isSetPPr()
+                    && paragraph.getCTP().getPPr().isSetSectPr()) {
+                sections.add(paragraph.getCTP().getPPr().getSectPr());
+            }
+        }
+        if (document.getDocument().getBody().isSetSectPr()) {
+            sections.add(document.getDocument().getBody().getSectPr());
+        }
+        return sections;
+    }
+
+    private static boolean hasReference(CTSectPr section, boolean header, HeaderFooterType type) {
+        STHdrFtr.Enum target = xmlType(type);
+        if (header) {
+            for (var reference : section.getHeaderReferenceList()) {
+                if (reference.getType() == target) return true;
+            }
+        } else {
+            for (var reference : section.getFooterReferenceList()) {
+                if (reference.getType() == target) return true;
+            }
+        }
+        return false;
+    }
+
+    private static void removeReference(CTSectPr section, boolean header, HeaderFooterType type) {
+        STHdrFtr.Enum target = xmlType(type);
+        if (header) {
+            for (int index = section.sizeOfHeaderReferenceArray() - 1; index >= 0; index--) {
+                if (section.getHeaderReferenceArray(index).getType() == target) {
+                    section.removeHeaderReference(index);
+                }
+            }
+        } else {
+            for (int index = section.sizeOfFooterReferenceArray() - 1; index >= 0; index--) {
+                if (section.getFooterReferenceArray(index).getType() == target) {
+                    section.removeFooterReference(index);
+                }
+            }
+        }
+    }
+
+    private static void createIndependentHeaderFooter(XWPFDocument document, CTSectPr section,
+                                                       boolean header, HeaderFooterType type,
+                                                       String text) {
+        if (type == HeaderFooterType.FIRST) {
+            if (section.isSetTitlePg()) section.getTitlePg().setVal(true);
+            else section.addNewTitlePg().setVal(true);
+        }
+        if (type == HeaderFooterType.EVEN) {
+            document.getSettings().setEvenAndOddHeadings(true);
+        }
+        var policy = new XWPFHeaderFooterPolicy(document, section);
+        STHdrFtr.Enum xmlType = xmlType(type);
+        XWPFParagraph paragraph;
+        if (header) {
+            var part = policy.createHeader(xmlType);
+            paragraph = part.getParagraphs().isEmpty() ? part.createParagraph() : part.getParagraphs().getFirst();
+        } else {
+            var part = policy.createFooter(xmlType);
+            paragraph = part.getParagraphs().isEmpty() ? part.createParagraph() : part.getParagraphs().getFirst();
+        }
+        String[] lines = text.replace("\r\n", "\n").replace('\r', '\n').split("\\n", -1);
+        XWPFRun run = paragraph.createRun();
+        for (int index = 0; index < lines.length; index++) {
+            if (index > 0) run.addBreak();
+            run.setText(lines[index]);
+        }
+    }
+
+    private static STHdrFtr.Enum xmlType(HeaderFooterType type) {
+        return switch (type) {
+            case DEFAULT -> STHdrFtr.DEFAULT;
+            case FIRST -> STHdrFtr.FIRST;
+            case EVEN -> STHdrFtr.EVEN;
+        };
+    }
+
+    @Override
+    public VersionVO editPlan(Long userId, Long fileId, Integer sourceVersion,
+                              DocumentEditPlan plan, String instruction) {
+        return editAndSave(userId, fileId, sourceVersion, instruction, plan.summary(), ChangeType.AI_EDIT, document -> {
+            BigInteger bulletNumId = needsFormat(plan, DocumentEditPlan.FormatType.SET_BULLET)
+                    ? createNumbering(document, true) : null;
+            BigInteger numberedNumId = needsFormat(plan, DocumentEditPlan.FormatType.SET_NUMBERED)
+                    ? createNumbering(document, false) : null;
+            // 所有路径先在源版本解析为对象；插入/删除后不能再按旧路径定位。
+            List<Runnable> edits = new ArrayList<>();
+            for (DocumentEditPlan.Operation operation : plan.operations()) {
+                DocumentEditPlan.OperationType type = operation.operationType();
+                if (type == null) {
+                    throw new BusinessException(422, "计划包含尚不支持执行的操作");
+                }
+                String target = operation.target();
+                if (type == DocumentEditPlan.OperationType.SET_CELL_TEXT) {
+                    XWPFTableCell cell = requireCell(document, target);
+                    edits.add(() -> replaceCellText(cell, target, operation.content()));
+                } else {
+                    XWPFParagraph paragraph = requireParagraph(document, target);
+                    edits.add(switch (type) {
+                        case REPLACE_TEXT -> () -> replaceSimpleParagraph(paragraph, target, operation.content());
+                        case INSERT_BEFORE -> () -> insertParagraph(paragraph, operation.content(), false);
+                        case INSERT_AFTER -> () -> insertParagraph(paragraph, operation.content(), true);
+                        case DELETE -> () -> deleteParagraph(paragraph, target);
+                        case FORMAT_PARAGRAPH -> {
+                            var format = operation.format();
+                            if (format == null || format.type() == null) {
+                                throw new BusinessException(422, "格式计划缺少受支持的格式参数");
+                            }
+                            yield () -> applyParagraphFormat(paragraph, format.type().name(), format.level(),
+                                    bulletNumId, numberedNumId);
+                        }
+                        case INSERT_IMAGE -> {
+                            var image = operation.image();
+                            if (image == null) throw new BusinessException(422, "图片计划缺少图片参数");
+                            yield () -> appendImage(userId, paragraph, image.fileId(), image.versionNo(),
+                                    image.widthPixels(), image.heightPixels(), target);
+                        }
+                        default -> throw new BusinessException(422, "计划包含尚不支持执行的操作");
+                    });
+                }
+            }
+            // 任一操作失败都只影响内存副本，editAndSave 不会落盘或创建版本。
+            edits.forEach(Runnable::run);
+        });
+    }
+
+    private static boolean needsFormat(DocumentEditPlan plan, DocumentEditPlan.FormatType type) {
+        return plan.operations().stream().anyMatch(operation ->
+                operation.operationType() == DocumentEditPlan.OperationType.FORMAT_PARAGRAPH
+                        && operation.format() != null && operation.format().type() == type);
+    }
+
+    private static void applyParagraphFormat(XWPFParagraph paragraph, String type, Integer level,
+                                               BigInteger bulletNumId, BigInteger numberedNumId) {
+        var formatType = DocumentEditPlan.FormatType.parse(type);
+        if (formatType == null || (formatType == DocumentEditPlan.FormatType.SET_HEADING
+                ? level == null || level < 1 || level > 9 : level != null)) {
+            throw new BusinessException(400, "不支持的段落格式或标题级别");
+        }
+        if (formatType.isPageBreakBefore() && !(paragraph.getBody() instanceof XWPFDocument)) {
+            throw new BusinessException(422, "段前分页仅支持正文顶层段落，不支持表格或页眉页脚");
+        }
+        switch (formatType) {
+            case SET_HEADING -> { clearNumbering(paragraph); paragraph.setStyle("Heading" + level); }
+            case SET_NORMAL -> { clearNumbering(paragraph); paragraph.setStyle("Normal"); }
+            case SET_BULLET -> applyNumbering(paragraph, bulletNumId);
+            case SET_NUMBERED -> applyNumbering(paragraph, numberedNumId);
+            case CLEAR_LIST -> clearNumbering(paragraph);
+            case SET_PAGE_BREAK_BEFORE -> paragraph.setPageBreak(true);
+            case CLEAR_PAGE_BREAK_BEFORE -> paragraph.setPageBreak(false);
+        }
+    }
+
     private VersionVO editAndSave(Long userId, Long fileId, Integer sourceVersion,
                                   String instruction, String summary,
+                                  Consumer<XWPFDocument> editor) {
+        return editAndSave(userId, fileId, sourceVersion, instruction, summary, ChangeType.MANUAL_EDIT, editor);
+    }
+
+    private VersionVO editAndSave(Long userId, Long fileId, Integer sourceVersion,
+                                  String instruction, String summary, ChangeType changeType,
                                   Consumer<XWPFDocument> editor) {
         FileDownload version = versionService.downloadVersion(userId, fileId, sourceVersion);
         if (!isDocx(version)) {
@@ -256,10 +896,21 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
             DocumentVersion created = versionWriter.appendVersion(
                     fileId, userId,
                     new VersionWriter.VersionContent(storageKey, edited.length, Digests.sha256Hex(edited)),
-                    ChangeType.MANUAL_EDIT,
+                    changeType,
                     instruction,
                     summary,
                     sourceVersion);
+            if (TransactionSynchronizationManager.isSynchronizationActive()
+                    && TransactionSynchronizationManager.isActualTransactionActive()) {
+                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                    @Override
+                    public void afterCompletion(int status) {
+                        if (status == STATUS_ROLLED_BACK && !fileStorage.delete(storageKey)) {
+                            log.warn("外层事务回滚后无法清理 DOCX 产物, storageKey={}", storageKey);
+                        }
+                    }
+                });
+            }
             return VersionVO.from(created);
         } catch (RuntimeException e) {
             if (!fileStorage.delete(storageKey)) {
@@ -306,7 +957,9 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         }
         return new DocxStructureVO.Block(path, headingLevel == null ? "PARAGRAPH" : "HEADING",
                 paragraph.getText(), paragraph.getStyle(), headingLevel,
-                null, null, null, images);
+                null, null, null, images, paragraph.getNumFmt(),
+                paragraph.getCTP().isSetPPr() && paragraph.getCTP().getPPr().isSetPageBreakBefore()
+                        ? paragraph.isPageBreak() : null);
     }
 
     private static DocxStructureVO.Block readTable(XWPFTable table, String path) {
@@ -347,8 +1000,29 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
     }
 
     private static XWPFParagraph requireParagraph(XWPFDocument document, String blockId) {
+        if (blockId == null || !blockId.startsWith("body/")) {
+            throw new BusinessException(400, "此操作仅支持正文段落：" + blockId);
+        }
+        return resolveParagraph(document, blockId);
+    }
+
+    private static XWPFParagraph requireReplacementParagraph(XWPFDocument document, String blockId) {
+        if (blockId == null || !blockId.matches("^(?:body|header\\d+|footer\\d+)(?:/t\\d+/r\\d+/c\\d+)*/p\\d+$")) {
+            throw new BusinessException(400, "段落块 ID 格式错误：" + blockId);
+        }
+        String root = blockId.substring(0, blockId.indexOf('/'));
+        try {
+            IBody body = root.equals("body") ? document
+                    : root.startsWith("header") ? document.getHeaderList().get(Integer.parseInt(root.substring(6)))
+                    : document.getFooterList().get(Integer.parseInt(root.substring(6)));
+            return resolveParagraph(body, blockId);
+        } catch (IndexOutOfBoundsException | NumberFormatException e) {
+            throw new BusinessException(400, "段落块不存在于源版本中：" + blockId);
+        }
+    }
+
+    private static XWPFParagraph resolveParagraph(IBody body, String blockId) {
         String[] segments = blockId.split("/");
-        IBody body = document;
         int index = 1;
         try {
             while (index < segments.length) {
@@ -473,54 +1147,126 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         Set<String> operationKeys = new HashSet<>();
         Set<String> deletedRows = new HashSet<>();
         Set<String> insertedRows = new HashSet<>();
+        Set<String> mergeOrSplitTables = new HashSet<>();
+        Map<String, Integer> operationsByTable = new LinkedHashMap<>();
         for (EditDocxTableDTO.Operation operation : operations) {
             if (!operationKeys.add(operation.getType() + ":" + operation.getBlockId())) {
                 throw new BusinessException(400, "同一表格块不能重复执行相同操作：" + operation.getBlockId());
             }
             boolean setCell = "SET_CELL_TEXT".equals(operation.getType());
+            boolean setColumnWidth = "SET_COLUMN_WIDTH".equals(operation.getType());
+            boolean mergeCells = "MERGE_CELLS".equals(operation.getType());
+            boolean splitCell = "SPLIT_CELL".equals(operation.getType());
             boolean insert = operation.getType().startsWith("INSERT_ROW_");
             boolean delete = "DELETE_ROW".equals(operation.getType());
-            if (setCell) {
-                if (!cellPattern.matcher(operation.getBlockId()).matches() || operation.getText() == null
-                        || operation.getValues() != null) {
-                    throw new BusinessException(400, "SET_CELL_TEXT 必须指向单元格且只包含 text");
+            boolean setRowHeight = "SET_ROW_HEIGHT".equals(operation.getType());
+            boolean repeatHeader = "REPEAT_HEADER_ROW".equals(operation.getType());
+            if (setCell || setColumnWidth || mergeCells || splitCell) {
+                if (!cellPattern.matcher(operation.getBlockId()).matches()
+                        || operation.getValues() != null || operation.getRepeatHeader() != null) {
+                    throw new BusinessException(400, "单元格操作必须指向单元格");
+                }
+                if (setCell && (operation.getText() == null || operation.getEndBlockId() != null
+                        || operation.getDimensionTwips() != null)) {
+                    throw new BusinessException(400, "SET_CELL_TEXT 必须且只能包含 text");
+                }
+                if (setColumnWidth && (operation.getText() != null || operation.getEndBlockId() != null
+                        || operation.getDimensionTwips() == null)) {
+                    throw new BusinessException(400, "SET_COLUMN_WIDTH 必须包含 dimensionTwips");
                 }
                 for (String deletedRow : deletedRows) {
                     if (operation.getBlockId().startsWith(deletedRow + "/")) {
                         throw new BusinessException(400, "不能修改同一请求中将被删除的行");
                     }
                 }
+                String table = tablePath(operation.getBlockId());
+                operationsByTable.merge(table, 1, Integer::sum);
+                if (mergeCells || splitCell) {
+                    if (operation.getText() != null || operation.getDimensionTwips() != null) {
+                        throw new BusinessException(400,
+                                operation.getType() + " 不能包含 text 或 dimensionTwips");
+                    }
+                    if (mergeCells) {
+                        if (operation.getEndBlockId() == null
+                                || !cellPattern.matcher(operation.getEndBlockId()).matches()) {
+                            throw new BusinessException(400,
+                                    "MERGE_CELLS 必须指向同一表格的另一个单元格");
+                        }
+                        if (!table.equals(tablePath(operation.getEndBlockId()))) {
+                            throw new BusinessException(400,
+                                    "MERGE_CELLS 的起止单元格必须属于同一表格");
+                        }
+                        if (operation.getBlockId().equals(operation.getEndBlockId())) {
+                            throw new BusinessException(400,
+                                    "MERGE_CELLS 必须覆盖至少两个单元格");
+                        }
+                    } else if (operation.getEndBlockId() != null) {
+                        throw new BusinessException(400, "SPLIT_CELL 不能包含 endBlockId");
+                    }
+                    mergeOrSplitTables.add(table);
+                }
             } else {
-                if (!rowPattern.matcher(operation.getBlockId()).matches() || operation.getText() != null) {
+                if (!rowPattern.matcher(operation.getBlockId()).matches()
+                        || operation.getText() != null || operation.getEndBlockId() != null) {
                     throw new BusinessException(400, "行操作必须指向表格行且不能包含 text");
                 }
-                if (insert && (operation.getValues() == null || operation.getValues().isEmpty())) {
+                if (insert && (operation.getValues() == null || operation.getValues().isEmpty()
+                        || operation.getDimensionTwips() != null || operation.getRepeatHeader() != null)) {
                     throw new BusinessException(400, operation.getType() + " 必须包含 values");
                 }
-                if (delete && operation.getValues() != null) {
-                    throw new BusinessException(400, "DELETE_ROW 不能包含 values");
+                if (!insert && operation.getValues() != null) {
+                    throw new BusinessException(400, operation.getType() + " 不能包含 values");
                 }
                 if (delete) {
+                    if (operation.getDimensionTwips() != null || operation.getRepeatHeader() != null) {
+                        throw new BusinessException(400, "DELETE_ROW 不能包含格式字段");
+                    }
                     if (insertedRows.contains(operation.getBlockId())) {
                         throw new BusinessException(400, "同一行不能同时作为插入参照和删除目标");
                     }
                     deletedRows.add(operation.getBlockId());
-                } else {
+                } else if (insert) {
                     if (deletedRows.contains(operation.getBlockId())) {
                         throw new BusinessException(400, "同一行不能同时作为插入参照和删除目标");
                     }
                     insertedRows.add(operation.getBlockId());
+                } else if (setRowHeight) {
+                    if (operation.getDimensionTwips() == null || operation.getRepeatHeader() != null
+                            || deletedRows.contains(operation.getBlockId())) {
+                        throw new BusinessException(400, "SET_ROW_HEIGHT 字段不合法或目标行将被删除");
+                    }
+                } else if (repeatHeader) {
+                    if (operation.getRepeatHeader() == null || operation.getDimensionTwips() != null
+                            || deletedRows.contains(operation.getBlockId())) {
+                        throw new BusinessException(400, "REPEAT_HEADER_ROW 字段不合法或目标行将被删除");
+                    }
                 }
+                operationsByTable.merge(tablePath(operation.getBlockId()), 1, Integer::sum);
+            }
+        }
+        for (String table : mergeOrSplitTables) {
+            if (operationsByTable.getOrDefault(table, 0) != 1) {
+                throw new BusinessException(400,
+                        "合并或拆分必须作为该表格在本次请求中的单独结构操作");
             }
         }
         for (EditDocxTableDTO.Operation operation : operations) {
-            if ("SET_CELL_TEXT".equals(operation.getType())) {
+            if ("SET_CELL_TEXT".equals(operation.getType())
+                    || "SET_COLUMN_WIDTH".equals(operation.getType())) {
                 int cellSeparator = operation.getBlockId().lastIndexOf("/c");
                 if (deletedRows.contains(operation.getBlockId().substring(0, cellSeparator))) {
                     throw new BusinessException(400, "不能修改同一请求中将被删除的行");
                 }
             }
         }
+    }
+
+    private static String tablePath(String blockId) {
+        int rowSeparator = blockId.lastIndexOf("/r");
+        if (rowSeparator < 0) {
+            throw new BusinessException(400, "表格块 ID 格式错误：" + blockId);
+        }
+        return blockId.substring(0, rowSeparator);
     }
 
     private static void validateParagraphFormats(List<FormatDocxParagraphsDTO.Operation> operations) {
@@ -768,6 +1514,11 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
     private void appendImage(Long userId, XWPFParagraph paragraph, Long imageFileId,
                              Integer imageVersionNo, Integer widthPixels, Integer heightPixels,
                              String targetDescription) {
+        if (imageFileId == null || imageFileId <= 0 || imageVersionNo == null || imageVersionNo <= 0
+                || widthPixels == null || widthPixels < 1 || widthPixels > 10000
+                || heightPixels == null || heightPixels < 1 || heightPixels > 10000) {
+            throw new BusinessException(400, "图片文件、版本和显示尺寸不合法");
+        }
         FileDownload image = versionService.downloadVersion(
                 userId, imageFileId, imageVersionNo);
         int pictureType = pictureType(image);
@@ -807,9 +1558,13 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
 
     private static ResolvedTableEdit resolveTableEdit(XWPFDocument document,
                                                        EditDocxTableDTO.Operation operation) {
-        if ("SET_CELL_TEXT".equals(operation.getType())) {
-            return new ResolvedTableEdit(operation, null, null,
-                    requireCell(document, operation.getBlockId()));
+        if ("SET_CELL_TEXT".equals(operation.getType())
+                || "SET_COLUMN_WIDTH".equals(operation.getType())
+                || "MERGE_CELLS".equals(operation.getType())
+                || "SPLIT_CELL".equals(operation.getType())) {
+            XWPFTableCell cell = requireCell(document, operation.getBlockId());
+            return new ResolvedTableEdit(operation, cell.getTableRow().getTable(),
+                    cell.getTableRow(), cell);
         }
         XWPFTableRow row = requireRow(document, operation.getBlockId());
         return new ResolvedTableEdit(operation, row.getTable(), row, null);
@@ -882,6 +1637,328 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         }
     }
 
+    private static void setRowHeight(XWPFTableRow row, Integer heightTwips) {
+        row.setHeight(heightTwips);
+        row.setHeightRule(TableRowHeightRule.AT_LEAST);
+    }
+
+    private static void setRepeatHeader(XWPFTableRow row, boolean repeat) {
+        var properties = row.getCtRow().isSetTrPr()
+                ? row.getCtRow().getTrPr() : row.getCtRow().addNewTrPr();
+        if (repeat && properties.sizeOfTblHeaderArray() == 0) properties.addNewTblHeader();
+        while (!repeat && properties.sizeOfTblHeaderArray() > 0) {
+            properties.removeTblHeader(0);
+        }
+    }
+
+    private static void setColumnWidth(XWPFTable table, XWPFTableCell target, Integer widthTwips) {
+        int column = target.getTableRow().getTableCells().indexOf(target);
+        if (column < 0) throw new BusinessException(400, "无法确定目标列");
+        int expectedCells = table.getRow(0).getTableCells().size();
+        if (column >= expectedCells) throw new BusinessException(400, "目标列超出表格网格");
+        for (var row : table.getRows()) {
+            if (row.getTableCells().size() != expectedCells) {
+                throw new BusinessException(422, "含横向合并单元格的表格暂不支持按列设置宽度");
+            }
+            XWPFTableCell cell = row.getTableCells().get(column);
+            cell.setWidth(String.valueOf(widthTwips));
+            cell.setWidthType(TableWidthType.DXA);
+        }
+    }
+
+    /**
+     * 合并无既有合并的矩形单元格区域。只保留简单文本，合并后的文字写入左上单元格。
+     */
+    private static void mergeCells(XWPFTable table, XWPFTableCell topLeft,
+                                   XWPFTableCell bottomRight, String startBlockId,
+                                   String endBlockId) {
+        int startRow = table.getRows().indexOf(topLeft.getTableRow());
+        int endRow = table.getRows().indexOf(bottomRight.getTableRow());
+        int startColumn = topLeft.getTableRow().getTableCells().indexOf(topLeft);
+        int endColumn = bottomRight.getTableRow().getTableCells().indexOf(bottomRight);
+        if (startRow < 0 || endRow < 0 || startColumn < 0 || endColumn < 0
+                || startRow > endRow || startColumn > endColumn) {
+            throw new BusinessException(400, "合并区域必须按左上到右下顺序指定");
+        }
+        if (startRow == endRow && startColumn == endColumn) {
+            throw new BusinessException(400, "合并区域必须包含至少两个单元格");
+        }
+
+        int columnCount = table.getRow(0).getTableCells().size();
+        for (XWPFTableRow row : table.getRows()) {
+            if (row.getTableCells().size() != columnCount) {
+                throw new BusinessException(422,
+                        "目标表格已有合并单元格或非规则网格，暂不支持再次合并");
+            }
+            for (XWPFTableCell cell : row.getTableCells()) {
+                if (hasMergeProperties(cell)) {
+                    throw new BusinessException(422,
+                            "目标表格已有合并单元格，暂不支持再次合并");
+                }
+            }
+        }
+
+        List<String> textLines = new ArrayList<>();
+        for (int rowIndex = startRow; rowIndex <= endRow; rowIndex++) {
+            for (int columnIndex = startColumn; columnIndex <= endColumn; columnIndex++) {
+                XWPFTableCell cell = table.getRow(rowIndex).getTableCells().get(columnIndex);
+                validateMergeCell(cell, blockCellId(startBlockId, rowIndex - startRow,
+                        columnIndex - startColumn));
+                for (XWPFParagraph paragraph : cell.getParagraphs()) {
+                    if (!paragraph.getText().isBlank()) {
+                        textLines.add(paragraph.getText().trim());
+                    }
+                }
+            }
+        }
+        replaceMergedCellText(topLeft, startBlockId, textLines);
+
+        int width = endColumn - startColumn + 1;
+        int height = endRow - startRow + 1;
+        for (int rowIndex = startRow; rowIndex <= endRow; rowIndex++) {
+            XWPFTableRow row = table.getRow(rowIndex);
+            if (width > 1) {
+                setGridSpan(row.getTableCells().get(startColumn), width);
+                for (int columnIndex = endColumn; columnIndex > startColumn; columnIndex--) {
+                    row.removeCell(columnIndex);
+                }
+            }
+            if (height > 1) {
+                setVMerge(row.getTableCells().get(startColumn),
+                        rowIndex == startRow ? STMerge.RESTART : STMerge.CONTINUE);
+            }
+        }
+    }
+
+    /**
+     * 拆分本接口形成的完整合并区域；新增单元格为空，并沿用左上单元格的基础属性。
+     */
+    private static void splitCell(XWPFTable table, XWPFTableCell target, String blockId) {
+        int startRow = table.getRows().indexOf(target.getTableRow());
+        int startColumn = target.getTableRow().getTableCells().indexOf(target);
+        if (startRow < 0 || startColumn < 0) {
+            throw new BusinessException(400, "无法确定待拆分的单元格");
+        }
+        int width = gridSpan(target);
+        STMerge.Enum verticalMerge = vMerge(target);
+        if (verticalMerge == STMerge.CONTINUE) {
+            throw new BusinessException(422, "请从纵向合并区域的左上单元格执行拆分");
+        }
+        if (width <= 1 && verticalMerge == null) {
+            throw new BusinessException(422, "目标单元格不是可拆分的合并区域");
+        }
+
+        List<XWPFTableCell> mergeGroup = new ArrayList<>();
+        mergeGroup.add(target);
+        if (verticalMerge == STMerge.RESTART) {
+            for (int rowIndex = startRow + 1; rowIndex < table.getRows().size(); rowIndex++) {
+                List<XWPFTableCell> cells = table.getRow(rowIndex).getTableCells();
+                if (startColumn >= cells.size()) {
+                    break;
+                }
+                XWPFTableCell continuation = cells.get(startColumn);
+                STMerge.Enum value = vMerge(continuation);
+                if (value == null) {
+                    break;
+                }
+                if (value != STMerge.CONTINUE || gridSpan(continuation) != width) {
+                    throw new BusinessException(422, "纵向合并区域结构不一致，无法安全拆分");
+                }
+                mergeGroup.add(continuation);
+            }
+        }
+
+        Set<XWPFTableCell> relatedCells = new HashSet<>(mergeGroup);
+        for (XWPFTableRow row : table.getRows()) {
+            for (XWPFTableCell cell : row.getTableCells()) {
+                if (hasMergeProperties(cell) && !relatedCells.contains(cell)) {
+                    throw new BusinessException(422,
+                            "目标表格还包含其他合并区域，暂不支持拆分");
+                }
+            }
+        }
+        for (int index = 0; index < mergeGroup.size(); index++) {
+            XWPFTableCell cell = mergeGroup.get(index);
+            if (hasHorizontalMerge(cell)) {
+                throw new BusinessException(422, "旧式横向合并单元格暂不支持拆分");
+            }
+            validateMergeCell(cell, index == 0 ? blockId : blockId + "/continued" + index);
+            if (index > 0 && !cell.getText().isBlank()) {
+                throw new BusinessException(422,
+                        "纵向合并的后续单元格包含文字，无法安全拆分");
+            }
+        }
+
+        for (XWPFTableCell cell : mergeGroup) {
+            XWPFTableRow row = cell.getTableRow();
+            TableWidthType widthType = safeCellWidthType(cell);
+            int cellWidth = safeCellWidth(cell);
+            clearMergeProperties(cell);
+            if (width > 1 && cellWidth > 0) {
+                cell.setWidth(String.valueOf(Math.max(1, cellWidth / width)));
+                if (widthType != null) cell.setWidthType(widthType);
+            }
+            for (int offset = 1; offset < width; offset++) {
+                insertSplitCell(row, startColumn + offset, cell, widthType, cellWidth, width);
+            }
+        }
+    }
+
+    private static int safeCellWidth(XWPFTableCell cell) {
+        if (!cell.getCTTc().isSetTcPr() || !cell.getCTTc().getTcPr().isSetTcW()
+                || !cell.getCTTc().getTcPr().getTcW().isSetW()) {
+            return 0;
+        }
+        try {
+            return cell.getWidth();
+        } catch (RuntimeException invalidWidth) {
+            return 0;
+        }
+    }
+
+    private static TableWidthType safeCellWidthType(XWPFTableCell cell) {
+        if (!cell.getCTTc().isSetTcPr() || !cell.getCTTc().getTcPr().isSetTcW()) {
+            return null;
+        }
+        try {
+            return cell.getWidthType();
+        } catch (RuntimeException invalidWidth) {
+            return null;
+        }
+    }
+
+    private static String blockCellId(String startBlockId, int rowOffset, int columnOffset) {
+        int rowSeparator = startBlockId.lastIndexOf("/r");
+        int columnSeparator = startBlockId.lastIndexOf("/c");
+        String tablePath = startBlockId.substring(0, rowSeparator);
+        int startRow = Integer.parseInt(startBlockId.substring(
+                rowSeparator + 2, columnSeparator));
+        int startColumn = Integer.parseInt(startBlockId.substring(columnSeparator + 2));
+        return tablePath + "/r" + (startRow + rowOffset)
+                + "/c" + (startColumn + columnOffset);
+    }
+
+    private static void validateMergeCell(XWPFTableCell cell, String blockId) {
+        if (!cell.getTables().isEmpty()) {
+            throw new BusinessException(422,
+                    "包含嵌套表格的单元格暂不支持合并或拆分：" + blockId);
+        }
+        String word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        for (Node child = cell.getCTTc().getDomNode().getFirstChild();
+             child != null; child = child.getNextSibling()) {
+            if (child.getNodeType() != Node.ELEMENT_NODE) continue;
+            if (!word.equals(child.getNamespaceURI())
+                    || !Set.of("tcPr", "p").contains(child.getLocalName())) {
+                throw new BusinessException(422,
+                        "单元格包含复杂内容，暂不支持合并或拆分：" + blockId);
+            }
+        }
+        if (cell.getParagraphs().isEmpty()) {
+            throw new BusinessException(422, "单元格缺少必要段落：" + blockId);
+        }
+        for (XWPFParagraph paragraph : cell.getParagraphs()) {
+            assertSimpleParagraph(paragraph, blockId);
+        }
+    }
+
+    private static void replaceMergedCellText(XWPFTableCell cell, String blockId,
+                                               List<String> lines) {
+        XWPFParagraph paragraph = cell.getParagraphs().getFirst();
+        org.openxmlformats.schemas.wordprocessingml.x2006.main.CTRPr runProperties = null;
+        if (!paragraph.getRuns().isEmpty() && paragraph.getRuns().getFirst().getCTR().isSetRPr()) {
+            runProperties = (org.openxmlformats.schemas.wordprocessingml.x2006.main.CTRPr)
+                    paragraph.getRuns().getFirst().getCTR().getRPr().copy();
+        }
+        for (int index = paragraph.getRuns().size() - 1; index >= 0; index--) {
+            paragraph.removeRun(index);
+        }
+        XWPFRun run = paragraph.createRun();
+        if (runProperties != null) run.getCTR().setRPr(runProperties);
+        for (int index = 0; index < lines.size(); index++) {
+            if (index > 0) run.addBreak();
+            run.setText(lines.get(index));
+        }
+        for (int index = cell.getParagraphs().size() - 1; index >= 1; index--) {
+            cell.removeParagraph(index);
+        }
+    }
+
+    private static void insertSplitCell(XWPFTableRow row, int position,
+                                        XWPFTableCell source, TableWidthType widthType,
+                                        int cellWidth, int span) {
+        CTTc inserted = row.getCtRow().insertNewTc(position);
+        if (source.getCTTc().isSetTcPr()) {
+            inserted.setTcPr((CTTcPr) source.getCTTc().getTcPr().copy());
+        }
+        clearMergeProperties(inserted);
+        XWPFTableCell created = new XWPFTableCell(inserted, row, row.getTable().getBody());
+        created.addParagraph();
+        if (cellWidth > 0) {
+            created.setWidth(String.valueOf(Math.max(1, cellWidth / span)));
+            if (widthType != null) created.setWidthType(widthType);
+        }
+    }
+
+    private static boolean hasMergeProperties(XWPFTableCell cell) {
+        return gridSpan(cell) > 1 || vMerge(cell) != null || hasHorizontalMerge(cell);
+    }
+
+    private static boolean hasHorizontalMerge(XWPFTableCell cell) {
+        return cell.getCTTc().isSetTcPr() && cell.getCTTc().getTcPr().isSetHMerge();
+    }
+
+    private static int gridSpan(XWPFTableCell cell) {
+        if (!cell.getCTTc().isSetTcPr() || !cell.getCTTc().getTcPr().isSetGridSpan()
+                || cell.getCTTc().getTcPr().getGridSpan().getVal() == null) {
+            return 1;
+        }
+        return Math.max(1,
+                cell.getCTTc().getTcPr().getGridSpan().getVal().intValue());
+    }
+
+    private static STMerge.Enum vMerge(XWPFTableCell cell) {
+        if (!cell.getCTTc().isSetTcPr() || !cell.getCTTc().getTcPr().isSetVMerge()) {
+            return null;
+        }
+        var merge = cell.getCTTc().getTcPr().getVMerge();
+        return merge.isSetVal() ? merge.getVal() : STMerge.CONTINUE;
+    }
+
+    private static void setGridSpan(XWPFTableCell cell, int width) {
+        CTTcPr properties = cellProperties(cell);
+        if (properties.isSetGridSpan()) {
+            properties.getGridSpan().setVal(BigInteger.valueOf(width));
+        } else {
+            properties.addNewGridSpan().setVal(BigInteger.valueOf(width));
+        }
+    }
+
+    private static void setVMerge(XWPFTableCell cell, STMerge.Enum value) {
+        CTTcPr properties = cellProperties(cell);
+        if (properties.isSetVMerge()) {
+            properties.getVMerge().setVal(value);
+        } else {
+            properties.addNewVMerge().setVal(value);
+        }
+    }
+
+    private static CTTcPr cellProperties(XWPFTableCell cell) {
+        return cell.getCTTc().isSetTcPr()
+                ? cell.getCTTc().getTcPr() : cell.getCTTc().addNewTcPr();
+    }
+
+    private static void clearMergeProperties(XWPFTableCell cell) {
+        clearMergeProperties(cell.getCTTc());
+    }
+
+    private static void clearMergeProperties(CTTc cell) {
+        if (!cell.isSetTcPr()) return;
+        CTTcPr properties = cell.getTcPr();
+        if (properties.isSetGridSpan()) properties.unsetGridSpan();
+        if (properties.isSetVMerge()) properties.unsetVMerge();
+        if (properties.isSetHMerge()) properties.unsetHMerge();
+    }
+
     private static void insertParagraph(XWPFParagraph reference, String text, boolean after) {
         IBody body = reference.getBody();
         XWPFParagraph inserted;
@@ -918,11 +1995,18 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         if (source.getCTP().isSetPPr()) {
             target.getCTP().setPPr((org.openxmlformats.schemas.wordprocessingml.x2006.main.CTPPr)
                     source.getCTP().getPPr().copy());
+            // A section boundary carries header/footer references; it is not paragraph formatting to duplicate.
+            if (target.getCTP().getPPr().isSetSectPr()) target.getCTP().getPPr().unsetSectPr();
+            // A direct page break belongs to the original paragraph, not each inserted neighbour.
+            if (target.getCTP().getPPr().isSetPageBreakBefore()) target.getCTP().getPPr().unsetPageBreakBefore();
         }
     }
 
     private static void deleteParagraph(XWPFParagraph paragraph, String blockId) {
         assertSimpleParagraph(paragraph, blockId);
+        if (paragraph.getCTP().isSetPPr() && paragraph.getCTP().getPPr().isSetSectPr()) {
+            throw new BusinessException(422, "段落包含分节设置，不能直接删除：" + blockId);
+        }
         IBody body = paragraph.getBody();
         if (body instanceof XWPFDocument document) {
             int position = document.getPosOfParagraph(paragraph);
@@ -971,6 +2055,22 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         for (IRunElement runElement : paragraph.getIRuns()) {
             if (!(runElement instanceof XWPFRun run) || !run.getEmbeddedPictures().isEmpty()) {
                 throw new BusinessException(422, "段落包含图片或复杂内容，暂不支持直接替换：" + blockId);
+            }
+        }
+        // XWPFRun also represents field instructions, page numbers and drawings without embedded pictures.
+        // Inspect the underlying XML so replacing plain text cannot silently delete those structures.
+        String word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        for (Node child = paragraph.getCTP().getDomNode().getFirstChild(); child != null; child = child.getNextSibling()) {
+            if (child.getNodeType() != Node.ELEMENT_NODE) continue;
+            if (!word.equals(child.getNamespaceURI()) || !Set.of("pPr", "r").contains(child.getLocalName())) {
+                throw new BusinessException(422, "段落包含域、书签或复杂内容，暂不支持直接替换：" + blockId);
+            }
+            if (!"r".equals(child.getLocalName())) continue;
+            for (Node content = child.getFirstChild(); content != null; content = content.getNextSibling()) {
+                if (content.getNodeType() == Node.ELEMENT_NODE
+                        && (!word.equals(content.getNamespaceURI()) || !Set.of("rPr", "t", "br", "tab", "cr").contains(content.getLocalName()))) {
+                    throw new BusinessException(422, "段落包含域或复杂内容，暂不支持直接替换：" + blockId);
+                }
             }
         }
     }

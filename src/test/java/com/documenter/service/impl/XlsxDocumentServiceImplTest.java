@@ -816,6 +816,63 @@ class XlsxDocumentServiceImplTest {
     }
 
     @Test
+    void calculatesAndReloadsPureNumericFormulasIn1904Workbook() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            workbook.getCTWorkbook().getWorkbookPr().setDate1904(true);
+            workbook.createSheet("数据").createRow(0).createCell(0).setCellFormula("1+1");
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        when(versionService.downloadVersion(USER_ID, FILE_ID, SOURCE_VERSION))
+                .thenReturn(download(source));
+        var calculated = service.calculateFormulas(
+                USER_ID, FILE_ID, SOURCE_VERSION, "数据", "A1");
+        assertEquals("OK", calculated.results().getFirst().status());
+        assertEquals("2", calculated.results().getFirst().value());
+
+        prepareEdit(source);
+        var request = request(value("B1", "NUMBER", "10"));
+        request.setRecalculateFormulas(true);
+        service.editCells(USER_ID, FILE_ID, SOURCE_VERSION, request);
+        try (XSSFWorkbook workbook = new XSSFWorkbook(new ByteArrayInputStream(storedBytes()))) {
+            assertTrue(workbook.isDate1904());
+            assertEquals(2, workbook.getSheet("数据").getRow(0).getCell(0)
+                    .getNumericCellValue());
+            assertEquals(10, workbook.getSheet("数据").getRow(0).getCell(1)
+                    .getNumericCellValue());
+        }
+    }
+
+    @Test
+    void dynamicArrayFormulaIsReportedUnsupportedAndNeverPartiallyCached() throws Exception {
+        byte[] source;
+        try (XSSFWorkbook workbook = new XSSFWorkbook();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            workbook.createSheet("数据").createRow(0).createCell(0)
+                    .setCellFormula("_xlfn.SEQUENCE(3)");
+            workbook.write(output);
+            source = output.toByteArray();
+        }
+        when(versionService.downloadVersion(USER_ID, FILE_ID, SOURCE_VERSION))
+                .thenReturn(download(source));
+
+        var calculated = service.calculateFormulas(
+                USER_ID, FILE_ID, SOURCE_VERSION, "数据", "A1");
+        assertEquals("UNSUPPORTED", calculated.results().getFirst().status());
+        assertTrue(calculated.results().getFirst().message().contains("动态数组"));
+
+        var request = request(value("B1", "NUMBER", "10"));
+        request.setRecalculateFormulas(true);
+        var error = assertThrows(BusinessException.class,
+                () -> service.editCells(USER_ID, FILE_ID, SOURCE_VERSION, request));
+        assertEquals(422, error.getCode());
+        assertTrue(error.getMessage().contains("动态数组"));
+        verify(fileStorage, never()).store(any(byte[].class), any());
+    }
+
+    @Test
     void savesRecalculatedCachesForExistingDependenciesAndNewFilledFormulas() throws Exception {
         byte[] source;
         try (XSSFWorkbook workbook = new XSSFWorkbook();
@@ -915,7 +972,7 @@ class XlsxDocumentServiceImplTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"1904", "FORMULAS", "CELLS", "UNSAFE"})
+    @ValueSource(strings = {"FORMULAS", "CELLS", "UNSAFE"})
     void rejectsUncalculableWorkbookBeforeSavingCaches(String limitation) throws Exception {
         byte[] source;
         try (XSSFWorkbook workbook = new XSSFWorkbook();
@@ -923,7 +980,6 @@ class XlsxDocumentServiceImplTest {
             var sheet = workbook.createSheet("数据");
             sheet.createRow(0).createCell(0).setCellFormula("1+1");
             switch (limitation) {
-                case "1904" -> workbook.getCTWorkbook().getWorkbookPr().setDate1904(true);
                 case "FORMULAS" -> {
                     sheet.getRow(0).createCell(2).setCellFormula("A1+1");
                     properties.getXlsx().setMaxEditOperations(1);
@@ -945,7 +1001,6 @@ class XlsxDocumentServiceImplTest {
                 () -> service.editCells(USER_ID, FILE_ID, SOURCE_VERSION, request));
 
         int expectedCode = switch (limitation) {
-            case "1904" -> 422;
             case "UNSAFE" -> 400;
             default -> 413;
         };

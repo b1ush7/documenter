@@ -70,6 +70,16 @@ public interface ProcessingTaskMapper extends BaseMapper<ProcessingTask> {
     @Select("SELECT cancel_requested FROM processing_task WHERE id = #{taskId}")
     Boolean selectCancelRequested(@Param("taskId") Long taskId);
 
+    /** 任务仍在运行时记录明确输出，防止失败任务被写入虚假产物。 */
+    @Update("""
+            UPDATE processing_task
+               SET output_version = #{outputVersion}
+             WHERE id = #{taskId}
+               AND status = 'RUNNING'
+            """)
+    int setOutputVersion(@Param("taskId") Long taskId,
+                         @Param("outputVersion") Integer outputVersion);
+
     /**
      * 应用重启恢复（TODO 3.4「重启恢复」）。
      *

@@ -10,9 +10,7 @@ import lombok.Data;
  * <p>约束存在的意义：{@code ai_message.content} 是 MEDIUMTEXT，
  * 但一次对话指令不应该有几百 KB，限制长度可以避免把上下文窗口和存储一起打爆。
  *
- * <p>注意：模型调用尚未接入（属于 TODO 4.2 P1 阶段），
- * 当前接口只完成「归属校验 + 消息落库」，
- * 不会返回伪造的助手回复——那会让前端误以为对话已可用。
+ * <p>旧消息接口仅做归属校验和消息落库；模型回复使用 CreateAiReplyDTO。
  */
 @Data
 public class SendAiMessageDTO {

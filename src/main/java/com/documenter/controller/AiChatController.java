@@ -27,9 +27,8 @@ import java.util.List;
  * <p>所有接口的归属判定都来自 {@link SecurityUtil#requireUserId()}，
  * 不接受任何由前端传入的用户 ID；读取消息前必须先通过会话归属校验。
  *
- * <p>当前阶段只提供会话与消息的持久化能力，<b>不调用模型</b>：
- * 模型接入属于 TODO 4.2（P1）。因此发送消息只落库用户输入，
- * 不会返回伪造的助手回复。
+ * <p>本控制器保留会话与用户消息的持久化能力，不调用模型。
+ * 同步模型回复和计划确认由 {@link AiReplyController} 提供。
  */
 @RestController
 @RequestMapping("/ai")
@@ -84,8 +83,7 @@ public class AiChatController {
     /**
      * 发送一条用户消息。
      *
-     * <p>注意：当前不会生成助手回复（模型未接入），
-     * 前端不要基于本接口展示「AI 已作答」的状态。
+     * <p>本接口只记录用户输入；需要模型回复时调用独立的 replies 接口。
      */
     @PostMapping("/sessions/{sessionId}/messages")
     public ApiResponse<AiMessageVO> sendMessage(@PathVariable Long sessionId,

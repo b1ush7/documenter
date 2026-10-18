@@ -53,7 +53,7 @@ Base URL:  http://<host>:8080
 | 409 | 状态冲突（并发编辑、重复操作、资源被占用） |
 | 413 | 文件超过大小限制 |
 | 415 | 文件内容类型不受支持 |
-| 429 | 频率限制（验证码、上传次数、重试次数） |
+| 429 | 频率或额度限制（验证码、上传次数、重试次数、每日 AI 调用次数） |
 | 500 | 服务端异常 |
 | 502 | 外部服务失败（短信发送） |
 
@@ -90,7 +90,7 @@ Token 有效期：Access 15 分钟，Refresh 7 天。刷新返回新的双 Token
 | 文件来源 | `UPLOAD` / `GENERATED` / `CONVERTED` |
 | 版本变更类型 | `UPLOAD` / `AI_EDIT` / `MANUAL_EDIT` / `CONVERT` / `RESTORE` |
 | 任务状态 | `PENDING` / `RUNNING` / `SUCCEEDED` / `FAILED` / `CANCELLED` |
-| 任务类型 | `OCR` / `CONVERT` / `AI_EDIT` / `EXPORT` / `IMAGE_GEN` |
+| 任务类型 | 新建：`CONVERT` / `EXPORT`；`OCR` / `AI_EDIT` / `IMAGE_GEN` 仅历史展示/查询 |
 | 步骤状态 | `PENDING` / `RUNNING` / `SUCCEEDED` / `FAILED` / `SKIPPED` |
 | 会话状态 | `ACTIVE` / `ARCHIVED` |
 | 消息角色 | `USER` / `ASSISTANT` / `TOOL` / `SYSTEM` |
@@ -162,7 +162,7 @@ POST /user/login/code
 
 请求 `{ "phone": "13800000000" }`（校验 `^1[3-9]\d{9}$`）
 
-### 可选：注册验证码预校验
+### 独立消费注册验证码
 
 ```
 POST /user/verify/code
@@ -170,13 +170,11 @@ POST /user/verify/code
 
 请求 `{ "phone": "13800000000", "code": "123456" }`
 
-用于注册流程中「提交注册前先确认验证码有效」，避免用户填完表单才被告知验证码已过期。
-
 > **注意：本接口会真正消费验证码**，成功后验证码立即失效。
-> 因此调用它之后必须紧接着提交注册，不能只做校验不提交。
+> 注册表单应直接提交 `/user/register/by-code`，不能先调用本接口再用同一验证码注册。
 > 另外它固定使用 **REGISTER** 场景，不能用于校验登录或找回密码的验证码。
 
-响应 `data`：`"****0000"`（脱敏手机号字符串）
+独立校验成功时 data 为 null；发送验证码接口的 data 才是脱敏手机号。
 
 错误：
 
@@ -186,6 +184,9 @@ POST /user/verify/code
 | 403 | 账号已被禁用 |
 | 429 | 验证码发送过于频繁（默认 60 秒间隔）/ 今日发送次数已达上限（默认 10 次） |
 | 502 | 验证码发送失败（外部服务问题） |
+| 503 | 已投递但无法确认验证码保存成功，需在重发间隔后重新获取 |
+
+消费时错误次数未达上限返回 400；达到上限的那次返回 429 并立即作废。已消费、已作废或已过期的验证码再次提交返回 400。不能在前端把独立校验结果当成可重复使用的注册凭证。
 
 ## P2 注册页
 
@@ -382,6 +383,51 @@ POST /file/{fileId}/versions/{versionNo}/restore?expectVersion=3
 恢复**不覆盖历史**，而是新建一个 `changeType=RESTORE` 的版本，因此恢复本身也可被再次撤销。
 并发冲突时返回 `409`，`msg` 会告知当前实际版本号。
 
+### 8.1.1 通用页面版式预览
+
+```
+GET /file/{fileId}/versions/{versionNo}/preview                     预览元信息
+GET /file/{fileId}/versions/{versionNo}/pages/{pageNo}/preview      该页图片（PNG）
+GET /admin/files/{fileId}/versions/{versionNo}/preview               管理员入口
+GET /admin/files/{fileId}/versions/{versionNo}/pages/{pageNo}/preview
+```
+
+与上一条「PDF 专用预览」的区别：本组接口接受**任意受支持格式**，内部按需转换。
+两组都绑定明确版本并复用下载路径做归属校验，鉴权没有差异。
+
+**用法**：先取元信息决定怎么渲染，再按页请求图片。
+
+```json
+// GET .../preview
+{
+  "fileId": 10, "versionNo": 2, "contentType": "…wordprocessingml.document",
+  "extension": "docx",
+  "pageCount": null, "requiresConversion": true, "previewable": true,
+  "engine": "libreoffice-kit", "dpi": 110,
+  "message": "页数将在首次渲染时确定"
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| pageCount | 可预览页数；DOCX/XLSX 在首次渲染前为 `null`（避免「只看一眼元信息就把大文档排一遍版」） |
+| requiresConversion | 是否需要外部渲染后端。PDF 与图片为 `false` |
+| previewable | 是否具备预览条件 |
+| engine | 实际引擎；PDF 与图片为 `native` |
+| message | 不可预览或需提示时的可读说明，正常为 `null` |
+
+**图片接口的响应**：
+- 非图片版本返回 **PNG 字节流**，带响应头 `X-Image-Width` / `X-Image-Height`，
+  建议据此刻预留高度避免布局跳动
+- **图片版本原样回传原图**（保留原始格式与透明通道），此时 `Content-Type` 为该图真实类型
+- 响应带 `Cache-Control: private, max-age=3600`；服务端按「内容摘要 + 页号 + DPI」缓存，
+  同一版本重复请求不会重复渲染
+
+**`dpi` 参数**：默认 110，允许 60–200，超出返回 400。分辨率越高越慢、内存占用越大。
+
+**渲染后端未配置时**：元信息接口返回 `previewable=false` 与可操作提示（HTTP 200）；
+图片接口返回 **503**。前端应展示 `message`/`msg`，而不是报「未知错误」。
+
 ### 8.2 文档结构读取（按格式）
 
 ```
@@ -391,6 +437,14 @@ GET /file/{fileId}/versions/{versionNo}/pdf/pages/{pageNo}/preview  单页渲染
 GET /file/{fileId}/versions/{versionNo}/xlsx/structure         XLSX 结构
 GET /file/{fileId}/versions/{versionNo}/xlsx/range             XLSX 区域
 GET /file/{fileId}/versions/{versionNo}/xlsx/formula-results   XLSX 公式计算结果
+GET /file/{fileId}/versions/{versionNo}/header-footer-links   DOCX 分节页眉页脚链接状态
+GET /file/{fileId}/versions/{versionNo}/footnotes             DOCX 正文脚注与引用位置
+GET /file/{fileId}/versions/{versionNo}/table-of-contents     DOCX TOC 域与更新标记
+POST /file/{fileId}/versions/{versionNo}/ocr                  PDF 扫描页或图片云端 OCR
+POST /file/{fileId}/versions/{versionNo}/ocr/text             OCR 结果下载为纯文本
+PUT  /file/{fileId}/versions/{versionNo}/ocr/corrections      保存逐页人工校正
+GET  /file/{fileId}/versions/{versionNo}/ocr/corrections/{fingerprint} 读取人工校正
+POST /file/{fileId}/versions/{versionNo}/ocr/corrections/{fingerprint}/organize AI 整理人工校正内容
 ```
 
 **DOCX 结构** `DocxStructureVO`：
@@ -407,16 +461,45 @@ GET /file/{fileId}/versions/{versionNo}/xlsx/formula-results   XLSX 公式计算
 `blockId` 是稳定标识，**后续所有编辑操作都以它定位目标块**。前端必须原样回传，不要自己重排。
 
 **PDF 内容** `PdfContentVO`：包含 `documentType` 与 `pages[]`，每页有 `pageNo`、`type`（文本型/扫描型）、`text`、字数。
-扫描页的 `text` 为空，需要后续走 OCR（P2 范围）。
+扫描页的 `text` 为空，可把明确版本和页码提交到 `POST /file/{fileId}/versions/{versionNo}/ocr`：
+
+```json
+{"language":"zh+en","pages":[2,3],"dpi":200,
+ "enhance":true,
+ "region":{"x":40,"y":80,"width":900,"height":600}}
+```
+
+响应 `pages[]` 的 `source` 为 `NATIVE`、`OCR` 或 `EMPTY`；OCR 页返回完整页面宽高、区域、整页文字、平均置信度、`needsReview`、启发式 `paragraphs[]`、经校验的 `tables[]` 和按阅读顺序排列的 `lines[]`。每行和表格单元格包含完整页面坐标及置信度；低于阈值的项应进入人工复核。`enhance=true` 会转灰度并拉伸对比度但不改坐标；`paragraphs[]` 只用于复制或文本导出。`tables[]` 仅在云端明确返回且完整覆盖、不重叠、跨度合法时出现，否则错误结构返回 502，前端不要自行猜测表格。传入 `region` 时只上传该矩形，但仍返回完整页面坐标；未传区域时，PDF 有原生文字的页直接返回，不发送云端。顶层 `fingerprint` 是当前 OCR 结果指纹；用户编辑后可把逐页最终文本以及 `tableIndex` 对应的校正表格行列/跨度/单元格文本保存到 `PUT .../ocr/corrections`，之后用同一指纹读取。保存不会修改源文件或创建版本。保存后可调用 `POST .../ocr/corrections/{fingerprint}/organize` 进入现有文本模型流程，响应沿用 `AgentRunResult`；该入口不绑定文档、不开放写工具，但会消耗现有 AI 日额度并受上下文上限限制。云 OCR 默认关闭且只使用管理端启用、设为默认的 `scope=OCR` 模型；启用后页面会上传云端，界面必须提示数据外发风险。`POST .../ocr/text` 用相同请求返回带换页符的 UTF-8 文本附件。原生 PDF 结果、失败码和配置见 [API.md 第 3.11.1 节](../API.md#3111-云端-ocr)。
 
 **PDF 页面预览**返回**图片字节流**，不是 JSON。前端用 `URL.createObjectURL` 渲染。
 页数有限制，超大 PDF 只会渲染部分页。
+
+文字型 PDF 可调用 `POST /file/{fileId}/versions/{versionNo}/pdf/convert-to-docx` 生成新版本：
+
+```json
+{"mode":"LAYOUT","instruction":"按版式优先重建","ocrLanguage":"zh+en"}
+```
+
+`EDITABLE` 适合继续编辑，`LAYOUT` 尽量保留文字横向位置、字号、粗斜体和基础行距。路径版本必须是当前版本，成功后返回 `Version`，可用新 versionNo 读取 DOCX 结构、继续人工或 AI 编辑。不传 `ocrLanguage` 时，含扫描页的转换仍返回 422；传入后扫描页走云端 OCR 再重建文字，模型不可用返回 503。复杂表格/域/脚注、精确分页和 OCR 真实质量仍需提示限制，不使用整页扫描图冒充可编辑内容。
+
+DOCX 页眉页脚链接使用同一路径的 GET/POST：
+
+```json
+{"sectionNo":2,"location":"HEADER","type":"DEFAULT",
+ "linkedToPrevious":false,"text":"第二分节页眉"}
+```
+
+取消链接时 `text` 必填，链接时必须为空。第一节不能链接上一节；重复设置相同状态返回 409。只在确实继承/拥有显式引用的状态下操作，避免覆盖复杂 PAGE、图片或表格内容。
+
+正文脚注 GET 返回被引用的普通脚注及 `referencedBy` 块 ID。POST 使用 `operations[]` 执行 ADD/UPDATE/DELETE，分别需要目标正文段落、脚注 ID 和脚注文字；成功后一次生成一个版本。多段落或含表格等复杂脚注不会通过纯文字 UPDATE 强行覆盖。
+
+TOC POST 可把复杂域插到文档开头或末尾，支持 1～9 级标题和超链接。已有 TOC 时不重复创建，只设置打开文件时更新域；最终标题、页码和分页必须在 Word/LibreOffice 打开后复核。
 
 **XLSX 结构**包含 `sheets[]`（含 `firstRow`/`lastRow`）、`cells[]`、`styles[]`、`charts[]`。
 单元格含 `address`、`type`、`value` 等；**读取单元格数量有上限**，超大表只返回部分。
 
 **XLSX 公式结果**：`results[]` 每项含 `address`、`formula`、`status`、计算值。
-后端用 POI 即时计算**支持的公式**；不支持的函数会返回明确的"需在办公软件中重算"提示，
+后端用 POI 即时计算**支持的公式**；动态数组、溢出引用、结构化表引用、复杂 1904 日期公式及不支持的函数会返回明确的"需在办公软件中重算"提示；1904 工作簿的纯数值公式可直接计算，
 **前端要把这个提示展示出来，不要显示成计算失败**。
 
 ### 8.3 DOCX 编辑
@@ -425,7 +508,7 @@ GET /file/{fileId}/versions/{versionNo}/xlsx/formula-results   XLSX 公式计算
 POST /file/{fileId}/versions/{versionNo}/paragraph-text       替换段落文本
 POST /file/{fileId}/versions/{versionNo}/paragraph-edits      插入/删除段落
 POST /file/{fileId}/versions/{versionNo}/table-edits          编辑表格
-POST /file/{fileId}/versions/{versionNo}/paragraph-formats    设置标题/正文/列表格式
+POST /file/{fileId}/versions/{versionNo}/paragraph-formats    设置标题/正文/列表格式或段前分页
 POST /file/{fileId}/versions/{versionNo}/inline-images        插入图片
 ```
 
@@ -435,7 +518,7 @@ POST /file/{fileId}/versions/{versionNo}/inline-images        插入图片
 {
   "instruction": "把第二段改得更正式",
   "operations": [
-    { "blockId": "p-2", "text": "新的段落文本" }
+    { "blockId": "body/p2", "text": "新的段落文本" }
   ]
 }
 ```
@@ -451,11 +534,17 @@ POST /file/{fileId}/versions/{versionNo}/inline-images        插入图片
 | --- | --- |
 | paragraph-text | `blockId`、`text` |
 | paragraph-edits | `instruction`、`operations[].type`（插入/删除）、`blockId`、`text` |
-| table-edits | `type`、`blockId`、`text` |
+| table-edits | `type`、`blockId`、`endBlockId`（合并时使用）、`text`、`values`、`dimensionTwips`、`repeatHeader` |
 | paragraph-formats | `type`、`blockId`、`level`（标题层级） |
 | inline-images | `blockId`、`imageFileId`、`imageVersionNo`、`widthPixels`、`heightPixels` |
 
 **响应统一返回新建的版本 `Version`**，前端据此刷新版本列表与预览。
+
+paragraph-formats 新增 SET_PAGE_BREAK_BEFORE / CLEAR_PAGE_BREAK_BEFORE，只用于 body/pN 正文顶层段落，不传 level。清除操作显式关闭段前分页，不移除手工分页符或分节设置；表格内段落返回 422。结构的 pageBreakBefore 为 true/false/null，null 表示未直接设置、可能继承样式，不应显示为确定关闭。插入段落不复制参照段落的直接分页属性，其他样式仍可能影响实际分页；保存后用新版本预览核对。
+
+结构查询的 blocks 末尾现在可能包含 HEADER/FOOTER 容器，children 为页眉页脚中的段落、表格及图片；正文原有 body 路径不变。例如 `header0/p1`、`footer0/t0/r0/c0/p0` 可通过 paragraph-text 替换普通段落。N 是该版本的部件索引，不是页码或节号；跨节共享同一页眉页脚时，修改会作用于所有引用位置，提交前应在界面说明。
+
+页眉页脚支持普通文字替换和分节链接/独立设置；正文脚注与 TOC 域另有专门接口。页码域、书签、图片、超链接、内容控件等复杂段落替换返回 422；不能把“能读出文字”当作“可以整段编辑”。段落插入不会复制分节设置，含分节设置的段落不能直接删除。表格支持行高、整列宽度、重复标题行，以及规则矩形单元格的合并/拆分；列宽遇到横向合并网格返回 422。`MERGE_CELLS` 用 `blockId` 和 `endBlockId` 标记左上/右下单元格，`SPLIT_CELL` 只指向该表格唯一合并区域的左上单元格；合并或拆分不能与同一表格的其他编辑同批提交。合并会把非空纯文字按行列顺序保留到左上单元格，拆分恢复空单元格；复杂内容返回 422，跨表、逆序及一乘一区域返回 400。编辑成功后按新版本重新读取结构与预览，既有版本比较也会返回页眉页脚文字差异。详细规则见 [API.md 第 4.3～4.11 节](../API.md#43-读取-docx-结构)。
 
 **约束**：部分操作会被拒绝（如"删除表格中唯一的行"、"替换含图片的段落"），
 返回 `400` 或 `422`，`msg` 会说明原因。前端应把 `msg` 原样展示。
@@ -468,22 +557,25 @@ POST /file/{fileId}/versions/{versionNo}/xlsx/structure-edits   行列增删
 POST /file/{fileId}/versions/{versionNo}/xlsx/sheet-edits       工作表增删改名
 POST /file/{fileId}/versions/{versionNo}/xlsx/data-edits        排序与筛选
 POST /file/{fileId}/versions/{versionNo}/xlsx/formats           基础格式
+POST /file/{fileId}/versions/{versionNo}/xlsx/images            内嵌已有图片的明确版本
 ```
 
-请求公共字段：`instruction`、`sheetName`、`range`（区域，如 `A1:C10`）。
+请求顶层使用 `instruction` 与 `operations` 数组；`sheetName`、`cell`、`range` 等位于各操作对象内。`cell-edits` 的 `recalculateFormulas` 是顶层选项。
 
 各接口特有字段：
 
 | 接口 | 特有字段 |
 | --- | --- |
-| cell-edits | `cell` / `range`、`valueType`（`TEXT`/`NUMBER`/`FORMULA`）、`value`、`formula`、`recalculateFormulas` |
+| cell-edits | `type`（SET_VALUE/SET_FORMULA/CLEAR/SET_RANGE/FILL_FORMULA）、`cell` / `range`、`valueType`（STRING/NUMBER/BOOLEAN/DATE）、`value`、`formula`、`values` |
 | structure-edits | `type`（插入/删除行或列）、`start`、`count` |
 | sheet-edits | `type`（新增/重命名/删除）、`sheetName`、`newName`、`position` |
 | data-edits | `type`（排序/筛选）、`range`、`keyColumn`、`direction`、`hasHeader` |
 | formats | `range`、`fontName`、`fontSize`、`bold`、`italic`、`fontColor`、`horizontalAlignment`、`verticalAlignment`、`wrapText`、`fillColor`、`numberFormat`、`borderStyle` |
+| images | `sheetName`、`cell`、`imageFileId`、`imageVersionNo`、`widthPixels`、`heightPixels`；无需 type |
 
-**注意 `valueType`**：区分文本与公式。如果把 `=SUM(A1:A2)` 当普通文本写入，会变成字符串而不是公式。
-前端在"用户输入以 `=` 开头"时应自动切换为 `FORMULA`，或提供显式开关。
+**注意文本与公式**：SET_VALUE 的 STRING 始终写为普通文本，即使以等号开头。公式应显式使用 SET_FORMULA 或 FILL_FORMULA 并传 formula；SET_RANGE 矩阵中的公式才使用 valueType=FORMULA。界面应提供明确的值类型选择。
+
+XLSX 插图每批 1～20 张，尺寸均必填且为 1～10000 像素，以目标单元格左上角定位，不覆盖单元格内容。选择图片时保存其内部 ID 与明确版本，成功后按返回的新版本预览/下载。不要传 URL、路径或省略版本；该入口直接保存人工编辑，无 AI 确认步骤。参数、来源记录和 400/404/409/413/422 边界见 [API.md 第 3.21 节](../API.md#321-将已有图片插入-xlsx)。
 
 ## P9 版本历史页
 
@@ -495,7 +587,96 @@ POST /file/{fileId}/versions/{versionNo}/xlsx/formats           基础格式
 - `createTime`、`sizeBytes`
 - 操作：预览、下载、**恢复到此版本**
 
-## P10 图片编辑
+### 9.1 修改前后比较
+
+```
+GET /file/{fileId}/versions/{fromVersion}/compare/{toVersion}
+```
+
+响应 `data`：
+
+```json
+{
+  "fileId": 10, "fromVersion": 1, "toVersion": 2, "format": "DOCX",
+  "truncated": false,
+  "changes": [
+    { "type": "MODIFIED", "key": "body/p1", "label": "段落 body/p1",
+      "before": "旧内容", "after": "新内容", "kind": "PARAGRAPH" },
+    { "type": "ADDED", "key": "body/p2", "label": "段落 body/p2",
+      "before": null, "after": "新增段落", "kind": "PARAGRAPH" }
+  ]
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| type | `ADDED` / `REMOVED` / `MODIFIED` |
+| key | 定位标识。DOCX 为块 ID（如 `body/p1`、`body/t0/r1/c0`），XLSX 为 `工作表!单元格`（如 `Sheet1!A1`） |
+| label | 面向人的位置描述，可直接展示 |
+| before | 改动前内容；`ADDED` 时为 `null` |
+| after | 改动后内容；`REMOVED` 时为 `null` |
+| kind | 块类型：`PARAGRAPH` / `HEADING` / `CELL` / `IMAGE`，便于按类型显示图标 |
+| truncated | `true` 表示因超出读取上限而未比较完，**此时 `changes` 不是完整结论**，界面必须提示 |
+
+**比较粒度是块/单元格而不是字符**。用户关心的是「第二段被改了」，
+字符级 diff 会把表格与段落改动渲染成一串难以阅读的增删碎片。
+代价是段落内的小改动会显示为整段变化 —— 这是刻意的取舍。
+
+**两个版本都必须显式指定**，没有「和当前版本比」的语义，否则用户看到的差异会随别人编辑而改变。
+两个版本都经下载路径校验归属，因此不能用「自己的旧版本 vs 他人的新版本」探测他人内容。
+
+**注意 `truncated`**：XLSX 结构的单元格读取有上限，超大表的比较结果可能不完整。
+
+### 9.2 导出 PDF
+
+```
+GET /file/{fileId}/versions/{versionNo}/export/pdf
+```
+
+返回 **PDF 字节流**（不是统一 JSON），用 `response.blob()` 处理。
+
+- 该版本本身已是 PDF 时直接返回原内容，不做无意义的再转换
+- 其余格式经渲染后端转换，因此**未配置渲染后端时返回 503**，前端应展示该提示
+- 响应头里的文件名已把原扩展名替换为 `.pdf`（如 `报告.docx` → `报告.pdf`），便于与原文件配对
+- 支持转换的格式：`docx`、`xlsx`、`pptx`（另有 `odt`/`ods`/`odp`/`doc`/`xls`/`ppt`）。
+  **其他格式返回 400 并说明支持范围**，而不是送到后端再失败
+
+### 9.3 应用级兼容性验收
+
+```
+POST /file/{fileId}/versions/{versionNo}/compatibility-check
+```
+
+让办公软件真正打开并排版该版本，检查能否渲染、页数、缺失字体与页面边缘裁切。
+
+```json
+{
+  "fileId": 10, "versionNo": 2, "compatible": true,
+  "engine": "libreoffice-kit", "pageCount": 2, "renderedPages": 2,
+  "missingFonts": ["Courier"],
+  "issues": [
+    { "severity": "WARNING", "code": "MISSING_FONTS",
+      "message": "以下字体缺失并被替换，版式可能与预期不同：Courier" }
+  ]
+}
+```
+
+| 问题代码 | 级别 | 含义 |
+| --- | --- | --- |
+| `NO_PAGES` | ERROR | 可解析但排不出任何页面 |
+| `NO_RENDERED_PAGE` | ERROR | 未产生页面图片，渲染流程异常 |
+| `PAGES_TRUNCATED` | WARNING | 页数超出检查上限，只检查了前若干页 |
+| `MISSING_FONTS` | WARNING | 字体缺失被替换，版式可能不同 |
+| `CONTENT_NEAR_BORDER` | WARNING | 页面边缘存在内容，可能被裁切 |
+
+**只有 ERROR 会使 `compatible=false`**；WARNING 表示「可用但需人工确认」。
+本接口仅支持 DOCX，其他格式返回 400。
+
+**该接口耗时可观**（需要真正排版），建议前端触发时显示进度提示，不要在页面加载时自动调用。
+
+## P10 图片基础处理
+
+仅保留本地格式转换、尺寸调整、裁剪、直角旋转、亮度及单行文字水印。图片生成、智能修图、背景/对象替换和蒙版不在范围；PDF/图片 OCR 使用独立的云端文字识别入口。
 
 ```
 POST /file/{fileId}/versions/{versionNo}/image-edits
@@ -503,26 +684,33 @@ POST /file/{fileId}/versions/{versionNo}/image-edits
 
 ```json
 {
-  "instruction": "裁剪并旋转",
-  "type": "CROP",
-  "x": 0, "y": 0, "width": 800, "height": 600,
-  "degrees": 90,
-  "outputFormat": "PNG",
+  "instruction": "裁剪、旋转、提亮并添加标题",
+  "operations": [
+    {"type": "CROP", "x": 0, "y": 0, "width": 800, "height": 600},
+    {"type": "ROTATE", "degrees": 90},
+    {"type": "BRIGHTNESS", "factor": 1.2},
+    {"type": "ADD_TEXT", "text": "项目周报", "x": 10, "y": 10, "fontSize": 24, "color": "#112233"}
+  ],
+  "outputFormat": "JPEG",
   "jpegQuality": 0.9
 }
 ```
 
 | 字段 | 说明 |
 | --- | --- |
-| type | 操作类型（裁剪/缩放/旋转/压缩/格式转换等） |
-| x, y, width, height | 区域类操作的坐标与尺寸 |
-| degrees | 旋转角度 |
+| operations | 最多 20 项，按顺序执行；字段放在各操作对象内 |
+| operations[].type | CROP / RESIZE / ROTATE / BRIGHTNESS / ADD_TEXT |
+| x, y, width, height | CROP 坐标与尺寸；RESIZE 只使用 width/height |
+| degrees | ROTATE 使用，顺时针 90/180/270 |
+| factor | BRIGHTNESS 使用，0～4，1 为原亮度，保留 alpha |
+| text, x, y | ADD_TEXT 使用；单行纯文本最多 500 字符，x/y 为文字实际像素边界的左上角 |
+| fontSize, color | ADD_TEXT 可选，字号 1～512（默认 24）、#RRGGBB（默认黑色） |
 | outputFormat | 输出格式；`PNG` 保留透明通道，`JPEG` 合成白色背景 |
 | jpegQuality | JPEG 质量 |
 
 响应：新建的版本 `Version`。
 
-**前端注意**：坐标必须映射回**原图像素**。如果界面做了缩放显示，需要自行换算，否则裁剪位置会偏移。
+**前端注意**：显示坐标须换算为对应操作执行时图片的像素坐标，前面的裁剪/缩放/旋转会改变后续坐标和边界。文字越界返回 400，不会自动裁字；系统缺少对应字体返回 422。PNG 保留透明度，JPEG 合成白底，jpegQuality 仅能用于 JPEG 输出。失败不生成部分版本；完整参数及边界见 [API.md 第 3.20 节](../API.md#320-本地编辑-pngjpeg-图片)。
 
 ## P11 DOCX 生成
 
@@ -552,8 +740,7 @@ POST /file/docx/generate
 
 响应：新建的 `FileAsset`（`source` 为 `GENERATED`）。
 
-**若接了模板**：`GET /admin/templates` 返回的 `enabled=true` 项里有 `variables`（JSON 数组字符串），
-前端解析后动态渲染表单。变量定义形如：
+模板模式先调用登录可用的 `GET /templates`，`data` 是已启用且已有内容版本的 DOCX 模板数组。普通用户使用此入口；`GET /admin/templates` 仍仅供管理员管理。将列表中 `variables` JSON 字符串解析为表单定义：
 
 ```json
 [
@@ -562,6 +749,21 @@ POST /file/docx/generate
 ```
 
 `name` 是占位符标识（只允许字母数字下划线、不能以数字开头），`label` 用于界面显示。
+
+模板正文/表格使用 `{{name}}`。提交同一个生成入口：
+
+```json
+{
+  "templateId": 11,
+  "templateVersion": 3,
+  "fileName": "本周周报.docx",
+  "variables": {"title": "本周进展"}
+}
+```
+
+`templateVersion` 必须使用所选模板当前 versionNo，模板模式不传 title 或 blocks。变量只提交纯文本字符串；必填变量不能省略、null 或全空白，可选未填置空字符串。未知变量拒绝，单值最多 10000 字符。支持跨文字片段占位符，不支持循环、图片变量、页眉页脚等位置或复杂段落中的变量。
+
+成功后得到独立的 GENERATED 文件和版本 1，进入文件页复用已有按版本预览/下载。409 表示模板内容或变量定义发生更新，重新获取列表并让用户确认填写；404 表示模板缺失或停用，422 表示模板结构不支持或损坏，预览后端不可用返回 503。完整限制见 [API.md 第 4.2 节](../API.md#42-按结构生成-docx)。
 
 ---
 
@@ -621,18 +823,18 @@ POST /task/{taskId}/retry        重试
 - 已进入终态的任务 → 幂等返回当前状态，不报错
 
 **重试语义**：只允许重试 `FAILED` 或 `CANCELLED` 的任务；`SUCCEEDED` 会返回 `409`。
+已停用的 IMAGE_GEN 是例外：所有状态都拒绝重试并返回业务码 400，只提供历史查询和取消。
 重试会**新建一个任务**，原任务记录保留（便于排查失败原因）。
 重试次数达上限返回 `429`。
 
 ### 进度更新方式
 
-目前**只有轮询**：`GET /task/{taskId}`。
+任务进度**只有轮询**：`GET /task/{taskId}`。
 
 建议：任务处于 `PENDING`/`RUNNING` 时每 2 秒轮询一次，进入终态后停止。
 任务列表页同理，但有列表时可放宽到 5 秒。
 
-> 后端 TODO 3.4 里"是否用 SSE 推送进度"尚未定案。若后续改用 SSE，
-> 会在现有服务上**新增**推送端点，不会破坏现有轮询接口。
+AI 回复文本有独立 SSE 接口；异步任务仍不支持 SSE，继续使用轮询。
 
 ### 任务提交（当前主要由后端流程调用）
 
@@ -654,11 +856,14 @@ POST /task
 
 | 字段 | 说明 |
 | --- | --- |
-| taskType | `OCR`/`CONVERT`/`AI_EDIT`/`EXPORT`/`IMAGE_GEN` |
-| inputVersion | 不传表示使用当前最新版本 |
+| taskType | `CONVERT`/`EXPORT`；`OCR`、`AI_EDIT`、`IMAGE_GEN` 仅历史展示/查询 |
+| fileId | 必填，必须是自己的文件 |
+| inputVersion | 不传表示使用当前最新版本，不得超过最新版本 |
 | idempotencyKey | **幂等键**：同一用户同一键只会创建一个任务，前端可安全重试提交 |
-| expectVersion | 期望的当前版本，用于并发保护，不符返回 `409` |
+| expectVersion | 兼容字段；真实处理器以 inputVersion 做版本冲突判断 |
 | timeoutSeconds | 10-3600，不传取服务端默认 |
+
+IMAGE_GEN 只保留历史展示和筛选，不展示新建或重试操作；旧排队记录可能以 FAILED / TASK_TYPE_DISABLED 收尾。已有图片通过 P10 的同步基础处理接口操作，不创建图片生成任务。
 
 **幂等键用法**：为"一次用户意图"生成一个 UUID，重试提交时沿用同一个键。
 命中时后端直接返回已有任务，**不会重复执行**。
@@ -715,13 +920,33 @@ POST /ai/sessions/{sessionId}/messages    { "content": "把第二段改正式一
 
 消息列表按时间正序返回。`role` 取值 `USER`/`ASSISTANT`/`TOOL`/`SYSTEM`。
 
-> ### 重要：当前不生成 AI 回复
->
-> 模型调用属于 **TODO 4.2（P1 阶段）**，尚未接入。
-> `POST /ai/sessions/{sessionId}/messages` **只落库用户消息**，不会返回助手回复。
->
-> **前端不要显示"AI 正在思考"或 loading 态**，否则用户会一直等待。
-> 建议在界面上明确标注"模型接入中"，或暂时隐藏发送入口。
+旧 `POST .../messages` 仍只记录用户消息。需要模型回复时直接调用新增接口，不要先通过旧接口重复保存：
+
+```text
+POST /ai/sessions/{sessionId}/replies
+POST /ai/sessions/{sessionId}/replies/stream
+GET  /ai/sessions/{sessionId}/replies/{messageId}
+POST /ai/sessions/{sessionId}/replies/{messageId}/confirm
+POST /ai/sessions/{sessionId}/replies/{messageId}/discard
+```
+
+发送体：`{"content":"把第二段改正式一点","versionNo":1,"idempotencyKey":"客户端生成的稳定键","sources":[{"title":"产品说明","url":"https://example.test","excerpt":"待核验摘录"}]}`。`sources` 可有 0～5 条，只能是纯数据文本；服务端会回显来源并给出 `verificationNotice`，不表示已联网核验。绑定文档支持 DOCX 编辑，以及 XLSX 公式、新表格和基础图表，versionNo 必填；纯对话不传版本。旧会话 CRUD 不变。
+
+返回 `AiReply`，包含助手 `message`、`runStatus`、`planStatus`、`sourceVersion`、`outputVersion`、过程与用量 `result`、确认前逐项内容差异 `changes`。完整字段和状态规则见 [API.md 第 8 节](../API.md#8-ai-回复与确认编辑)。
+
+界面流程：发送时显示同步请求状态；超时重发沿用同一幂等键，若返回 RUNNING 则通过 GET 查询。PENDING 时显示 before/after、操作类型和理由，再提供确认/放弃；确认和放弃均无需请求体。CONFIRMED 时按 outputVersion 预览、比较和下载。FAILED 不代表编辑成功；stub 模型和未配置计价必须明确展示，不能显示真实模型完成或免费。放弃后可用新键继续发送调整要求。
+
+`/replies/stream` 返回 `text/event-stream;charset=UTF-8`：`started` 给出 replyId，`delta` 携带真实模型文本增量，`completed` 携带完整 AiReply，`error` 携带统一错误对象。断线可使用 started 中的 replyId 调 GET 恢复最终状态。模型不支持流式时，会在完成后退回一次完整 delta，协议不变。确认前提供内容差异，页面排版预览仍使用已保存版本；真实模型与前端端到端联调待验收。
+
+插图也使用相同确认流程：`changes[].type=INSERT_IMAGE` 时，读取其 `image` 对象中的 `fileId/versionNo/widthPixels/heightPixels`，通过既有按版本图片预览展示所选图片，显示“追加到目标段落”及尺寸。该项 before/after 为 null，不代表删除。图片参数同样持久化在 result.plans 中，客户端不重传计划；确认时服务端再次校验图片归属和版本。完整结构见 [API.md 第 8.3 节](../API.md#83-待确认的-docx-图片插入)。旧文本项的 image 可缺失或为 null。
+
+`changes[].type=FORMAT_PARAGRAPH` 时，使用 `beforeFormat`（原 styleId、headingLevel、numberingFormat、pageBreakBefore）与目标 `format` 展示格式差异；before/after 为 null，不代表删除。支持标题 1～9、正文、项目符号、编号、清除列表，以及正文顶层段落的段前分页设置/取消。pageBreakBefore 为 null 或旧响应没有该字段时，表示未直接设置、可能继承样式；不能解释为确定关闭。客户端不提交格式计划，确认后用新版本预览核对分页。字段见 [API.md 第 8.4 节](../API.md#84-待确认的-docx-基础格式)。
+
+每日额度按 ChatModel 调用尝试计数，包含智能体重试。生成回复的业务码 429（额度用尽）或 503（无法检查额度）仍可能带 `data=AiReply`，应先保存 message.id 和失败状态，再展示 msg；禁止确认或自动换键重试。GET 查询以业务码 0 返回同一 FAILED 记录；原键重放仍返回原失败结果。额度恢复后由用户用新键发送。规则见 [API.md 第 8.5 节](../API.md#85-每用户每日调用额度)。
+
+XLSX 会话通过相同接口提出公式要求。`changes[].type=SET_FORMULA` 时展示目标工作表/单元格、before、after 与 reason；原公式和目标公式带等号，普通原值为文本，空白目标 before 为 null，不表示删除。target 是内部“原始工作表名!A1”定位，最后一个 ! 为分隔符，不额外给工作表名加 Excel 引号。用户确认前不写 XLSX；确认后按 outputVersion 预览或调用公式结果接口，不能把公式文本视为已计算的数值结果。当前不支持 AI 区域填充或行列调整；完整规则见 [API.md 第 8.6 节](../API.md#86-待确认的-xlsx-单元格公式)。
+
+`changes[].type=CREATE_TABLE` 时 `before` 为 null，`after` 展示新表列数、行数以及是否附带图表；`CREATE_CHART` 的 `after` 展示图表类型、分类区域和数值区域。两类计划都只能由服务端工具生成，客户端确认时仍只提交空请求体，不能回传或修改 JSON 计划。确认后一次生成一个 AI_EDIT 版本，可按 versionNo 读取新工作表/图表或预览。限制和协议见 [API.md 第 8.7 节](../API.md#87-待确认的-xlsx-新表格与基础图表)。
 
 ---
 
@@ -886,9 +1111,12 @@ POST   /admin/templates/{id}/content          multipart：替换内容，version
 PUT    /admin/templates/{id}/enabled?enabled=true
 DELETE /admin/templates/{id}
 GET    /admin/templates/{id}/download
+GET    /admin/templates/{id}/versions?page=&size=
+GET    /admin/templates/{id}/versions/{versionNo}/download
+POST   /admin/templates/{id}/versions/{versionNo}/restore?expectVersion=当前内容版本号
 ```
 
-响应 `data`：`DocTemplate`
+响应 `data`：`DocTemplateVO`（列表接口为分页包装，不返回内部 storageKey）
 
 ```json
 {
@@ -913,10 +1141,64 @@ GET    /admin/templates/{id}/download
 
 **新建的模板默认 `enabled=false`**，需要显式启用后才对普通用户可见。
 
-**`variables` 是字符串形式的 JSON 数组**，前端需要二次 `JSON.parse`。
-格式约束：`name` 必填、只允许字母数字下划线且不能以数字开头；非法结构后端返回 `400`。
+元数据 PUT 是完整替换：提交需要保留的全部元数据字段；category、description 为 null、空白或省略时清空，variables 为 null、空白、JSON null 或省略时清空。元数据保存不修改文件、enabled 或 versionNo，启停也不会清空元数据。并发删除/启用或记录变化导致写入失败时返回业务码 `409`，刷新后重试；删除在数据库执行时再次检查模板仍为停用状态。
 
-**替换内容不删除旧文件**（便于回退），清理由后台任务负责。
+**`variables` 是字符串形式的 JSON 数组**，前端需要二次 `JSON.parse`。
+格式约束：最多 100 个变量；`name` 必须是字符串，去除首尾空格后保存，1～64 字符、只允许字母数字下划线且不能以数字开头。名称区分大小写，规范化后不得重复。`label`、`description` 可省略或为 null，非 null 时必须是字符串，分别最多 128、255 字符；`required` 可省略，提供时必须是 JSON 布尔值，不能传字符串、数字或 null。非法结构后端返回业务码 `400`。
+
+创建或替换内容后操作失败、事务明确回滚，会清理本次新上传文件。文件历史列表按 versionNo 倒序分页（page=1、size=20，最多 100），包含 templateId、versionNo、originalName、contentType、extension、sizeBytes、changeType、restoredFromVersion、createTime，不含 storageKey 或变量定义。changeType 为 BASELINE / CREATE / REPLACE / RESTORE；只有恢复记录的 restoredFromVersion 有值。
+
+恢复前先读取模板当前 versionNo，作为必填 expectVersion 提交。恢复只新增文件版本，原历史保留，变量、分类、名称和启停状态不变；可跨历史格式恢复。成功后使用响应中的新 versionNo 刷新页面；并发变化返回业务码 409，先刷新再处理，不要自动更换 expectVersion 重复恢复。缺失历史返回 404，文件缺失返回 500，不能回退为下载最新内容。历史下载和恢复仅限管理员并记录审计。
+
+V6 仅回填已有模板的当前文件版本（BASELINE），保留原版本号，不补造更早历史；其 createTime 是建立索引时间。删除模板后历史接口不可再访问，底层文件与索引仍保留。启用的 DOCX 模板可由普通用户填变量生成，见 P11；生成文件复用按版本预览，管理端没有直接模板预览入口。正式存储回收尚未实现，现有后台任务只清理临时目录。
+
+## P22 审计日志页
+
+```
+GET /admin/audit-logs?page=&size=&userId=&action=&targetType=&targetId=&result=&from=&to=&requestId=
+```
+
+响应 `data`：`PageResult<AuditLog>`
+
+```json
+{
+  "records": [{
+    "id": 7, "userId": 1, "username": "admin_snapshot",
+    "action": "ADMIN_FILE_VIEW", "targetType": "FILE", "targetId": "10",
+    "detail": "查看版本 2 的页面预览元信息", "result": "SUCCESS",
+    "requestIp": "127.0.0.1", "requestId": "req-abc-123",
+    "createTime": "2026-10-15T20:30:00"
+  }],
+  "total": 1, "page": 1, "size": 20, "pages": 1
+}
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| userId | 按操作者过滤 |
+| action | 按动作过滤，见下表 |
+| targetType | `USER` / `FILE` / `VERSION` / `TASK` / `MODEL_CONFIG` |
+| targetId | 按资源 ID 过滤 |
+| result | `SUCCESS` / `FAILURE` |
+| from / to | 时间范围（ISO-8601 本地时间，含端点） |
+| requestId | 按请求链路 ID 过滤 |
+
+**为什么需要这一页**：审计记录此前是「只写不读」——有写入路径但没有查询入口。
+实际后果是「管理员查看用户文档会留痕」这句话无法被验证、账号禁用与角色调整
+事后无法追溯、写入字段是否完整也没有任何环节会发现。
+
+**界面上必须体现的三个字段**：
+
+- `username` 是**快照**，不是当前用户名。用户改名后旧记录仍显示当时的名字 ——
+  这是刻意设计的，用于追溯，前端**不要**去关联当前用户表覆盖它
+- `requestId` 可与后端日志对齐。用户报告某次操作异常时，用响应头里的
+  `X-Request-ID` 能直接定位那次调用产生的全部记录
+- `result` 为 `FAILURE` 的记录包含登录失败、越权尝试等，**建议默认提供
+  「只看失败」的筛选**，这是审计最主要的用途之一
+
+`detail` 在写入时已脱敏（不含密码、密钥、模型 Key 或文件正文），可安全展示。
+
+**建议的快捷筛选**：按动作、只看 `FAILURE`、按时间倒序（后端已固定按时间倒序，无需前端排序）。
 
 ---
 
@@ -985,10 +1267,10 @@ FileDetailPage
 
 | 能力 | 状态 | 对前端的影响 |
 | --- | --- | --- |
-| AI 模型调用 | **未接入**（P1） | 对话只落库用户消息，不要显示 AI 回复或 loading |
+| AI 模型调用 | 同步回复与确认后端已接通，真实模型效果待验收 | 使用 replies 流程展示差异、确认/放弃；识别 stub，旧 messages 仅记录消息 |
 | 任务进度推送 | **仅轮询** | 需自行实现轮询与停止策略 |
-| OCR | 未实现（P2） | 扫描型 PDF 的 `text` 为空 |
-| PDF 转可编辑 DOCX | 未实现（P2） | 无此入口 |
-| 图片模型编辑（去背景等） | 未实现（P2） | 只有本地确定性操作（裁剪/缩放/旋转/压缩/格式转换） |
-| 前端工程 | **不存在** | 技术选型、构建与部署方式均待定 |
+| OCR | 后端已接入 OpenAI 兼容云端模型，真实供应商和中文质量待验收 | 默认关闭；启用后发送扫描页，展示坐标、置信度和低置信度复核标记 |
+| PDF 转可编辑 DOCX | 已有后端入口 | 原生文字直接转换；扫描页需显式传 `ocrLanguage` 并配置默认 OCR 模型 |
+| 图片基础处理 | 已有后端接口 | 格式转换/缩放/裁剪/直角旋转/亮度/单行水印；图片模型不在范围 |
+| 前端工程 | **不存在** | 已有技术与部署建议，工程位置和方案落地仍待确认 |
 | 邮件验证码 | 未实现 | 只有短信渠道（当前为 Mock） |

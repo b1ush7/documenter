@@ -8,7 +8,8 @@ import com.documenter.enums.VerificationScene;
  * <p>业务层只依赖本接口，因此更换短信/邮件服务商时不需要改动验证码逻辑。
  * 验证码的生成、摘要、有效期、频率与次数限制都在业务层完成，实现类只负责投递。
  *
- * <p>当前 P0 阶段只有 MockVerificationCodeSender 一个实现，由 Spring 直接注入。
+ * <p>当前只有 MockVerificationCodeSender 一个实现，仅在 mock-enabled=true 或未配置时注册。
+ * 显式关闭 Mock 后必须提供真实实现，否则依赖此接口的服务会启动失败，不回退为日志发送。
  * 接入真实服务商时会有第二个实现，届时必须在配置上做出明确选择
  * （例如用 @ConditionalOnProperty 让实现类互斥，或加 @Primary），
  * 而不是靠注入顺序碰运气——多实现共存时 Spring 会直接启动失败，这是期望的行为。

@@ -23,7 +23,7 @@ public class DocTemplateVO {
     private String contentType;
     private String extension;
     private Long sizeBytes;
-    /** 内容版本号，每次替换内容递增。 */
+    /** 内容版本号，每次替换或恢复文件递增；修改元数据不递增。 */
     private Integer versionNo;
     /** 变量定义 JSON 字符串，前端解析后渲染表单。 */
     private String variables;

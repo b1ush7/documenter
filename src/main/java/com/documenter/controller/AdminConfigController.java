@@ -5,10 +5,12 @@ import com.documenter.dto.DocTemplateQueryDTO;
 import com.documenter.dto.ModelConfigQueryDTO;
 import com.documenter.dto.SaveDocTemplateDTO;
 import com.documenter.dto.SaveModelConfigDTO;
+import com.documenter.dto.TemplateVersionQueryDTO;
 import com.documenter.dto.UpdateModelConfigStatusDTO;
 import com.documenter.service.DocTemplateService;
 import com.documenter.service.ModelConfigService;
 import com.documenter.vo.DocTemplateVO;
+import com.documenter.vo.DocTemplateVersionVO;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.ModelConfigVO;
 import com.documenter.vo.PageResult;
@@ -135,7 +137,7 @@ public class AdminConfigController {
         return ApiResponse.success("模板已更新", docTemplateService.update(id, dto));
     }
 
-    /** 替换模板内容，版本号 +1；旧文件保留以便回退。 */
+    /** 替换模板内容，版本号 +1；同一事务保存历史文件索引。 */
     @PostMapping("/templates/{id}/content")
     public ApiResponse<DocTemplateVO> replaceTemplateContent(@PathVariable Long id,
                                                              @RequestParam("file") MultipartFile file) {
@@ -166,5 +168,28 @@ public class AdminConfigController {
                 .contentType(MediaType.parseMediaType(download.contentType()))
                 .contentLength(download.contentLength())
                 .body(download.resource());
+    }
+
+    @GetMapping("/templates/{id}/versions")
+    public ApiResponse<PageResult<DocTemplateVersionVO>> templateVersions(@PathVariable Long id,
+            @Valid @ModelAttribute TemplateVersionQueryDTO query) {
+        return ApiResponse.success(docTemplateService.listVersions(id, query));
+    }
+
+    @GetMapping("/templates/{id}/versions/{versionNo}/download")
+    public ResponseEntity<Resource> downloadTemplateVersion(@PathVariable Long id, @PathVariable Integer versionNo) {
+        FileDownload download = docTemplateService.downloadVersion(id, versionNo);
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.attachment()
+                        .filename(download.downloadFileName(), StandardCharsets.UTF_8).build().toString())
+                .contentType(MediaType.parseMediaType(download.contentType()))
+                .contentLength(download.contentLength())
+                .body(download.resource());
+    }
+
+    @PostMapping("/templates/{id}/versions/{versionNo}/restore")
+    public ApiResponse<DocTemplateVO> restoreTemplateVersion(@PathVariable Long id, @PathVariable Integer versionNo,
+            @RequestParam Integer expectVersion) {
+        return ApiResponse.success("模板文件版本已恢复", docTemplateService.restoreVersion(id, versionNo, expectVersion));
     }
 }

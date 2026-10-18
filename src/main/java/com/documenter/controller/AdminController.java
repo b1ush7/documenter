@@ -4,11 +4,13 @@ import com.documenter.constant.ApiResponse;
 import com.documenter.dto.AdminUpdateUserRoleDTO;
 import com.documenter.dto.AdminUpdateUserStatusDTO;
 import com.documenter.dto.AdminUserQueryDTO;
+import com.documenter.dto.AuditQueryDTO;
 import com.documenter.dto.FileQueryDTO;
 import com.documenter.dto.RenameFileDTO;
 import com.documenter.dto.TaskQueryDTO;
 import com.documenter.service.AdminResourceService;
 import com.documenter.service.AdminUserService;
+import com.documenter.util.PreviewResponses;
 import com.documenter.util.SecurityUtil;
 import com.documenter.vo.AdminFileVO;
 import com.documenter.vo.AdminOverviewVO;
@@ -16,11 +18,12 @@ import com.documenter.vo.AdminTaskDetailVO;
 import com.documenter.vo.AdminTaskVO;
 import com.documenter.vo.AdminUserUsageVO;
 import com.documenter.vo.AdminUserVO;
+import com.documenter.vo.AuditLogVO;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.FileDownload;
+import com.documenter.vo.PagePreviewInfoVO;
 import com.documenter.vo.PageResult;
 import com.documenter.vo.PdfContentVO;
-import com.documenter.vo.PdfPagePreview;
 import com.documenter.vo.VersionVO;
 import com.documenter.vo.XlsxStructureVO;
 import com.documenter.vo.XlsxRangeVO;
@@ -158,7 +161,32 @@ public class AdminController {
                                                  @PathVariable Integer versionNo,
                                                  @PathVariable Integer pageNo,
                                                  @RequestParam(required = false) Integer dpi) {
-        return toPreview(adminResourceService.previewPdfPage(
+        return PreviewResponses.png(adminResourceService.previewPdfPage(
+                fileId, versionNo, pageNo, dpi));
+    }
+
+    /**
+     * 通用页面版式预览元信息（TODO 3.3 管理员入口）。
+     *
+     * <p>与用户侧同构：绑定明确版本，并以文件真实所有者身份走同一套归属校验。
+     */
+    @GetMapping("/files/{fileId}/versions/{versionNo}/preview")
+    public ApiResponse<PagePreviewInfoVO> previewInfo(@PathVariable Long fileId,
+                                                      @PathVariable Integer versionNo) {
+        return ApiResponse.success(adminResourceService.adminPreviewInfo(fileId, versionNo));
+    }
+
+    /**
+     * 通用页面版式预览图片（TODO 3.3 管理员入口）。
+     *
+     * <p>会写入审计日志：管理员查看用户文档内容属于敏感操作。
+     */
+    @GetMapping("/files/{fileId}/versions/{versionNo}/pages/{pageNo}/preview")
+    public ResponseEntity<byte[]> previewPage(@PathVariable Long fileId,
+                                              @PathVariable Integer versionNo,
+                                              @PathVariable Integer pageNo,
+                                              @RequestParam(required = false) Integer dpi) {
+        return PreviewResponses.png(adminResourceService.adminPreviewPage(
                 fileId, versionNo, pageNo, dpi));
     }
 
@@ -208,6 +236,20 @@ public class AdminController {
         return ApiResponse.success("重试任务已创建", adminResourceService.retryTask(taskId));
     }
 
+    /**
+     * 审计日志查询（TODO 4.3「管理员基础页面」）。
+     *
+     * <p>此前审计只写不读，导致「管理员查看用户文档会留痕」无法验证、
+     * 敏感操作事后无法追溯。本接口补齐该能力。
+     *
+     * <p>支持按操作者、动作、目标、结果、时间范围与请求链路 ID 过滤。
+     * 其中 requestId 来自响应头 X-Request-ID，用于把一次调用的记录串起来排查。
+     */
+    @GetMapping("/audit-logs")
+    public ApiResponse<PageResult<AuditLogVO>> listAuditLogs(@Valid AuditQueryDTO query) {
+        return ApiResponse.success(adminResourceService.listAuditLogs(query));
+    }
+
     private static ResponseEntity<Resource> toResponse(FileDownload download) {
         ContentDisposition disposition = ContentDisposition.attachment()
                 .filename(download.downloadFileName(), StandardCharsets.UTF_8)
@@ -217,19 +259,5 @@ public class AdminController {
                 .contentType(MediaType.parseMediaType(download.contentType()))
                 .contentLength(download.contentLength())
                 .body(download.resource());
-    }
-
-    private static ResponseEntity<byte[]> toPreview(PdfPagePreview preview) {
-        ContentDisposition disposition = ContentDisposition.inline()
-                .filename(preview.fileName(), StandardCharsets.UTF_8)
-                .build();
-        byte[] content = preview.content();
-        return ResponseEntity.ok()
-                .header(HttpHeaders.CONTENT_DISPOSITION, disposition.toString())
-                .header("X-Image-Width", String.valueOf(preview.widthPixels()))
-                .header("X-Image-Height", String.valueOf(preview.heightPixels()))
-                .contentType(MediaType.IMAGE_PNG)
-                .contentLength(content.length)
-                .body(content);
     }
 }

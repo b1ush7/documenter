@@ -39,5 +39,13 @@ public class AiMessage implements Serializable {
     private Integer promptTokens;
     private Integer completionTokens;
     private Long durationMs;
+    /** 以下字段仅用于新回复流程；计划只从服务端持久化结果读取。 */
+    private String requestKey;
+    private Long userMessageId;
+    private Integer sourceVersion;
+    private Integer outputVersion;
+    private String runStatus;
+    private String planStatus;
+    private String resultJson;
     private LocalDateTime createTime;
 }

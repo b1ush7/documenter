@@ -40,5 +40,20 @@ public class DocumentVersion implements Serializable {
     private String instruction;
     private String resultSummary;
     private String changeType;
+    /**
+     * 产出该版本的任务 ID；非任务产出（上传、手工编辑）为 null。
+     *
+     * <p>与 {@link #attemptNo} 一起构成唯一键 {@code uk_document_version_task_attempt}，
+     * 用于保证「同一任务的同一次尝试最多产出一个版本」——这是失败重试
+     * 不重复生成版本的最终保证（TODO 3.4）。
+     */
+    private Long taskId;
+    /**
+     * 任务内的执行尝试序号，从 1 开始；非任务产出为 null。
+     *
+     * <p>自动重试沿用同一任务和尝试序号，避免失败重入重复产出；
+     * 用户显式重试会创建新的任务 ID，因此仍可产生新的处理版本。
+     */
+    private Integer attemptNo;
     private LocalDateTime createTime;
 }

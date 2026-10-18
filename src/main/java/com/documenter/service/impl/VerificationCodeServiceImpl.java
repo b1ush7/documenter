@@ -78,6 +78,15 @@ public class VerificationCodeServiceImpl implements VerificationCodeService {
             return 1
             """, Long.class);
 
+    /** 发布验证码时一次性替换摘要、错误计数与有效期，避免中间状态被并发校验读取。 */
+    private static final DefaultRedisScript<Long> PUBLISH_SCRIPT = new DefaultRedisScript<>("""
+            local ttl = tonumber(ARGV[2])
+            if not ttl or ttl < 1 then return 0 end
+            redis.call('HSET', KEYS[1], 'hash', ARGV[1], 'attempts', '0')
+            redis.call('PEXPIRE', KEYS[1], ttl)
+            return 1
+            """, Long.class);
+
     /**
      * 消费验证码：
      *   1 = 校验通过并已删除
@@ -92,13 +101,18 @@ public class VerificationCodeServiceImpl implements VerificationCodeService {
             local attempts = tonumber(redis.call('HGET', KEYS[1], 'attempts') or '0')
             local maxAttempts = tonumber(ARGV[2])
             if attempts >= maxAttempts then
+                redis.call('DEL', KEYS[1])
                 return -1
             end
             if redis.call('HGET', KEYS[1], 'hash') == ARGV[1] then
                 redis.call('DEL', KEYS[1])
                 return 1
             end
-            redis.call('HINCRBY', KEYS[1], 'attempts', 1)
+            local failures = redis.call('HINCRBY', KEYS[1], 'attempts', 1)
+            if failures >= maxAttempts then
+                redis.call('DEL', KEYS[1])
+                return -1
+            end
             return -2
             """, Long.class);
 
@@ -156,9 +170,17 @@ public class VerificationCodeServiceImpl implements VerificationCodeService {
 
         // 验证码本身存 Redis 并设置 TTL；重复发送时覆盖旧值，等价于旧验证码作废
         String codeKey = codeKey(phone, scene);
-        redisTemplate.opsForHash().put(codeKey, "hash", codeHash);
-        redisTemplate.opsForHash().put(codeKey, "attempts", "0");
-        redisTemplate.expire(codeKey, properties.getTtl());
+        Long published;
+        try {
+            published = redisTemplate.execute(PUBLISH_SCRIPT, List.of(codeKey), codeHash,
+                    Long.toString(properties.getTtl().toMillis()));
+        } catch (RuntimeException failure) {
+            log.warn("验证码无法保存, scene={}", scene, failure);
+            throw new BusinessException(503, "验证码暂时无法保存，请稍后重新获取");
+        }
+        if (!Long.valueOf(1).equals(published)) {
+            throw new BusinessException(503, "验证码暂时无法保存，请稍后重新获取");
+        }
 
         auditService.recordSend(phone, scene, codeHash, VerificationRequestContextHolder.get(),
                 properties.getMaxAttempts(), properties.getTtl());

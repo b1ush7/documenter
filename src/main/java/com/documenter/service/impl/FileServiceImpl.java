@@ -190,7 +190,7 @@ public class FileServiceImpl implements FileService {
             }
 
             initialVersionWriter.createInitialVersion(asset, userId, ChangeType.MANUAL_EDIT,
-                    instruction, "本地结构化生成 DOCX");
+                    instruction, "本地生成 DOCX");
             asset.setLatestVersion(1);
             log.info("生成文件保存成功, userId={}, fileId={}, size={}",
                     userId, asset.getId(), content.length);

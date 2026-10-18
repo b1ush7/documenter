@@ -1,5 +1,6 @@
 package com.documenter.service;
 
+import com.documenter.dto.AuditQueryDTO;
 import com.documenter.dto.FileQueryDTO;
 import com.documenter.dto.TaskQueryDTO;
 import com.documenter.vo.AdminFileVO;
@@ -7,8 +8,10 @@ import com.documenter.vo.AdminTaskDetailVO;
 import com.documenter.vo.AdminTaskVO;
 import com.documenter.vo.AdminOverviewVO;
 import com.documenter.vo.AdminUserUsageVO;
+import com.documenter.vo.AuditLogVO;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.FileDownload;
+import com.documenter.vo.PagePreviewInfoVO;
 import com.documenter.vo.PageResult;
 import com.documenter.vo.PdfContentVO;
 import com.documenter.vo.PdfPagePreview;
@@ -48,6 +51,21 @@ public interface AdminResourceService {
 
     PdfPagePreview previewPdfPage(Long fileId, Integer versionNo, Integer pageNo, Integer dpi);
 
+    /**
+     * 页面版式预览元信息（TODO 3.3 的管理员侧入口）。
+     *
+     * <p>以文件的<b>真实所有者</b>身份调用底层服务，因此管理员不需要绕过归属校验，
+     * 而是复用同一套「绑定明确版本 + 归属校验」的逻辑。
+     */
+    PagePreviewInfoVO adminPreviewInfo(Long fileId, Integer versionNo);
+
+    /**
+     * 页面版式预览图片（TODO 3.3）。
+     *
+     * <p>管理员查看用户文档内容属于敏感操作，会写入审计日志。
+     */
+    PdfPagePreview adminPreviewPage(Long fileId, Integer versionNo, Integer pageNo, Integer dpi);
+
     XlsxStructureVO readXlsxStructure(Long fileId, Integer versionNo);
 
     XlsxRangeVO readXlsxRange(Long fileId, Integer versionNo, String sheetName, String range);
@@ -62,4 +80,13 @@ public interface AdminResourceService {
     AdminTaskVO cancelTask(Long taskId);
 
     AdminTaskVO retryTask(Long taskId);
+
+    /**
+     * 查询审计日志（TODO 4.3「管理员基础页面」）。
+     *
+     * <p>此前审计记录只写不读：有实体、有 Mapper、有写入路径，但没有查询入口。
+     * 结果是「管理员查看用户文档会留痕」这句话无法被验证，
+     * 账号禁用、角色调整、密钥更换这些敏感操作也事后无法追溯。
+     */
+    PageResult<AuditLogVO> listAuditLogs(AuditQueryDTO query);
 }

@@ -14,6 +14,7 @@ import com.documenter.service.VersionWriter;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.VersionVO;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.beans.BeanUtils;
 import org.springframework.transaction.annotation.Transactional;
@@ -103,11 +104,36 @@ public class DocumentVersionServiceImpl implements DocumentVersionService, Versi
     public DocumentVersion appendVersion(Long fileId, Long userId, VersionContent content,
                                          ChangeType changeType, String instruction, String summary,
                                          Integer expectVersion) {
+        // 非任务产出（上传、手工编辑）没有任务级幂等标识
+        return appendVersion(fileId, userId, content, changeType, instruction, summary,
+                expectVersion, null, null);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public DocumentVersion appendVersion(Long fileId, Long userId, VersionContent content,
+                                         ChangeType changeType, String instruction, String summary,
+                                         Integer expectVersion, Long taskId, Integer attemptNo) {
         if (fileId == null || userId == null) {
             throw new BusinessException(400, "文件 ID 与用户 ID 不能为空");
         }
         if (content == null || content.storageKey() == null || content.storageKey().isBlank()) {
             throw new BusinessException(400, "版本内容不能为空");
+        }
+        if (taskId != null && (attemptNo == null || attemptNo < 1)) {
+            throw new BusinessException(400, "任务产出必须提供正数的尝试序号");
+        }
+
+        // 任务级幂等（TODO 3.4）：同一任务的同一次尝试已经产出过版本时，
+        // 直接返回已有版本，不再分配版本号、不再落盘。
+        // 这是「失败重试不重复生成版本」的核心判断。
+        if (taskId != null) {
+            DocumentVersion existing = findVersionByTaskAttempt(taskId, attemptNo);
+            if (existing != null) {
+                log.info("任务尝试已产出过版本，复用已有记录, taskId={}, attemptNo={}, versionNo={}",
+                        taskId, attemptNo, existing.getVersionNo());
+                return existing;
+            }
         }
 
         FileAsset asset = fileAssetMapper.selectById(fileId);
@@ -154,7 +180,24 @@ public class DocumentVersionServiceImpl implements DocumentVersionService, Versi
         version.setInstruction(instruction);
         version.setResultSummary(summary);
         version.setChangeType(changeType.name());
-        versionMapper.insert(version);
+        version.setTaskId(taskId);
+        version.setAttemptNo(attemptNo);
+        try {
+            versionMapper.insert(version);
+        } catch (DuplicateKeyException e) {
+            // 并发下同一任务尝试可能同时通过上面的「先查」检查，
+            // 此时唯一索引 uk_document_version_task_attempt 会拒绝第二条。
+            // 回查并返回已存在的版本，保证幂等成立。
+            if (taskId != null) {
+                DocumentVersion existing = findVersionByTaskAttempt(taskId, attemptNo);
+                if (existing != null) {
+                    log.info("并发写入被唯一索引拦截，复用已有版本, taskId={}, attemptNo={}",
+                            taskId, attemptNo);
+                    return existing;
+                }
+            }
+            throw e;
+        }
 
         FileAsset update = new FileAsset();
         update.setId(fileId);
@@ -196,6 +239,28 @@ public class DocumentVersionServiceImpl implements DocumentVersionService, Versi
     }
 
     // ------------------------------------------------------------------ 内部
+
+    /**
+     * 按任务与尝试序号查已产出的版本（TODO 3.4 任务级幂等）。
+     *
+     * <p>同一任务的同一次尝试最多一条记录，因此这里的 selectOne 不会返回多条；
+     * 唯一索引 {@code uk_document_version_task_attempt} 保证这一点。
+     */
+    private DocumentVersion findVersionByTaskAttempt(Long taskId, Integer attemptNo) {
+        return versionMapper.selectOne(Wrappers.<DocumentVersion>lambdaQuery()
+                .eq(DocumentVersion::getTaskId, taskId)
+                .eq(DocumentVersion::getAttemptNo, attemptNo));
+    }
+
+    @Override
+    public boolean hasProducedVersion(Long taskId) {
+        if (taskId == null) {
+            return false;
+        }
+        Long count = versionMapper.selectCount(Wrappers.<DocumentVersion>lambdaQuery()
+                .eq(DocumentVersion::getTaskId, taskId));
+        return count != null && count > 0;
+    }
 
     private DocumentVersion requireVersion(Long fileId, Integer versionNo) {
         if (versionNo == null) {

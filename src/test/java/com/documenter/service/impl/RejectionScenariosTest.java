@@ -11,6 +11,7 @@ import com.documenter.configuration.TaskExecutorProperties;
 import com.documenter.configuration.VerificationCodeProperties;
 import com.documenter.dto.CreateTaskDTO;
 import com.documenter.entity.ProcessingTask;
+import com.documenter.entity.FileAsset;
 import com.documenter.entity.User;
 import com.documenter.enums.VerificationScene;
 import com.documenter.exception.BusinessException;
@@ -363,9 +364,15 @@ class RejectionScenariosTest {
             when(taskMapper.insert(any(ProcessingTask.class)))
                     .thenThrow(new DuplicateKeyException("uk_processing_task_idempotency"));
             when(taskMapper.selectOne(any(Wrapper.class))).thenReturn(existing);
+            FileAsset asset = new FileAsset();
+            asset.setId(10L);
+            asset.setUserId(1001L);
+            asset.setLatestVersion(2);
+            when(fileService.requireOwned(1001L, 10L)).thenReturn(asset);
 
             CreateTaskDTO dto = new CreateTaskDTO();
             dto.setTaskType("EXPORT");
+            dto.setFileId(10L);
             dto.setIdempotencyKey("key-1");
 
             var result = service.submit(1001L, dto);

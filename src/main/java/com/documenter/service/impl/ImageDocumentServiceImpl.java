@@ -14,6 +14,8 @@ import com.documenter.vo.FileDownload;
 import com.documenter.vo.VersionVO;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import javax.imageio.IIOImage;
 import javax.imageio.ImageIO;
@@ -24,8 +26,11 @@ import javax.imageio.stream.MemoryCacheImageInputStream;
 import javax.imageio.stream.MemoryCacheImageOutputStream;
 import java.awt.AlphaComposite;
 import java.awt.Color;
+import java.awt.Font;
 import java.awt.Graphics2D;
+import java.awt.Rectangle;
 import java.awt.RenderingHints;
+import java.awt.font.TextLayout;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -94,6 +99,17 @@ public class ImageDocumentServiceImpl implements ImageDocumentService {
                     converted ? ChangeType.CONVERT : ChangeType.MANUAL_EDIT,
                     request.getInstruction(), "图片编辑结果：" + width + "×" + height + "，" + outputFormat,
                     sourceVersion);
+            if (TransactionSynchronizationManager.isSynchronizationActive()
+                    && TransactionSynchronizationManager.isActualTransactionActive()) {
+                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                    @Override
+                    public void afterCompletion(int status) {
+                        if (status == STATUS_ROLLED_BACK && !fileStorage.delete(storageKey)) {
+                            log.warn("外层事务回滚后无法清理图片产物, storageKey={}", storageKey);
+                        }
+                    }
+                });
+            }
             return VersionVO.from(version);
         } catch (RuntimeException e) {
             if (!fileStorage.delete(storageKey)) {
@@ -191,8 +207,60 @@ public class ImageDocumentServiceImpl implements ImageDocumentService {
                 }
                 yield rotated;
             }
+            case "BRIGHTNESS" -> adjustBrightness(source, operation.getFactor());
+            case "ADD_TEXT" -> addText(source, operation);
             default -> throw new BusinessException(400, "不支持的图片操作");
         };
+    }
+
+    private BufferedImage adjustBrightness(BufferedImage source, double factor) {
+        BufferedImage adjusted = newImage(source, source.getWidth(), source.getHeight());
+        int[] row = new int[source.getWidth()];
+        for (int y = 0; y < source.getHeight(); y++) {
+            source.getRGB(0, y, row.length, 1, row, 0, row.length);
+            for (int x = 0; x < row.length; x++) {
+                int pixel = row[x];
+                int red = brighten((pixel >>> 16) & 255, factor);
+                int green = brighten((pixel >>> 8) & 255, factor);
+                int blue = brighten(pixel & 255, factor);
+                row[x] = (pixel & 0xff000000) | (red << 16) | (green << 8) | blue;
+            }
+            adjusted.setRGB(0, y, row.length, 1, row, 0, row.length);
+        }
+        return adjusted;
+    }
+
+    private static int brighten(int channel, double factor) {
+        return Math.min(255, (int) Math.round(channel * factor));
+    }
+
+    private BufferedImage addText(BufferedImage source, EditImageDTO.Operation operation) {
+        BufferedImage result = newImage(source, source.getWidth(), source.getHeight());
+        Graphics2D graphics = result.createGraphics();
+        try {
+            Font font = new Font(Font.SANS_SERIF, Font.PLAIN,
+                    operation.getFontSize() == null ? 24 : operation.getFontSize());
+            if (font.canDisplayUpTo(operation.getText()) != -1) {
+                throw new BusinessException(422, "当前系统字体无法显示部分文字，请安装包含对应字符的字体后重试");
+            }
+            graphics.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,
+                    RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+            TextLayout layout = new TextLayout(operation.getText(), font, graphics.getFontRenderContext());
+            Rectangle ink = layout.getPixelBounds(graphics.getFontRenderContext(), 0, 0);
+            // x/y 定义为实际文字像素边界的左上角，不使用易混淆的文字基线。
+            if (ink.isEmpty() || (long) operation.getX() + ink.width > source.getWidth()
+                    || (long) operation.getY() + ink.height > source.getHeight()) {
+                throw new BusinessException(400, "文字范围超出当前图片或没有可见文字；请调整位置、字号或内容");
+            }
+            graphics.setComposite(AlphaComposite.Src);
+            graphics.drawImage(source, 0, 0, null);
+            graphics.setComposite(AlphaComposite.SrcOver);
+            graphics.setColor(operation.getColor() == null ? Color.BLACK : Color.decode(operation.getColor()));
+            layout.draw(graphics, operation.getX() - (float) ink.x, operation.getY() - (float) ink.y);
+            return result;
+        } finally {
+            graphics.dispose();
+        }
     }
 
     private BufferedImage newImage(BufferedImage source, int width, int height) {
@@ -268,15 +336,30 @@ public class ImageDocumentServiceImpl implements ImageDocumentService {
             }
             boolean size = operation.getWidth() != null && operation.getWidth() > 0
                     && operation.getHeight() != null && operation.getHeight() > 0;
+            boolean noText = operation.getText() == null && operation.getFontSize() == null
+                    && operation.getColor() == null;
+            boolean noSize = operation.getWidth() == null && operation.getHeight() == null;
+            boolean noPosition = operation.getX() == null && operation.getY() == null;
             boolean valid = switch (operation.getType()) {
                 case "CROP" -> size && operation.getX() != null && operation.getX() >= 0
-                        && operation.getY() != null && operation.getY() >= 0 && operation.getDegrees() == null;
-                case "RESIZE" -> size && operation.getX() == null && operation.getY() == null
-                        && operation.getDegrees() == null;
-                case "ROTATE" -> operation.getX() == null && operation.getY() == null
-                        && operation.getWidth() == null && operation.getHeight() == null
+                        && operation.getY() != null && operation.getY() >= 0 && operation.getDegrees() == null
+                        && operation.getFactor() == null && noText;
+                case "RESIZE" -> size && noPosition && operation.getDegrees() == null
+                        && operation.getFactor() == null && noText;
+                case "ROTATE" -> noPosition && noSize && operation.getFactor() == null && noText
                         && operation.getDegrees() != null && (operation.getDegrees() == 90
                         || operation.getDegrees() == 180 || operation.getDegrees() == 270);
+                case "BRIGHTNESS" -> noPosition && noSize && noText && operation.getDegrees() == null
+                        && operation.getFactor() != null && Double.isFinite(operation.getFactor())
+                        && operation.getFactor() >= 0 && operation.getFactor() <= 4;
+                case "ADD_TEXT" -> noSize && operation.getDegrees() == null && operation.getFactor() == null
+                        && operation.getX() != null && operation.getX() >= 0
+                        && operation.getY() != null && operation.getY() >= 0
+                        && operation.getText() != null && !operation.getText().isBlank()
+                        && operation.getText().length() <= 500 && operation.getText().codePoints().noneMatch(
+                                code -> Character.isISOControl(code) || code == 0x2028 || code == 0x2029)
+                        && (operation.getFontSize() == null || (operation.getFontSize() >= 1 && operation.getFontSize() <= 512))
+                        && (operation.getColor() == null || operation.getColor().matches("^#[0-9a-fA-F]{6}$"));
                 default -> false;
             };
             if (!valid) {

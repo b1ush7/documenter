@@ -1,13 +1,16 @@
 package com.documenter.service.impl;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.documenter.dto.AuditQueryDTO;
 import com.documenter.dto.FileQueryDTO;
 import com.documenter.dto.TaskQueryDTO;
+import com.documenter.entity.AuditLog;
 import com.documenter.entity.FileAsset;
 import com.documenter.entity.ProcessingTask;
 import com.documenter.enums.AuditAction;
 import com.documenter.exception.BusinessException;
 import com.documenter.mapper.AdminStatisticsMapper;
+import com.documenter.mapper.AuditLogMapper;
 import com.documenter.mapper.FileAssetMapper;
 import com.documenter.mapper.ProcessingTaskMapper;
 import com.documenter.service.AdminResourceService;
@@ -15,6 +18,7 @@ import com.documenter.service.AuditService;
 import com.documenter.service.DocumentVersionService;
 import com.documenter.service.DocxDocumentService;
 import com.documenter.service.FileService;
+import com.documenter.service.PagePreviewService;
 import com.documenter.service.PdfDocumentService;
 import com.documenter.service.TaskService;
 import com.documenter.service.XlsxDocumentService;
@@ -23,8 +27,10 @@ import com.documenter.vo.AdminOverviewVO;
 import com.documenter.vo.AdminTaskDetailVO;
 import com.documenter.vo.AdminTaskVO;
 import com.documenter.vo.AdminUserUsageVO;
+import com.documenter.vo.AuditLogVO;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.FileDownload;
+import com.documenter.vo.PagePreviewInfoVO;
 import com.documenter.vo.PageResult;
 import com.documenter.vo.PdfContentVO;
 import com.documenter.vo.PdfPagePreview;
@@ -47,32 +53,38 @@ public class AdminResourceServiceImpl implements AdminResourceService {
     private final FileAssetMapper fileAssetMapper;
     private final ProcessingTaskMapper taskMapper;
     private final AdminStatisticsMapper statisticsMapper;
+    private final AuditLogMapper auditLogMapper;
     private final FileService fileService;
     private final DocumentVersionService versionService;
     private final DocxDocumentService docxDocumentService;
     private final PdfDocumentService pdfDocumentService;
     private final XlsxDocumentService xlsxDocumentService;
+    private final PagePreviewService pagePreviewService;
     private final TaskService taskService;
     private final AuditService auditService;
 
     public AdminResourceServiceImpl(FileAssetMapper fileAssetMapper,
                                     ProcessingTaskMapper taskMapper,
                                     AdminStatisticsMapper statisticsMapper,
+                                    AuditLogMapper auditLogMapper,
                                     FileService fileService,
                                     DocumentVersionService versionService,
                                     DocxDocumentService docxDocumentService,
                                     PdfDocumentService pdfDocumentService,
                                     XlsxDocumentService xlsxDocumentService,
+                                    PagePreviewService pagePreviewService,
                                     TaskService taskService,
                                     AuditService auditService) {
         this.fileAssetMapper = fileAssetMapper;
         this.taskMapper = taskMapper;
         this.statisticsMapper = statisticsMapper;
+        this.auditLogMapper = auditLogMapper;
         this.fileService = fileService;
         this.versionService = versionService;
         this.docxDocumentService = docxDocumentService;
         this.pdfDocumentService = pdfDocumentService;
         this.xlsxDocumentService = xlsxDocumentService;
+        this.pagePreviewService = pagePreviewService;
         this.taskService = taskService;
         this.auditService = auditService;
     }
@@ -217,6 +229,28 @@ public class AdminResourceServiceImpl implements AdminResourceService {
     }
 
     @Override
+    public PagePreviewInfoVO adminPreviewInfo(Long fileId, Integer versionNo) {
+        FileAsset asset = requireFile(fileId);
+        // 以真实所有者身份调用：管理员不需要绕过归属校验，
+        // 而是复用同一套「绑定明确版本 + 归属校验」的实现
+        PagePreviewInfoVO info = pagePreviewService.describe(asset.getUserId(), fileId, versionNo);
+        auditService.success(AuditAction.ADMIN_FILE_VIEW, "FILE", fileId,
+                "查看版本 " + versionNo + " 的页面预览元信息");
+        return info;
+    }
+
+    @Override
+    public PdfPagePreview adminPreviewPage(Long fileId, Integer versionNo, Integer pageNo, Integer dpi) {
+        FileAsset asset = requireFile(fileId);
+        PdfPagePreview preview = pagePreviewService.renderPage(
+                asset.getUserId(), fileId, versionNo, pageNo, dpi);
+        // 管理员查看用户文档内容属于敏感操作，必须留痕
+        auditService.success(AuditAction.ADMIN_FILE_VIEW, "FILE", fileId,
+                "预览版本 " + versionNo + " 第 " + pageNo + " 页");
+        return preview;
+    }
+
+    @Override
     public XlsxStructureVO readXlsxStructure(Long fileId, Integer versionNo) {
         FileAsset asset = requireFile(fileId);
         XlsxStructureVO structure = xlsxDocumentService.readStructure(
@@ -284,6 +318,50 @@ public class AdminResourceServiceImpl implements AdminResourceService {
         TaskDetailVO detail = taskService.detail(task.getUserId(), taskId);
         auditService.success(AuditAction.ADMIN_TASK_VIEW, "TASK", taskId, "查看任务与执行步骤");
         return AdminTaskDetailVO.of(AdminTaskVO.from(task), detail.getSteps());
+    }
+
+    @Override
+    public PageResult<AuditLogVO> listAuditLogs(AuditQueryDTO query) {
+        String action = trimToNull(query.getAction());
+        String targetType = trimToNull(query.getTargetType());
+        String targetId = trimToNull(query.getTargetId());
+        String result = trimToNull(query.getResult());
+        String requestId = trimToNull(query.getRequestId());
+        long offset = (query.getPage() - 1) * query.getSize();
+
+        // 与任务列表一样显式写 LIMIT/OFFSET：不能依赖分页插件是否已装配，
+        // 否则漏装时查询会静默返回全部数据
+        Long total = auditLogMapper.selectCount(Wrappers.<AuditLog>lambdaQuery()
+                .eq(query.getUserId() != null, AuditLog::getUserId, query.getUserId())
+                .eq(action != null, AuditLog::getAction, action)
+                .eq(targetType != null, AuditLog::getTargetType, targetType)
+                .eq(targetId != null, AuditLog::getTargetId, targetId)
+                .eq(result != null, AuditLog::getResult, result)
+                .eq(requestId != null, AuditLog::getRequestId, requestId)
+                .ge(query.getFrom() != null, AuditLog::getCreateTime, query.getFrom())
+                .le(query.getTo() != null, AuditLog::getCreateTime, query.getTo()));
+        List<AuditLogVO> records = auditLogMapper.selectList(Wrappers.<AuditLog>lambdaQuery()
+                        .eq(query.getUserId() != null, AuditLog::getUserId, query.getUserId())
+                        .eq(action != null, AuditLog::getAction, action)
+                        .eq(targetType != null, AuditLog::getTargetType, targetType)
+                        .eq(targetId != null, AuditLog::getTargetId, targetId)
+                        .eq(result != null, AuditLog::getResult, result)
+                        .eq(requestId != null, AuditLog::getRequestId, requestId)
+                        .ge(query.getFrom() != null, AuditLog::getCreateTime, query.getFrom())
+                        .le(query.getTo() != null, AuditLog::getCreateTime, query.getTo())
+                        // 固定时间倒序：最近发生的操作最需要先看到
+                        .orderByDesc(AuditLog::getCreateTime)
+                        .orderByDesc(AuditLog::getId)
+                        .last("LIMIT " + query.getSize() + " OFFSET " + offset))
+                .stream().map(AuditLogVO::from).toList();
+
+        PageResult<AuditLogVO> page = new PageResult<>();
+        page.setRecords(records);
+        page.setTotal(total == null ? 0 : total);
+        page.setPage(query.getPage());
+        page.setSize(query.getSize());
+        page.setPages(PageResult.pagesOf(page.getTotal(), query.getSize()));
+        return page;
     }
 
     @Override

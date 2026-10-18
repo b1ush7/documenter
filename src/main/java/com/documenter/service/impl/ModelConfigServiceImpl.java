@@ -235,6 +235,34 @@ public class ModelConfigServiceImpl implements ModelConfigService {
         return cipher.decrypt(config.getApiKeyCipher());
     }
 
+    @Override
+    public ModelConfigService.ModelRuntimeConfig requireDefaultRuntimeConfig(String scope) {
+        if (scope == null || scope.isBlank()) {
+            throw new BusinessException(400, "模型用途不能为空");
+        }
+        ModelConfig config = mapper.selectOne(Wrappers.<ModelConfig>lambdaQuery()
+                .eq(ModelConfig::getScope, scope)
+                .eq(ModelConfig::getStatus, STATUS_ENABLED)
+                .eq(ModelConfig::getIsDefault, true)
+                .last("LIMIT 1"));
+        if (config == null) {
+            throw new BusinessException(503,
+                    "未配置启用的默认 " + scope + " 模型，请先在管理端完成配置");
+        }
+        if (config.getBaseUrl() == null || config.getBaseUrl().isBlank()
+                || config.getModelName() == null || config.getModelName().isBlank()
+                || config.getApiKeyCipher() == null || config.getApiKeyCipher().isBlank()) {
+            throw new BusinessException(503,
+                    "默认 " + scope + " 模型配置不完整，需要接口地址、模型名和 API Key");
+        }
+        return new ModelConfigService.ModelRuntimeConfig(
+                config.getCode(), config.getProvider(), config.getBaseUrl().trim(),
+                config.getModelName().trim(), cipher.decrypt(config.getApiKeyCipher()),
+                config.getTimeoutSeconds() == null ? DEFAULT_TIMEOUT_SECONDS
+                        : config.getTimeoutSeconds(),
+                config.getMaxOutputTokens(), config.getTemperature());
+    }
+
     /** 设置默认配置：先清空同用途旧默认，再标记新的。两步同一事务。 */
     private void applyDefault(Long id, String scope) {
         mapper.clearDefaultByScope(scope);
