@@ -200,7 +200,34 @@ Redis 连接失败/命令超时、数据库连接断开等已识别的依赖不�
 | 管理员 | GET | `/admin/tasks/{taskId}` | 管理员 | 任意用户任务与步骤详情 |
 | 管理员 | POST | `/admin/tasks/{taskId}/cancel` | 管理员 | 取消任意用户任务 |
 | 管理员 | POST | `/admin/tasks/{taskId}/retry` | 管理员 | 重试任意用户任务 |
-| 管理员 | POST | `/admin/storage/recycle?dryRun=true` | 管理员 | 预演或执行正式存储回收 |
+| 管理员 | POST | `/admin/storage/recycle` | 管理员 | 预演（`dryRun=true`）或执行正式存储回收 |
+| AI 对话 | GET | `/ai/sessions` | 是 | 当前用户会话分页列表 |
+| AI 对话 | POST | `/ai/sessions` | 是 | 新建会话（可绑定本人文件） |
+| AI 对话 | GET | `/ai/sessions/{sessionId}` | 是 | 会话详情 |
+| AI 对话 | POST | `/ai/sessions/{sessionId}/archive` | 是 | 归档会话（归档后不再接收新消息） |
+| AI 对话 | DELETE | `/ai/sessions/{sessionId}` | 是 | 删除会话及其消息 |
+| AI 对话 | POST | `/ai/sessions/{sessionId}/messages` | 是 | 追加用户消息（不生成回复） |
+| 管理员 | GET | `/admin/model-configs` | 管理员 | 模型配置分页列表（密钥仅返回掩码） |
+| 管理员 | GET | `/admin/model-configs/{id}` | 管理员 | 模型配置详情（不含密钥明文） |
+| 管理员 | POST | `/admin/model-configs` | 管理员 | 新建模型配置（初始为停用） |
+| 管理员 | PUT | `/admin/model-configs/{id}` | 管理员 | 更新模型配置（`apiKey` 留空表示不改） |
+| 管理员 | PUT | `/admin/model-configs/{id}/status` | 管理员 | 启用或停用模型配置 |
+| 管理员 | DELETE | `/admin/model-configs/{id}` | 管理员 | 删除模型配置（默认配置禁止删除） |
+| 管理员 | GET | `/admin/audit-logs` | 管理员 | 审计日志查询（按操作者/动作/目标/结果/时间/请求 ID） |
+| 预览 | GET | `/file/{fileId}/versions/{versionNo}/preview` | 是 | 页面预览元信息：页数、可预览性、渲染引擎 |
+| 预览 | GET | `/file/{fileId}/versions/{versionNo}/pages/{pageNo}/preview` | 是 | 将指定页渲染为 PNG |
+| 预览 | GET | `/admin/files/{fileId}/versions/{versionNo}/preview` | 管理员 | 管理员读取任意用户的预览元信息 |
+| 预览 | GET | `/admin/files/{fileId}/versions/{versionNo}/pages/{pageNo}/preview` | 管理员 | 管理员渲染任意用户的指定页 |
+| 版本 | GET | `/file/{fileId}/versions/{fromVersion}/compare/{toVersion}` | 是 | 比较两个版本的块级差异 |
+| 版本 | GET | `/file/{fileId}/versions/{versionNo}/export/pdf` | 是 | 将指定版本导出为 PDF |
+| 版本 | POST | `/file/{fileId}/versions/{versionNo}/compatibility-check` | 是 | DOCX 应用级兼容性验收 |
+| XLSX | GET | `/file/{fileId}/versions/{versionNo}/xlsx/range` | 是 | 读取指定矩形区域（含空白位） |
+| OCR | PUT | `/file/{fileId}/versions/{versionNo}/ocr/corrections` | 是 | 按 OCR 结果指纹保存逐页人工校正 |
+| OCR | GET | `/file/{fileId}/versions/{versionNo}/ocr/corrections/{fingerprint}` | 是 | 读取已保存的逐页人工校正 |
+| OCR | POST | `/file/{fileId}/versions/{versionNo}/ocr/corrections/{fingerprint}/organize` | 是 | 将人工校正交给文本模型只读整理 |
+
+> 本表由后端 Controller 逐一核对生成：后端共有 **124 个端点**（123 个 Controller 映射 + Spring Security 提供的 `/user/logout`）。
+> 表中 `{...}` 为路径变量占位符；示例中出现的具体数字（如 `/file/10/versions/2/...`）仅表示示例取值。
 
 ## 2. 用户与认证
 
@@ -534,7 +561,7 @@ Content-Length: <字节数>
 示例：
 
 ```http
-POST /file/10/versions/2/restore?expectVersion=5
+POST /file/{fileId}/versions/{versionNo}/restore?expectVersion=5
 ```
 
 恢复不会覆盖或删除历史，而是复用目标版本的内容和格式，创建一个新的 `RESTORE` 版本，并同步当前文件的内容、类型和扩展名。例如从 JPEG 恢复历史 PNG 后，当前下载也恢复为 PNG。成功时 `data` 为新 [Version](#64-version)。若 `expectVersion` 与当前版本不一致，返回业务码 `409`。
@@ -649,7 +676,7 @@ POST /file/10/versions/2/restore?expectVersion=5
 人工校正使用 OCR 结果顶层的 `fingerprint` 标识同一份识别内容。保存不会覆盖 PDF/图片，也不创建文件版本：
 
 ```json
-PUT /file/10/versions/2/ocr/corrections
+PUT /file/{fileId}/versions/{versionNo}/ocr/corrections
 {
   "fingerprint": "64 位小写十六进制 SHA-256",
   "pages": [
@@ -761,7 +788,7 @@ PUT /file/10/versions/2/ocr/corrections
 读取一个明确的矩形区域：
 
 ```http
-GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
+GET /file/{fileId}/versions/{versionNo}/xlsx/range?sheetName=数据&range=A1:C20
 ```
 
 返回 `XlsxRange`，其中 `rows` 是固定行列数的二维数组。与整表结构接口只返回实际存在的单元格不同，区域接口会为未创建的位置返回 `type=BLANK`、`value=""`、`style=null` 的占位单元格，便于前端形成稳定网格。区域必须使用 `A1:C20` 格式，包含的单元格数不能超过 `res.storage.xlsx.max-read-cells`。
@@ -2186,3 +2213,106 @@ target 是内部定位形式“原始工作表名称!规范单元格”，单元
 - 验证码开发配置使用模拟发送，不能直接视为生产短信能力。
 - 管理员可跨用户读取、下载、重命名或软删除文件，并查看、取消或重试任务；尚未提供跨用户 DOCX 内容编辑和版本恢复入口，以免在当前版本模型中错误记录实际操作者。
 - PDF 页面分类是本地启发式检测；原生文字 PDF 可重建为可编辑 DOCX。扫描页可在显式配置云端 OCR 后识别和重建；真实供应商、中文质量与复杂表格仍待验收。
+
+## 附录 A. 补充端点说明
+
+> 本节补齐 1.5 总览表中此前缺少详细规格的端点，全部按后端 Controller 实现整理。
+> 通用约定（认证、响应包装、分页、错误码）见第 1 节。
+
+### A.1 AI 会话
+
+会话按用户隔离；访问他人会话统一返回 `404`（不返回 `403`，避免枚举 ID）。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/ai/sessions` | 分页列表；支持 `page`、`size`、`status`、`fileId`、`keyword` |
+| POST | `/ai/sessions` | 新建会话，请求体 `{ "title": "...", "fileId": 10 }`；`fileId` 可省略，指定时校验归属 |
+| GET | `/ai/sessions/{sessionId}` | 会话详情 |
+| POST | `/ai/sessions/{sessionId}/archive` | 归档；归档后追加消息返回 `409` |
+| DELETE | `/ai/sessions/{sessionId}` | 删除会话及其消息 |
+| GET | `/ai/sessions/{sessionId}/messages` | 消息列表，按时间正序；`role` 为 `USER`/`ASSISTANT`/`TOOL`/`SYSTEM` |
+| POST | `/ai/sessions/{sessionId}/messages` | 追加一条用户消息，请求体 `{ "content": "..." }`；**只落库，不生成回复**（生成回复见 8.1） |
+
+### A.2 模型配置（管理员）
+
+密钥**只写不读**：出参只含 `apiKeyConfigured` 与 `apiKeyMasked`；入库为 AES-256-GCM 密文，主密钥来自环境变量 `MODEL_CONFIG_SECRET`。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/admin/model-configs` | 分页列表；支持 `page`、`size`、`scope`、`status`、`keyword` |
+| GET | `/admin/model-configs/{id}` | 详情 |
+| POST | `/admin/model-configs` | 新建；**初始状态固定为 `DISABLED`** |
+| PUT | `/admin/model-configs/{id}` | 更新；`apiKey` 留空表示保持原密钥不变 |
+| PUT | `/admin/model-configs/{id}/status` | 请求体 `{ "status": "ENABLED" \| "DISABLED" }`；未设置密钥时启用返回 `409` |
+| DELETE | `/admin/model-configs/{id}` | 默认配置禁止删除（先指定其他默认配置），返回 `409` |
+
+请求体字段：`code`、`name`、`scope`（`TEXT`/`IMAGE`/`OCR`）、`provider`、`baseUrl`、`modelName`、`apiKey`、`timeoutSeconds`、`maxOutputTokens`、`temperature`、`isDefault`、`remark`。
+
+### A.3 审计日志（管理员）
+
+`GET /admin/audit-logs`
+
+查询参数：`page`、`size`、`userId`、`action`、`targetType`、`targetId`、`result`、`from`、`to`、`requestId`。
+
+固定按时间倒序，**不接受前端指定排序字段**（避免 ORDER BY 注入）。返回 `PageResult<AuditLog>`，字段含 `userId`、`username`（操作者用户名快照）、`action`、`targetType`、`targetId`、`detail`、`result`（`SUCCESS`/`FAILURE`）、`requestIp`、`requestId`、`createTime`。
+
+`username` 为**写入时的快照**，用户改名或删除后仍可追溯。
+
+### A.4 页面版式预览
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/file/{fileId}/versions/{versionNo}/preview` | 元信息：`pageCount`（DOCX/XLSX 首次渲染前为 `null`）、`requiresConversion`、`previewable`、`engine`、`dpi`、`message` |
+| GET | `/file/{fileId}/versions/{versionNo}/pages/{pageNo}/preview` | 返回 PNG 字节流，响应头含 `X-Image-Width`/`X-Image-Height` |
+| GET | `/admin/files/{fileId}/versions/{versionNo}/preview` | 管理员入口，元信息 |
+| GET | `/admin/files/{fileId}/versions/{versionNo}/pages/{pageNo}/preview` | 管理员入口，PNG |
+
+- 两组都**绑定明确版本**，并复用下载路径做归属校验，不存在鉴权差异。
+- `dpi` 默认 110，允许 60–200，超出返回 `400`。
+- 图片版本原样回传原图（保留原始格式与透明通道），其余为 PNG。
+- 渲染后端未配置时：元信息接口 `previewable=false` + 提示（HTTP 200）；图片接口返回 `503`。
+- 响应带 `Cache-Control: private, max-age=3600`；服务端按「内容摘要 + 页号 + DPI」缓存。
+- 管理员入口会写入审计日志（`ADMIN_FILE_VIEW`）。
+
+### A.5 版本比较 / 导出 PDF / 兼容性验收
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/file/{fileId}/versions/{fromVersion}/compare/{toVersion}` | 块级差异 |
+| GET | `/file/{fileId}/versions/{versionNo}/export/pdf` | 导出 PDF 字节流 |
+| POST | `/file/{fileId}/versions/{versionNo}/compatibility-check` | DOCX 应用级验收 |
+
+**比较**：返回 `{ fileId, fromVersion, toVersion, format, truncated, changes[] }`，
+`changes[]` 每项含 `type`（`ADDED`/`REMOVED`/`MODIFIED`）、`key`、`label`、`before`、`after`、`kind`。
+粒度是**块/单元格**而非字符：DOCX 用块 ID（`body/p1`、`body/t0/r1/c0`），XLSX 用 `工作表!单元格`（`Sheet1!A1`）。
+XLSX 结构读取有上限，`truncated=true` 时 `changes` 不完整。
+两个版本都必须显式指定，且格式须相同（否则 `400`）。版本不存在或非本人返回 `404`。
+
+**导出 PDF**：版本本身已是 PDF 时直接返回原内容；其余格式经渲染后端转换。
+支持 `docx`/`xlsx`/`pptx` 及 `odt`/`ods`/`odp`/`doc`/`xls`/`ppt`，其他格式返回 `400`。
+转换后响应头的 `Content-Type` 与文件名后缀均为 `pdf`。未接入渲染后端返回 `503`。
+
+**兼容性验收**：仅支持 DOCX，其他格式 `400`。
+返回 `{ fileId, versionNo, compatible, engine, pageCount, renderedPages, missingFonts[], issues[] }`。
+`issues[].code` 取值：`NO_PAGES`（ERROR）、`NO_RENDERED_PAGE`（ERROR）、
+`PAGES_TRUNCATED`（WARNING）、`MISSING_FONTS`（WARNING）、`CONTENT_NEAR_BORDER`（WARNING）。
+**只有 ERROR 会使 `compatible=false`**。该接口需要真正排版，耗时较长。
+
+### A.6 XLSX 区域读取
+
+`GET /file/{fileId}/versions/{versionNo}/xlsx/range?sheetName=Sheet1&range=A1:C20`
+
+返回区域内全部位置，**含未创建的空白单元格**。`range` 使用 A1 记法；越界或非法地址返回 `400`。
+
+### A.7 OCR 人工校正
+
+校正使用 OCR 结果顶层的 `fingerprint`（64 位小写十六进制 SHA-256）标识同一份识别内容。
+保存校正**不覆盖 PDF/图片，也不创建文件版本**。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| PUT | `/file/{fileId}/versions/{versionNo}/ocr/corrections` | 保存逐页人工校正，请求体含 `fingerprint` 与页码→文本映射 |
+| GET | `/file/{fileId}/versions/{versionNo}/ocr/corrections/{fingerprint}` | 读取已保存的校正 |
+| POST | `/file/{fileId}/versions/{versionNo}/ocr/corrections/{fingerprint}/organize` | 将校正内容交给文本模型**只读整理**，不产生版本 |
+
+指纹与当前版本识别结果不一致时返回 `409`，避免把校正套用到另一份内容上。
