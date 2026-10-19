@@ -310,6 +310,14 @@ public class AiReplyServiceImpl implements AiReplyService {
             collectBlocks(context.docxStructure().blocks(), before);
             for (DocumentEditPlan.Operation operation : merge(result).operations()) {
                 var type = operation.operationType();
+                if (type == DocumentEditPlan.OperationType.NORMALIZE_DOCX_FORMAT
+                        || type == DocumentEditPlan.OperationType.RESIZE_DOCX_IMAGES) {
+                    int count = com.documenter.util.DocxNormalizationSpec.validateContext(operation, context);
+                    changes.add(new AiReplyVO.PlannedChange(operation.type(), operation.target(),
+                            "源版本中匹配 " + count + (type == DocumentEditPlan.OperationType.RESIZE_DOCX_IMAGES ? " 张正文图片" : " 个正文段落"),
+                            operation.content(), operation.reason()));
+                    continue;
+                }
                 boolean insert = type == DocumentEditPlan.OperationType.INSERT_BEFORE
                         || type == DocumentEditPlan.OperationType.INSERT_AFTER
                         || type == DocumentEditPlan.OperationType.INSERT_IMAGE;

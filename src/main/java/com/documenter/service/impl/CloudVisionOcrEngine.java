@@ -42,6 +42,8 @@ import java.util.Map;
  */
 @Slf4j
 @Component
+@org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(
+        prefix = "res.ocr", name = "provider", havingValue = "cloud-vision", matchIfMissing = true)
 public class CloudVisionOcrEngine implements OcrEngine {
 
     private static final String OCR_SCOPE = "OCR";

@@ -18,6 +18,8 @@ import com.documenter.service.FileService;
 import com.documenter.service.FileStorage;
 import com.documenter.service.VersionWriter;
 import com.documenter.util.Digests;
+import com.documenter.util.DocxNormalizer;
+import com.documenter.util.DocxNormalizationSpec;
 import com.documenter.vo.DocxStructureVO;
 import com.documenter.vo.DocxHeaderFooterLinksVO;
 import com.documenter.vo.DocxFootnotesVO;
@@ -70,7 +72,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.function.Consumer;
 import java.math.BigInteger;
@@ -82,7 +83,6 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
 
     private static final String DOCX_CONTENT_TYPE =
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-    private static final Pattern HEADING_STYLE = Pattern.compile("(?i)^heading[ _-]?([1-9])$");
 
     private final DocumentVersionService versionService;
     private final FileStorage fileStorage;
@@ -805,7 +805,15 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                     throw new BusinessException(422, "计划包含尚不支持执行的操作");
                 }
                 String target = operation.target();
-                if (type == DocumentEditPlan.OperationType.SET_CELL_TEXT) {
+                if (type == DocumentEditPlan.OperationType.NORMALIZE_DOCX_FORMAT
+                        || type == DocumentEditPlan.OperationType.RESIZE_DOCX_IMAGES) {
+                    if (!"body".equals(target) || operation.image() != null || operation.format() != null) {
+                        throw new BusinessException(422, "批量操作仅支持 target=body，不能包含 image/format");
+                    }
+                    edits.add(type == DocumentEditPlan.OperationType.NORMALIZE_DOCX_FORMAT
+                            ? DocxNormalizer.prepareFormat(document, DocxNormalizationSpec.format(operation.content()))
+                            : DocxNormalizer.prepareImages(document, DocxNormalizationSpec.images(operation.content())));
+                } else if (type == DocumentEditPlan.OperationType.SET_CELL_TEXT) {
                     XWPFTableCell cell = requireCell(document, target);
                     edits.add(() -> replaceCellText(cell, target, operation.content()));
                 } else {
@@ -943,7 +951,7 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
     }
 
     private static DocxStructureVO.Block readParagraph(XWPFParagraph paragraph, String path) {
-        Integer headingLevel = headingLevel(paragraph.getStyle());
+        Integer headingLevel = DocxNormalizer.headingLevel(paragraph.getDocument(), paragraph);
         List<DocxStructureVO.Block> images = new ArrayList<>();
         int imageIndex = 0;
         for (XWPFRun run : paragraph.getRuns()) {
@@ -980,14 +988,6 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         }
         return new DocxStructureVO.Block(path, "TABLE", null, null, null,
                 null, null, null, rows);
-    }
-
-    private static Integer headingLevel(String styleId) {
-        if (styleId == null) {
-            return null;
-        }
-        Matcher matcher = HEADING_STYLE.matcher(styleId.trim());
-        return matcher.matches() ? Integer.parseInt(matcher.group(1)) : null;
     }
 
     private static void ensureDistinctBlockIds(List<ReplaceDocxTextDTO.Operation> operations) {

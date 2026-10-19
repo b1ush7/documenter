@@ -258,7 +258,7 @@ public class PdfToDocxServiceImpl implements PdfToDocxService {
                                           String language) throws IOException {
         if (!ocrEngine.available()) {
             throw new BusinessException(503,
-                    "扫描 PDF 重建需要云端 OCR；请先配置默认 OCR 模型并启用 OCR");
+                    "扫描 PDF 重建需要云端 OCR；请先配置 OCR 供应商凭据并启用 OCR");
         }
         BufferedImage image = new PDFRenderer(document)
                 .renderImageWithDPI(pageIndex, ocrProperties.getDpi(), ImageType.RGB);

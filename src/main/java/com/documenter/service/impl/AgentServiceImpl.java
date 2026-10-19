@@ -444,6 +444,11 @@ public class AgentServiceImpl implements AgentService {
                 5. XLSX 支持 set_formula、create_xlsx_table、create_xlsx_chart：公式必须基于真实列名和数据；
                    新表 dataJson 必须由用户目标或已读取内容支撑；图表只绑定真实区域和数值。
                    不得虚构工作表或数据。上下文被截断时须说明限制，不能声称已检查整张表。
+                6. DOCX 整篇格式统一优先使用 normalize_docx_format，已有图片统一尺寸使用 resize_docx_images，
+                   不要逐段调用，也不要用 insert_image 重复插图。两者均在用户确认后批量执行并保存一个新版本。
+                   字号使用磅（小四12、四号14、三号16），行距用倍数，图片尺寸用厘米。
+                   正文与标题要求不同时分范围提出格式规则；仅修改用户指定的格式，不改文字、页眉页脚。
+                   标题范围依赖已有标题样式/大纲级别；未标记的标题不能声称已自动识别。
 
                 硬性约束：
                 - 只能使用已提供的工具，不得假设存在其他能力（例如删除文件、发送网络请求）；

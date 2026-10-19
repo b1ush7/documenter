@@ -343,6 +343,10 @@ class AiReplyServiceImplTest {
     }
 
     private ImageWorkflow imageWorkflow() throws Exception {
+        return imageWorkflow(false);
+    }
+
+    private ImageWorkflow imageWorkflow(boolean withExistingImage) throws Exception {
         byte[] source;
         try (var document = new org.apache.poi.xwpf.usermodel.XWPFDocument();
              var output = new java.io.ByteArrayOutputStream()) {
@@ -363,6 +367,19 @@ class AiReplyServiceImplTest {
         try (var output = new java.io.ByteArrayOutputStream()) {
             javax.imageio.ImageIO.write(image, "png", output);
             imageBytes = output.toByteArray();
+        }
+        if (withExistingImage) {
+            try (var document = new org.apache.poi.xwpf.usermodel.XWPFDocument();
+                 var output = new java.io.ByteArrayOutputStream()) {
+                var paragraph = document.createParagraph();
+                paragraph.createRun().setText("image anchor");
+                paragraph.createRun().addPicture(new java.io.ByteArrayInputStream(imageBytes),
+                        org.apache.poi.xwpf.usermodel.Document.PICTURE_TYPE_PNG, "existing.png", 360000, 360000);
+                document.write(output);
+                source = output.toByteArray();
+            }
+            when(versions.downloadVersion(7L, 10L, 1)).thenReturn(new FileDownload(asset,
+                    new ByteArrayResource(source), source.length, asset.getContentType(), "test.docx"));
         }
         var imageAsset = new FileAsset();
         imageAsset.setId(30L);
@@ -385,7 +402,9 @@ class AiReplyServiceImplTest {
         var realAgent = new AgentServiceImpl(properties, stub, realDocuments,
                 mock(XlsxDocumentService.class), versions, validator, new EditPlanExecutor(realDocuments, mock(XlsxDocumentService.class)),
                 mock(com.documenter.component.AiDailyCallQuota.class),
-                List.of(new com.documenter.component.tool.InsertImageTool(realDocuments, properties, versions)));
+                List.of(new com.documenter.component.tool.InsertImageTool(realDocuments, properties, versions),
+                        new com.documenter.component.tool.NormalizeDocxFormatTool(),
+                        new com.documenter.component.tool.ResizeDocxImagesTool()));
         var realService = new AiReplyServiceImpl(chats, sessions, messages, realAgent, realDocuments, mock(XlsxDocumentService.class),
                 versions, stub, properties, validator, audit, transactions);
         var request = request();
@@ -396,6 +415,67 @@ class AiReplyServiceImplTest {
 
     private record ImageWorkflow(AiReplyServiceImpl service, FileStorage storage,
                                   VersionWriter writer, CreateAiReplyDTO request, byte[] imageBytes) { }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"normalize_docx_format", "resize_docx_images"})
+    void normalizationReplyPersistsPreviewAndConfirmsExactlyOnce(String tool) throws Exception {
+        var workflow = normalizationWorkflow(tool);
+        var pending = workflow.service().create(7L, 1L, workflow.request());
+        assertEquals("PENDING", pending.planStatus());
+        var change = pending.changes().getFirst();
+        assertEquals("body", change.target());
+        assertNotNull(change.before());
+        assertNotNull(change.after());
+        assertEquals(change, workflow.service().get(7L, 1L, pending.message().getId()).changes().getFirst());
+        verifyNoInteractions(workflow.storage(), workflow.writer());
+        var confirmed = workflow.service().confirm(7L, 1L, pending.message().getId());
+        assertEquals(2, confirmed.outputVersion());
+        assertEquals(2, workflow.service().confirm(7L, 1L, pending.message().getId()).outputVersion());
+        var content = org.mockito.ArgumentCaptor.forClass(byte[].class);
+        verify(workflow.storage()).store(content.capture(), eq("docx"));
+        verify(workflow.writer()).appendVersion(eq(10L), eq(7L), any(),
+                eq(com.documenter.enums.ChangeType.AI_EDIT), any(), any(), eq(1));
+        try (var document = new org.apache.poi.xwpf.usermodel.XWPFDocument(
+                new java.io.ByteArrayInputStream(content.getValue()))) {
+            assertEquals("image anchor", document.getParagraphs().getFirst().getText());
+            assertArrayEquals(workflow.imageBytes(), document.getAllPictures().getFirst().getData());
+            var runs = document.getParagraphs().getFirst().getRuns();
+            if (tool.equals("normalize_docx_format")) assertEquals("宋体", runs.getFirst().getFontFamily());
+            else assertEquals(2160000, runs.get(1).getCTR().getDrawingArray(0).getInlineArray(0).getExtent().getCx());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"normalize_docx_format", "resize_docx_images"})
+    void discardedNormalizationDoesNotWrite(String tool) throws Exception {
+        var workflow = normalizationWorkflow(tool);
+        long id = workflow.service().create(7L, 1L, workflow.request()).message().getId();
+        assertEquals("DISCARDED", workflow.service().discard(7L, 1L, id).planStatus());
+        assertCode(409, () -> workflow.service().confirm(7L, 1L, id));
+        verifyNoInteractions(workflow.storage(), workflow.writer());
+    }
+
+    private ImageWorkflow normalizationWorkflow(String tool) throws Exception {
+        var workflow = imageWorkflow(true);
+        var options = tool.equals("normalize_docx_format")
+                ? Map.of("formatJson", "{\"fontFamily\":\"宋体\",\"fontSizePoints\":12}")
+                : Map.of("layoutJson", "{\"widthCm\":6}");
+        workflow.request().setContent("[stub-tool] " + tool + " " + json.writeValueAsString(options));
+        return workflow;
+    }
+
+    @Test
+    void conflictingNormalizationConfirmationKeepsPendingAndCleansOutput() throws Exception {
+        var workflow = normalizationWorkflow("normalize_docx_format");
+        long id = workflow.service().create(7L, 1L, workflow.request()).message().getId();
+        when(workflow.writer().appendVersion(eq(10L), eq(7L), any(),
+                eq(com.documenter.enums.ChangeType.AI_EDIT), any(), any(), eq(1)))
+                .thenThrow(new BusinessException(409, "源版本已变化"));
+        assertCode(409, () -> workflow.service().confirm(7L, 1L, id));
+        assertEquals("PENDING", store.get(id).getPlanStatus());
+        assertNull(store.get(id).getOutputVersion());
+        verify(workflow.storage()).delete("versions/ai-image.docx");
+    }
 
     @Test
     void stubModelToConfirmedDocxProducesReopenableAiVersion() throws Exception {

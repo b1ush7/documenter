@@ -351,7 +351,7 @@ public class OcrServiceImpl implements OcrService {
     private void requireEngine() {
         if (!engine.available()) {
             throw new BusinessException(503,
-                    "云端 OCR 未启用或不可用，请配置默认 OCR 模型并检查密钥");
+                    "云端 OCR 未启用或不可用，请检查 OCR_ENABLED、供应商配置和凭据");
         }
     }
 

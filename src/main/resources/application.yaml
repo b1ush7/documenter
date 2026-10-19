@@ -88,10 +88,20 @@ res:
       max-edit-operations: ${XLSX_MAX_EDIT_OPERATIONS:500}
       max-structural-units: ${XLSX_MAX_STRUCTURAL_UNITS:1000}
       max-sortable-cells: ${XLSX_MAX_SORTABLE_CELLS:10000}
-  # 云端 OCR。模型地址、模型名和加密 API Key 复用管理端 scope=OCR 的默认启用的模型配置。
-  # 启用后扫描页/图片会发送到该云端服务，不适合不能出境或不能上云的文档。
+  # OCR_PROVIDER=aliyun 使用统一识别；cloud-vision 复用管理端 scope=OCR 的模型。
+  # 启用后扫描页/图片会发送到所选服务。
   ocr:
     enabled: ${OCR_ENABLED:false}
+    provider: ${OCR_PROVIDER:cloud-vision}
+    aliyun:
+      type: ${ALIYUN_OCR_TYPE:Advanced}
+      endpoint: ${ALIYUN_OCR_ENDPOINT:ocr-api.cn-hangzhou.aliyuncs.com}
+      region-id: ${ALIYUN_OCR_REGION_ID:cn-hangzhou}
+      access-key-id: ${ALIYUN_OCR_ACCESS_KEY_ID:}
+      access-key-secret: ${ALIYUN_OCR_ACCESS_KEY_SECRET:}
+      security-token: ${ALIYUN_OCR_SECURITY_TOKEN:}
+      connect-timeout-millis: ${ALIYUN_OCR_CONNECT_TIMEOUT_MILLIS:10000}
+      read-timeout-millis: ${ALIYUN_OCR_READ_TIMEOUT_MILLIS:60000}
     default-language: ${OCR_DEFAULT_LANGUAGE:auto}
     allowed-languages: ${OCR_ALLOWED_LANGUAGES:auto,zh,en}
     dpi: ${OCR_PDF_DPI:200}

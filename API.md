@@ -680,7 +680,9 @@ PUT /file/10/versions/2/ocr/corrections
 
 响应沿用现有 `AgentRunResult`，包含 `reply`、步骤、用量、结束原因、来源提示和费用配置状态。该入口不绑定文档、不开放编辑工具，只做只读整理；校正内容作为不可信数据放入提示词边界，不会获得文件写入权限。每日额度、重试、SSE 之外的同步语义和模型未配置提示沿用现有 AI 流程。校正内容超过 `AI_MAX_DOCUMENT_CHARS` 返回 413。
 
-云端 OCR 默认关闭。部署前需在管理端创建、配置并启用 `scope=OCR` 的默认模型；接口地址必须是 HTTPS 的 OpenAI 兼容 `chat/completions` 端点，模型需支持 `image_url` data URL，并能按约定返回行文字及像素坐标。API Key 继续使用既有 AES-256-GCM 模型密钥存储，不返回前端。启用后会把扫描页和图片发送给该云服务，敏感文档不得启用或必须使用满足组织合规要求的部署。未启用、未配置默认模型、鉴权失败或上游不可用返回 503；超时返回 504；其他上游失败、响应格式错误或超过配置的响应大小上限（默认 16 MiB）返回 502，上游限流返回 429。结果缓存位于存储临时目录，键包含图片摘要、模型配置和语言，不包含明文密钥。
+云端 OCR 默认关闭。阿里云统一识别设 `OCR_PROVIDER=aliyun`、`ALIYUN_OCR_TYPE=Advanced`，通过服务器环境配置 RAM AccessKey，启用 `OCR_ENABLED=true`，无需配置管理端 OCR 模型。沿用本节接口和响应结构，`engine=aliyun-Advanced`；上传二进制图片，返回原图坐标、行文字和表格合并结构，扫描 PDF 逐页处理。单页最大 10 MiB（同时遵守本地上限），宽高 16～8191 像素，长宽比小于 50；`auto/zh/en/zh+en` 均使用中英文自动识别。缺少坐标或低置信度标记需复核。可配置 `General` 基础版，但不保证定位和表格结构。详见 [阿里云 OCR 部署说明](docs/aliyun-ocr.md)。
+
+`OCR_PROVIDER=cloud-vision`（未设置供应商时的兼容默认值）仍读取管理端已启用的 `scope=OCR` 默认模型，使用 HTTPS 的 OpenAI 兼容视觉 `chat/completions` 协议；API Key 沿用 AES-256-GCM 存储，不返回前端。未启用、凭据不完整或鉴权失败返回 503，超时 504，限流 429，图片/子图识别失败 422，其他上游或响应结构错误 502。阿里云 SDK 禁止自动重试，响应大小配置在 SDK 解析后的 JSON 上应用。缓存位于存储临时目录，键包含图片、语言、供应商配置及凭据摘要；失败不缓存，缓存含识别原文。
 
 ### 3.12 渲染 PDF 页面预览
 
@@ -1088,7 +1090,7 @@ GET /file/10/versions/2/xlsx/range?sheetName=数据&range=A1:C20
 | --- | --- | --- |
 | `mode` | 是 | `EDITABLE`：按阅读行输出，便于编辑；`LAYOUT`：保留文字横向位置、字号、粗斜体和基础行距 |
 | `instruction` | 否 | 最多 500 字符，写入新版本追溯信息 |
-| `ocrLanguage` | 否 | 例如 `zh+en`；提供后扫描页调用管理端默认云端 OCR，模型不可用返回 503 |
+| `ocrLanguage` | 否 | 例如 `zh+en`；提供后扫描页调用配置的 OCR 供应商，未启用或配置不可用返回 503 |
 
 接口读取当前用户拥有的明确 PDF 版本，以路径中的 `versionNo` 同时作为源版本和乐观锁期望版本，生成同一文件的新 `CONVERT` / DOCX 版本并返回 [Version](#64-version)。原 PDF 和其他历史版本不变。
 
@@ -2176,9 +2178,20 @@ target 是内部定位形式“原始工作表名称!规范单元格”，单元
 
 计划生成、查询和确认时均重新校验。确认后公式、表格和图表按计划顺序在同一工作簿中执行，仅生成一个 `AI_EDIT` 版本；任一操作失败不保存部分结果，源版本冲突返回 `409`。真实模型能否正确选择工具和提取数据仍需单独验收，本接口不把桩模型结果当作真实模型能力证明。
 
+### 8.8 待确认的 DOCX 批量格式与已有图片尺寸
+
+复用已有同步/SSE 回复、查询、确认及放弃接口，不新增 HTTP 路径、DTO 字段或数据库表。绑定 DOCX 并指定源 `versionNo` 后，可直接发送“正文统一宋体小四、1.5 倍行距，一级标题黑体三号加粗，已有图片统一宽 6 厘米，保持比例”等指令。
+
+- `normalize_docx_format`：`formatJson` 支持 `scope=ALL/BODY/HEADINGS`、可选标题级别 `headingLevel=1..9`、`fontFamily`、`fontSizePoints`、倍数 `lineSpacing`、段前后磅数 `spaceBeforePoints/spaceAfterPoints`、`alignment=LEFT/CENTER/RIGHT/JUSTIFY`、`bold/italic` 和 `includeTables`（默认 true）。未提供的格式保留，正文与标题不同可生成多项范围操作。每个范围最多 5000 个段落。
+- `resize_docx_images`：`layoutJson` 支持 `widthCm/heightCm`（至少一个）、`keepAspectRatio`（默认 true）和可选 `alignment=LEFT/CENTER/RIGHT`。等比模式按尺寸框适配；明确关闭等比时须同时给出宽高。最多 500 张正文及表格已有图片，不替换原始图片文件。
+
+计划类型分别为 `NORMALIZE_DOCX_FORMAT` 和 `RESIZE_DOCX_IMAGES`，`target` 固定为 `body`，`content` 为规范化选项 JSON。现有 `changes` 的 `before` 返回源版本匹配数量，`after` 返回选项；前端应展示确认差异，并允许新类型使用通用文本展示。确认后批量执行，仅写入一个 `AI_EDIT` 版本；重复确认返回相同版本。放弃不写入，版本冲突返回 `409` 并清理生成产物。此能力的本地测试使用桩模型和真实 DOCX 回读，尚未验收生产模型的自然语言调用效果。
+
+标题范围依赖已有标题样式或大纲级别，不自动把普通文字识别成标题；页眉页脚保持原样。字体需要在打开/转换文档的系统中安装。图片支持标准 DrawingML 内嵌图和浮动图；不处理 VML、组合形状及文本框内部图片。普通栅格图优先按原图比例，裁剪、旋转或无法读取原图尺寸时按当前显示比例。图片尺寸受页面版心和已知单元格宽度限制，但复杂分栏、单元格边距和浮动定位仍需预览检查；浮动位置不重排。图片对齐仅接受独立成段的内嵌图，混排文字或浮动图要求对齐时会拒绝，避免挪动正文。
+
 ## 9. 当前实现边界
 
-- 已提供同步及 SSE 流式 AI 回复、来源回显与核验提示、DOCX 文本/图片/基础格式，以及 XLSX 公式、新表格和基础图表的差异、确认和放弃；真实模型效果尚未验收。
+- 已提供同步及 SSE 流式 AI 回复、来源回显与核验提示、DOCX 文本/图片/基础格式、批量格式及已有图片尺寸，以及 XLSX 公式、新表格和基础图表的差异、确认和放弃；真实模型效果尚未验收。
 - LangChain4j 工具循环已接入回复 Controller；CONVERT/EXPORT 已接入真实异步任务处理器，OCR/AI_EDIT 不开放新建异步任务。OCR 使用独立同步接口和可配置的 OpenAI 兼容云端视觉模型。
 - SSE 用于 AI 回复，不用于异步任务进度；任务进度继续通过 REST 轮询。
 - DOCX 结构块模式使用固定样式；模板模式支持管理员启用的 DOCX 正文/表格纯文本变量，不支持循环、图片变量、主题参数和用户自行上传模板生成。
