@@ -7,6 +7,10 @@ import com.documenter.configuration.SecurityConfig;
 import com.documenter.entity.User;
 import com.documenter.controller.AdminConfigController;
 import com.documenter.controller.TemplateController;
+import com.documenter.controller.StorageRecycleController;
+import com.documenter.service.impl.StorageRecycleService;
+import com.documenter.service.AuditService;
+import com.documenter.vo.StorageRecycleReport;
 import com.documenter.entity.FileAsset;
 import com.documenter.service.DocTemplateService;
 import com.documenter.service.ModelConfigService;
@@ -58,6 +62,7 @@ class SecurityFilterChainTest {
     @Autowired private StringRedisTemplate redis;
     @Autowired private UserMapper users;
     @Autowired private DocTemplateService templates;
+    @Autowired private StorageRecycleService recycle;
     private final Map<String, String> sessions = new ConcurrentHashMap<>();
     private MockMvc mvc;
     private User user;
@@ -65,7 +70,7 @@ class SecurityFilterChainTest {
     @BeforeEach
     @SuppressWarnings("unchecked")
     void setUp() {
-        reset(redis, users, templates);
+        reset(redis, users, templates, recycle);
         ValueOperations<String, String> values = mock(ValueOperations.class);
         SetOperations<String, String> sets = mock(SetOperations.class);
         when(redis.opsForValue()).thenReturn(values);
@@ -83,6 +88,30 @@ class SecurityFilterChainTest {
         user.setStatus("ENABLED");
         when(users.selectById(7L)).thenReturn(user);
         mvc = MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
+    }
+
+    @Test
+    void redisTimeoutFailsClosedWith503AndNeverLooksUpOrAuthenticatesUser() throws Exception {
+        var pair=jwt.createTokenPair("7");
+        when(redis.opsForValue().get(anyString())).thenThrow(new org.springframework.dao.QueryTimeoutException("private redis endpoint"));
+        mvc.perform(get("/private/who").header("Authorization","Bearer "+pair.accessToken()))
+                .andExpect(status().isServiceUnavailable()).andExpect(jsonPath("$.code").value(503));
+        verify(users,never()).selectById(anyLong());
+        assertNull(SecurityContextHolder.getContext().getAuthentication());
+    }
+
+    @Test
+    void storageRecycleRequiresAdminAndDefaultsToPreview() throws Exception {
+        mvc.perform(post("/admin/storage/recycle")).andExpect(status().isUnauthorized());
+        var tokens = jwt.createTokenPair("7");
+        mvc.perform(post("/admin/storage/recycle").header("Authorization", tokens.accessToken()))
+                .andExpect(status().isForbidden());
+        verifyNoInteractions(recycle);
+        user.setRole("ADMIN");
+        when(recycle.recycle(true)).thenReturn(new StorageRecycleReport(true, 0, 0, 0, 0, false, java.util.List.of()));
+        mvc.perform(post("/admin/storage/recycle").header("Authorization", tokens.accessToken()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.dryRun").value(true));
+        verify(recycle).recycle(true);
     }
 
     @Test
@@ -237,7 +266,7 @@ class SecurityFilterChainTest {
 
     @Configuration
     @EnableWebMvc
-    @Import({SecurityConfig.class, AdminConfigController.class, TemplateController.class})
+    @Import({SecurityConfig.class, AdminConfigController.class, TemplateController.class, StorageRecycleController.class})
     static class TestConfig {
         @Bean JwtProperties jwtProperties() {
             var properties = new JwtProperties();
@@ -254,6 +283,8 @@ class SecurityFilterChainTest {
         @Bean ProbeController probe() { return new ProbeController(); }
         @Bean DocTemplateService templates() { return mock(DocTemplateService.class); }
         @Bean ModelConfigService models() { return mock(ModelConfigService.class); }
+        @Bean StorageRecycleService recycle() { return mock(StorageRecycleService.class); }
+        @Bean AuditService audit() { return mock(AuditService.class); }
     }
 
     @RestController

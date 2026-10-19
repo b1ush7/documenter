@@ -390,7 +390,7 @@ public class AdminResourceServiceImpl implements AdminResourceService {
             throw new BusinessException(400, "文件 ID 不能为空");
         }
         FileAsset asset = fileAssetMapper.selectById(fileId);
-        if (asset == null) {
+        if (asset == null || asset.getStoragePurgedTime() != null) {
             throw new BusinessException(404, "文件不存在");
         }
         return asset;

@@ -743,8 +743,10 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
                 XDDFCategoryAxis categoryAxis = chart.createCategoryAxis(AxisPosition.BOTTOM);
                 XDDFValueAxis valueAxis = chart.createValueAxis(AxisPosition.LEFT);
                 valueAxis.setCrosses(AxisCrosses.AUTO_ZERO);
+                valueAxis.setCrossBetween(org.apache.poi.xddf.usermodel.chart.AxisCrossBetween.BETWEEN);
                 data = chart.createData(ChartTypes.BAR, categoryAxis, valueAxis);
                 ((XDDFBarChartData) data).setBarDirection(BarDirection.COL);
+                ((XDDFBarChartData) data).setBarGrouping(org.apache.poi.xddf.usermodel.chart.BarGrouping.CLUSTERED);
             }
             case "LINE" -> {
                 XDDFCategoryAxis categoryAxis = chart.createCategoryAxis(AxisPosition.BOTTOM);
@@ -756,6 +758,7 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
             default -> throw new BusinessException(422, "图表类型只支持 BAR、LINE、PIE");
         }
         XDDFChartData.Series series = data.addSeries(categorySource, valueSource);
+        com.documenter.util.BasicChartStyle.apply(data, series, type);
         if (seriesName != null && !seriesName.isBlank()) series.setTitle(seriesName);
         chart.plot(data);
         if (title != null && !title.isBlank()) {

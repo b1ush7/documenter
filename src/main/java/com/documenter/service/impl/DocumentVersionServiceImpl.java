@@ -2,6 +2,7 @@ package com.documenter.service.impl;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.documenter.entity.DocumentVersion;
+import com.documenter.component.ExecutionLeaseService;
 import com.documenter.entity.FileAsset;
 import com.documenter.enums.ChangeType;
 import com.documenter.exception.BusinessException;
@@ -15,6 +16,8 @@ import com.documenter.vo.FileDownload;
 import com.documenter.vo.VersionVO;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.ConcurrencyFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.beans.BeanUtils;
 import org.springframework.transaction.annotation.Transactional;
@@ -35,6 +38,10 @@ import java.util.List;
 @Slf4j
 @Service
 public class DocumentVersionServiceImpl implements DocumentVersionService, VersionWriter {
+    private ExecutionLeaseService leases;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setExecutionLeases(ExecutionLeaseService leases) { this.leases = leases; }
 
     private static final String STATUS_READY = "READY";
     private static final String STATUS_DELETED = "DELETED";
@@ -123,6 +130,7 @@ public class DocumentVersionServiceImpl implements DocumentVersionService, Versi
         if (taskId != null && (attemptNo == null || attemptNo < 1)) {
             throw new BusinessException(400, "任务产出必须提供正数的尝试序号");
         }
+        if (taskId != null && leases != null) leases.fenceVersion(taskId, userId, fileId);
 
         // 任务级幂等（TODO 3.4）：同一任务的同一次尝试已经产出过版本时，
         // 直接返回已有版本，不再分配版本号、不再落盘。
@@ -152,7 +160,15 @@ public class DocumentVersionServiceImpl implements DocumentVersionService, Versi
         }
 
         // 原子分配版本号：期望版本不符时影响行数为 0，说明期间已有其他任务改了版本
-        int updated = fileAssetMapper.advanceVersion(fileId, expectVersion);
+        int updated;
+        try {
+            updated = fileAssetMapper.advanceVersion(fileId, expectVersion);
+        } catch (DataAccessException failure) {
+            if (!isConcurrentWrite(failure)) throw failure;
+            // MariaDB 也可能以 1020/锁等待/死锁报告同一行竞争；不能在已失败事务里重试。
+            log.info("数据库报告版本写入竞争, fileId={}, expect={}", fileId, expectVersion);
+            throw new BusinessException(409, "文档正在被其他操作修改，请刷新版本后重试");
+        }
         if (updated != 1) {
             Integer actual = fileAssetMapper.selectLatestVersion(fileId);
             log.info("版本冲突, fileId={}, expect={}, actual={}", fileId, expectVersion, actual);
@@ -273,6 +289,17 @@ public class DocumentVersionServiceImpl implements DocumentVersionService, Versi
             throw new BusinessException(404, "版本不存在");
         }
         return version;
+    }
+
+    private static boolean isConcurrentWrite(DataAccessException failure) {
+        if (failure instanceof ConcurrencyFailureException) return true;
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof java.sql.SQLException sql) {
+                if (sql.getErrorCode() == 1020 || sql.getErrorCode() == 1205 || sql.getErrorCode() == 1213
+                        || "40001".equals(sql.getSQLState())) return true;
+            }
+        }
+        return false;
     }
 
     /** 在扩展名前插入版本号，例如 report.docx -> report-v2.docx。 */

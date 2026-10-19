@@ -3,7 +3,7 @@ spring:
     name: documenter
   profiles:
     active:
-      - dev
+      - service
   # 数据库迁移（TODO 3.4）：启动时自动执行 src/main/resources/db/migration 下未执行的脚本
   flyway:
     enabled: true
@@ -42,9 +42,25 @@ res:
     max-attempts: ${VERIFICATION_MAX_ATTEMPTS:5}
     # true 时验证码写入服务端日志而不真正发送；上线前必须改为 false 并接入真实渠道
     mock-enabled: ${VERIFICATION_MOCK_ENABLED:true}
-  # 文件存储（TODO 3.3）。各环境只需覆盖 local.root / local.temp 两个路径。
+  # 正式文件支持 local / oss；转换、预览和上传缓冲始终需要本地可写临时目录。
   storage:
-    type: local
+    type: ${STORAGE_TYPE:local}
+    oss:
+      endpoint: ${OSS_ENDPOINT:}
+      region: ${OSS_REGION:}
+      bucket: ${OSS_BUCKET:}
+      access-key-id: ${OSS_ACCESS_KEY_ID:}
+      access-key-secret: ${OSS_ACCESS_KEY_SECRET:}
+      security-token: ${OSS_SECURITY_TOKEN:}
+      prefix: ${OSS_PREFIX:documenter}
+    # 正式存储回收默认关闭且仅预演；活跃文件及模板的全部历史版本永久保留。
+    recycle:
+      enabled: ${STORAGE_RECYCLE_ENABLED:false}
+      dry-run: ${STORAGE_RECYCLE_DRY_RUN:true}
+      interval: ${STORAGE_RECYCLE_INTERVAL:24h}
+      deleted-retention: ${STORAGE_DELETED_RETENTION:720h}
+      orphan-grace: ${STORAGE_ORPHAN_GRACE:24h}
+      batch-size: ${STORAGE_RECYCLE_BATCH_SIZE:100}
     local:
       root: ${STORAGE_LOCAL_ROOT:./data/storage}
       temp: ${STORAGE_LOCAL_TEMP:./data/tmp}
@@ -72,10 +88,20 @@ res:
       max-edit-operations: ${XLSX_MAX_EDIT_OPERATIONS:500}
       max-structural-units: ${XLSX_MAX_STRUCTURAL_UNITS:1000}
       max-sortable-cells: ${XLSX_MAX_SORTABLE_CELLS:10000}
-  # 云端 OCR。模型地址、模型名和加密 API Key 复用管理端 scope=OCR 的默认启用的模型配置。
-  # 启用后扫描页/图片会发送到该云端服务，不适合不能出境或不能上云的文档。
+  # OCR_PROVIDER=aliyun 使用统一识别；cloud-vision 复用管理端 scope=OCR 的模型。
+  # 启用后扫描页/图片会发送到所选服务。
   ocr:
     enabled: ${OCR_ENABLED:false}
+    provider: ${OCR_PROVIDER:cloud-vision}
+    aliyun:
+      type: ${ALIYUN_OCR_TYPE:Advanced}
+      endpoint: ${ALIYUN_OCR_ENDPOINT:ocr-api.cn-hangzhou.aliyuncs.com}
+      region-id: ${ALIYUN_OCR_REGION_ID:cn-hangzhou}
+      access-key-id: ${ALIYUN_OCR_ACCESS_KEY_ID:}
+      access-key-secret: ${ALIYUN_OCR_ACCESS_KEY_SECRET:}
+      security-token: ${ALIYUN_OCR_SECURITY_TOKEN:}
+      connect-timeout-millis: ${ALIYUN_OCR_CONNECT_TIMEOUT_MILLIS:10000}
+      read-timeout-millis: ${ALIYUN_OCR_READ_TIMEOUT_MILLIS:60000}
     default-language: ${OCR_DEFAULT_LANGUAGE:auto}
     allowed-languages: ${OCR_ALLOWED_LANGUAGES:auto,zh,en}
     dpi: ${OCR_PDF_DPI:200}
@@ -108,12 +134,18 @@ res:
     default-timeout: ${TASK_DEFAULT_TIMEOUT:10m}
     default-max-retry: ${TASK_DEFAULT_MAX_RETRY:2}
     shutdown-await: ${TASK_SHUTDOWN_AWAIT:30s}
-    # 启动时把中断的 RUNNING 任务标记为失败，避免前端永远看到「运行中」
+    # 仅未启用 cluster 的单实例：启动时结束中断任务/回复；cluster 模式自动跳过本恢复。
     recover-on-startup: ${TASK_RECOVER_ON_STARTUP:true}
     # CONVERT/EXPORT 已有真实处理器，未开始的 PENDING 任务可在单实例重启后重新入队
     requeue-pending-on-startup: ${TASK_REQUEUE_PENDING_ON_STARTUP:true}
     # 仅保留历史任务兼容；CONVERT/EXPORT 已由真实处理器接管
     placeholder-enabled: ${TASK_PLACEHOLDER_ENABLED:false}
+    cluster:
+      enabled: ${TASK_CLUSTER_ENABLED:false}
+      heartbeat: ${TASK_CLUSTER_HEARTBEAT:10s}
+      lease-duration: ${TASK_CLUSTER_LEASE_DURATION:60s}
+      batch-size: ${TASK_CLUSTER_BATCH_SIZE:100}
+      requeue-pending: ${TASK_CLUSTER_REQUEUE_PENDING:true}
   # 页面版式预览（TODO 3.3）与兼容性验收（TODO 4.1）
   preview:
     # 预览渲染的默认 DPI 与上限
@@ -124,9 +156,11 @@ res:
     cache-enabled: ${PREVIEW_CACHE_ENABLED:true}
     cache-directory: ${PREVIEW_CACHE_DIRECTORY:preview-cache}
     # Office 渲染后端：none / kit
-    # kit 指打包好的 LibreOffice kit（Node CLI），同时提供页面渲染与格式转换。
+    # libreoffice 使用独立 Office 进程及 UNO Python；kit 为已有 Node CLI 后端。
     # PDF 与图片预览不需要它；DOCX/XLSX 版式预览与兼容性验收需要。
-    office-backend: ${PREVIEW_OFFICE_BACKEND:none}
+    office-backend: ${PREVIEW_OFFICE_BACKEND:kit}
+    office-executable: ${PREVIEW_OFFICE_EXECUTABLE:}
+    office-python: ${PREVIEW_OFFICE_PYTHON:}
     office-kit-node: ${PREVIEW_OFFICE_KIT_NODE:}
     office-kit-cli: ${PREVIEW_OFFICE_KIT_CLI:}
     office-timeout: ${PREVIEW_OFFICE_TIMEOUT:120s}

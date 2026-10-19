@@ -17,8 +17,27 @@ import java.util.Set;
 @ConfigurationProperties(prefix = "res.ocr")
 public class OcrProperties {
 
-    /** 默认关闭，避免误把敏感页面发送到云端；启用前必须由管理员配置 OCR 模型。 */
+    /** 默认关闭；启用前配置对应供应商凭据。 */
     private boolean enabled;
+
+    /** cloud-vision 复用管理端模型；aliyun 使用 RecognizeAllText。 */
+    private String provider = "cloud-vision";
+
+    private Aliyun aliyun = new Aliyun();
+
+    @Getter
+    @Setter
+    public static class Aliyun {
+        /** Advanced 支持坐标和表格；General 仅基础文字。 */
+        private String type = "Advanced";
+        private String accessKeyId = "";
+        private String accessKeySecret = "";
+        private String securityToken = "";
+        private String endpoint = "ocr-api.cn-hangzhou.aliyuncs.com";
+        private String regionId = "cn-hangzhou";
+        private int connectTimeoutMillis = 10000;
+        private int readTimeoutMillis = 60000;
+    }
 
     private String defaultLanguage = "auto";
 

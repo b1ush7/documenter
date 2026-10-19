@@ -56,6 +56,12 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     }
 
     @Override
+    protected boolean shouldNotFilterAsyncDispatch() {
+        // SSE 完成时会在容器线程做 ASYNC 分派；无状态会话必须在该线程恢复认证。
+        return false;
+    }
+
+    @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
         String token = getAccessToken(request);
@@ -76,6 +82,13 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                 response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
                 response.setContentType("application/json;charset=UTF-8");
                 response.getWriter().write("{\"code\":401,\"msg\":\"Token 无效或已过期\"}");
+                return;
+            } catch (RuntimeException failure) {
+                if (!com.documenter.util.DependencyFailures.unavailable(failure)) throw failure;
+                SecurityContextHolder.clearContext();
+                response.setStatus(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
+                response.setContentType("application/json;charset=UTF-8");
+                response.getWriter().write("{\"code\":503,\"msg\":\"认证服务暂不可用，请稍后重试\"}");
                 return;
             }
         }

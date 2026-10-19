@@ -36,6 +36,26 @@ import static org.mockito.Mockito.when;
 
 class DocxTableMergeTest {
 
+    @Test
+    void mergeAndSplitPreserveExplicitPreferredColumnWidths() throws Exception {
+        byte[] source;
+        try(var document = new XWPFDocument(); var output = new ByteArrayOutputStream()) {
+            var table = document.createTable(1,2);
+            for(var cell:table.getRow(0).getTableCells()) { cell.setWidth("3000"); cell.setText("value"); }
+            document.write(output); source=output.toByteArray();
+        }
+        prepare(source);
+        service.editTable(USER_ID,FILE_ID,VERSION,request(mergeOperation("body/t0/r0/c0","body/t0/r0/c1")));
+        byte[] merged = saved();
+        try(var document = open(merged)) { assertEquals(6000, document.getTables().getFirst().getRow(0).getCell(0).getWidth()); }
+        org.mockito.Mockito.clearInvocations(storage,writer,versions);
+        prepare(merged);
+        service.editTable(USER_ID,FILE_ID,VERSION,request(splitOperation("body/t0/r0/c0")));
+        try(var document = open(saved())) {
+            for(var cell:document.getTables().getFirst().getRow(0).getTableCells()) assertEquals(3000,cell.getWidth());
+        }
+    }
+
     private static final long USER_ID = 7L;
     private static final long FILE_ID = 10L;
     private static final int VERSION = 1;

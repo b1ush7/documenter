@@ -6,7 +6,7 @@ import com.documenter.entity.OcrCorrection;
 import com.documenter.exception.BusinessException;
 import com.documenter.mapper.OcrCorrectionMapper;
 import com.documenter.service.DocumentVersionService;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDateTime;

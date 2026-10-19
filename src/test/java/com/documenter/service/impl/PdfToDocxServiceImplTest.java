@@ -45,6 +45,33 @@ import static org.mockito.Mockito.when;
 
 class PdfToDocxServiceImplTest {
 
+    @Test
+    void sharedResourcesDoNotMoveAnImageOntoAnEarlierOrBlankPage() throws Exception {
+        byte[] pdf = createPdf(document -> {
+            var resources = new org.apache.pdfbox.pdmodel.PDResources();
+            var image = LosslessFactory.createFromImage(document, sampleImage()); resources.add(image);
+            for (int number = 1; number <= 3; number++) {
+                var page = new PDPage(); page.setResources(resources); document.addPage(page);
+                try (var stream = new PDPageContentStream(document, page)) {
+                    if (number != 2) {
+                        stream.beginText(); stream.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA),12);
+                        stream.newLineAtOffset(72,720); stream.showText("Page " + number); stream.endText();
+                    }
+                    if (number == 3) stream.drawImage(image,72,600,40,40);
+                }
+            }
+        });
+        try(var rebuilt = new XWPFDocument(new ByteArrayInputStream(service.rebuild(pdf,PdfConversionMode.EDITABLE)))) {
+            int third=-1, picture=-1;
+            for(int i=0;i<rebuilt.getParagraphs().size();i++) {
+                var paragraph=rebuilt.getParagraphs().get(i);
+                if(paragraph.getText().contains("Page 3")) third=i;
+                for(var run:paragraph.getRuns()) if(!run.getEmbeddedPictures().isEmpty()) picture=i;
+            }
+            assertEquals(1,rebuilt.getAllPictures().size()); assertTrue(third>=0 && picture>third);
+        }
+    }
+
     private static final long USER_ID = 7L;
     private static final long FILE_ID = 10L;
     private static final int SOURCE_VERSION = 3;

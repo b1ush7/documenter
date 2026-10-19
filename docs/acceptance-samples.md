@@ -58,3 +58,5 @@ manifest.json 记录样本版本、生成时间、各项自动检查结果、文
 样本回归调用真实 DocxDocumentServiceImpl、PdfDocumentServiceImpl、XlsxDocumentServiceImpl、ImageDocumentServiceImpl 和本地存储，并校验保存产物的长度与摘要。来源版本和新增版本的数据库边界使用替身；没有连接真实数据库、Redis、模型或 OCR，也没有调用 Word/LibreOffice。
 
 manifest 的 allAutomaticChecksPassed 只描述上述 6 项服务级回归；notExecuted 明确列出 OCR、中文 OCR、Office 版式和数据库/HTTP 流程。API 权限、队列、冲突、超时等继续由其他回归测试及真实环境验收覆盖。
+
+2026-10-18 新增独立的 [真实 LibreOffice 验收](office-rendering-testing.md)，覆盖中文目录、最终页码、合并表格、多段脚注、基础公式/柱状图及原生 PDF 重建，并通过真实 HTTP 预览和导出。它使用另一组固定样本，不改变上述 manifest 的原有统计语义。

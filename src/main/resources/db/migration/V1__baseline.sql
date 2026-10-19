@@ -3,7 +3,7 @@
 -- 对应 TODO.md 3.4「引入数据库迁移管理，建立 file_asset、document_version、
 -- processing_task、task_step、ai_session、ai_message、verification_record、audit_log 等表」
 --
--- 目标库：MariaDB 10.6+ / 11.x（沿用现有 utf8mb4_uca1400_ai_ci 排序规则）
+-- 目标库：MariaDB 10.6+ / 11.x（沿用现有 utf8mb4_0900_ai_ci 排序规则）
 -- 说明：本脚本只建表结构，不写业务数据。Flyway 会按版本号顺序执行。
 -- =============================================================================
 
@@ -31,7 +31,7 @@ CREATE TABLE `user`
     CONSTRAINT `ck_user_status` CHECK (`status` IN ('ENABLED', 'DISABLED'))
 )
     COMMENT ='用户'
-    COLLATE = 'utf8mb4_uca1400_ai_ci'
+    COLLATE = 'utf8mb4_0900_ai_ci'
     ENGINE = InnoDB;
 
 -- 禁用/恢复用户、按手机号登录都需要稳定查询
@@ -66,7 +66,7 @@ CREATE TABLE `file_asset`
     CONSTRAINT `ck_file_asset_status` CHECK (`status` IN ('READY', 'DELETED', 'QUARANTINED'))
 )
     COMMENT ='文件元数据'
-    COLLATE = 'utf8mb4_uca1400_ai_ci'
+    COLLATE = 'utf8mb4_0900_ai_ci'
     ENGINE = InnoDB;
 
 -- -----------------------------------------------------------------------------
@@ -94,7 +94,7 @@ CREATE TABLE `document_version`
         CHECK (`change_type` IN ('UPLOAD', 'AI_EDIT', 'MANUAL_EDIT', 'CONVERT', 'RESTORE'))
 )
     COMMENT ='文档版本'
-    COLLATE = 'utf8mb4_uca1400_ai_ci'
+    COLLATE = 'utf8mb4_0900_ai_ci'
     ENGINE = InnoDB;
 
 -- -----------------------------------------------------------------------------
@@ -136,7 +136,7 @@ CREATE TABLE `processing_task`
     CONSTRAINT `ck_processing_task_progress` CHECK (`progress` BETWEEN 0 AND 100)
 )
     COMMENT ='处理任务'
-    COLLATE = 'utf8mb4_uca1400_ai_ci'
+    COLLATE = 'utf8mb4_0900_ai_ci'
     ENGINE = InnoDB;
 
 -- -----------------------------------------------------------------------------
@@ -160,7 +160,7 @@ CREATE TABLE `task_step`
         CHECK (`status` IN ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'SKIPPED'))
 )
     COMMENT ='任务步骤'
-    COLLATE = 'utf8mb4_uca1400_ai_ci'
+    COLLATE = 'utf8mb4_0900_ai_ci'
     ENGINE = InnoDB;
 
 -- -----------------------------------------------------------------------------
@@ -195,7 +195,7 @@ CREATE TABLE `verification_record`
         CHECK (`status` IN ('ACTIVE', 'CONSUMED', 'EXPIRED', 'LOCKED'))
 )
     COMMENT ='验证码记录'
-    COLLATE = 'utf8mb4_uca1400_ai_ci'
+    COLLATE = 'utf8mb4_0900_ai_ci'
     ENGINE = InnoDB;
 
 -- -----------------------------------------------------------------------------
@@ -221,7 +221,7 @@ CREATE TABLE `audit_log`
     CONSTRAINT `ck_audit_log_result` CHECK (`result` IN ('SUCCESS', 'FAILURE'))
 )
     COMMENT ='审计日志'
-    COLLATE = 'utf8mb4_uca1400_ai_ci'
+    COLLATE = 'utf8mb4_0900_ai_ci'
     ENGINE = InnoDB;
 
 -- -----------------------------------------------------------------------------
@@ -243,7 +243,7 @@ CREATE TABLE `ai_session`
     CONSTRAINT `ck_ai_session_status` CHECK (`status` IN ('ACTIVE', 'ARCHIVED'))
 )
     COMMENT ='AI 会话'
-    COLLATE = 'utf8mb4_uca1400_ai_ci'
+    COLLATE = 'utf8mb4_0900_ai_ci'
     ENGINE = InnoDB;
 
 CREATE TABLE `ai_message`
@@ -265,5 +265,5 @@ CREATE TABLE `ai_message`
     CONSTRAINT `ck_ai_message_role` CHECK (`role` IN ('USER', 'ASSISTANT', 'TOOL', 'SYSTEM'))
 )
     COMMENT ='AI 消息'
-    COLLATE = 'utf8mb4_uca1400_ai_ci'
+    COLLATE = 'utf8mb4_0900_ai_ci'
     ENGINE = InnoDB;

@@ -1,7 +1,7 @@
 package com.documenter.component;
 
 import com.documenter.configuration.StorageProperties;
-import com.documenter.service.impl.LocalFileStorage;
+import com.documenter.service.FileStorage;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -24,10 +24,10 @@ import java.util.stream.Stream;
         havingValue = "true", matchIfMissing = true)
 public class TemporaryFileCleaner {
 
-    private final LocalFileStorage storage;
+    private final FileStorage storage;
     private final StorageProperties properties;
 
-    public TemporaryFileCleaner(LocalFileStorage storage, StorageProperties properties) {
+    public TemporaryFileCleaner(FileStorage storage, StorageProperties properties) {
         this.storage = storage;
         this.properties = properties;
     }

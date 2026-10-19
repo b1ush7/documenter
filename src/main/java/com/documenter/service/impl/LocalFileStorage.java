@@ -5,12 +5,18 @@ import com.documenter.exception.BusinessException;
 import com.documenter.service.FileStorage;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.ByteArrayInputStream;
+import java.nio.channels.Channels;
+import java.nio.channels.FileChannel;
+import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.FileTime;
+import java.time.Instant;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.UUID;
@@ -27,6 +33,7 @@ import java.util.UUID;
  */
 @Slf4j
 @Component
+@ConditionalOnProperty(prefix = "res.storage", name = "type", havingValue = "local", matchIfMissing = true)
 public class LocalFileStorage implements FileStorage {
 
     private static final DateTimeFormatter DATE_DIR = DateTimeFormatter.ofPattern("yyyy/MM/dd");
@@ -51,26 +58,38 @@ public class LocalFileStorage implements FileStorage {
 
     @Override
     public String store(byte[] content, String extension) {
-        String storageKey = newStorageKey(extension);
-        Path target = resolvePath(storageKey);
-        try {
-            Files.createDirectories(target.getParent());
-            Files.write(target, content);
-        } catch (IOException e) {
-            throw new BusinessException(500, "文件写入失败，请稍后重试");
-        }
-        return storageKey;
+        return store(new ByteArrayInputStream(content), extension);
     }
 
     @Override
     public String store(InputStream inputStream, String extension) {
         String storageKey = newStorageKey(extension);
         Path target = resolvePath(storageKey);
+        boolean complete = false;
+        boolean created = false;
         try {
             Files.createDirectories(target.getParent());
-            Files.copy(inputStream, target, StandardCopyOption.REPLACE_EXISTING);
+            // UUID key 只在全部写完后交给调用方入库；整个写入期间持锁，避免回收停滞的上传。
+            try (var channel = FileChannel.open(target, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+                created = true;
+                try (var lock = channel.lock()) {
+                    inputStream.transferTo(Channels.newOutputStream(channel));
+                    channel.force(true);
+                    Files.setLastModifiedTime(target, FileTime.from(Instant.now()));
+                }
+            }
+            complete = true;
         } catch (IOException e) {
+            log.warn("文件写入失败, storageKey={}", storageKey, e);
             throw new BusinessException(500, "文件写入失败，请稍后重试");
+        } finally {
+            if (created && !complete) {
+                try {
+                    Files.deleteIfExists(target);
+                } catch (IOException failure) {
+                    log.warn("未完成写入文件暂不能清理，将由正式回收任务重试, path={}", target, failure);
+                }
+            }
         }
         return storageKey;
     }
@@ -143,6 +162,7 @@ public class LocalFileStorage implements FileStorage {
     }
 
     /** 临时目录，供后续转换流程隔离使用。 */
+    @Override
     public Path tempDirectory() {
         return temp;
     }

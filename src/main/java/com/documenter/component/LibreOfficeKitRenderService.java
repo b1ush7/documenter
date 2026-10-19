@@ -72,6 +72,7 @@ public class LibreOfficeKitRenderService implements OfficeRenderService {
     @PostConstruct
     void init() {
         if (!BACKEND_KIT.equalsIgnoreCase(properties.getOfficeBackend())) {
+            if ("libreoffice".equalsIgnoreCase(properties.getOfficeBackend())) return;
             log.info("未启用 Office kit 渲染后端，DOCX/XLSX 版式渲染与兼容性验收不可用。"
                     + "启用方式：res.preview.office-backend=kit");
             return;

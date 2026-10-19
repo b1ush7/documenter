@@ -10,6 +10,7 @@ import com.documenter.service.OcrEngine;
 import com.documenter.service.OcrService;
 import com.documenter.util.OcrLanguageUtil;
 import com.documenter.util.OcrFingerprint;
+import com.documenter.util.OcrImagePreprocessor;
 import com.documenter.vo.FileDownload;
 import com.documenter.vo.OcrResultVO;
 import lombok.extern.slf4j.Slf4j;
@@ -61,6 +62,7 @@ public class OcrServiceImpl implements OcrService {
             throw new BusinessException(400, "OCR 源版本号必须为正数");
         }
         OcrRequestDTO safeRequest = request == null ? new OcrRequestDTO() : request;
+        OcrImagePreprocessor.validate(safeRequest);
         String language = OcrLanguageUtil.resolve(safeRequest.getLanguage(), properties);
         List<Integer> requestedPages = validateRequestedPages(safeRequest.getPages());
 
@@ -70,11 +72,11 @@ public class OcrServiceImpl implements OcrService {
         if ("pdf".equals(extension)) {
             return recognizePdf(fileId, versionNo, content, language,
                     requestedPages, safeRequest.getDpi(), safeRequest.getRegion(),
-                    safeRequest.isEnhance());
+                    safeRequest);
         }
         if (IMAGE_EXTENSIONS.contains(extension)) {
             return recognizeImage(fileId, versionNo, content, language,
-                    requestedPages, safeRequest.getRegion(), safeRequest.isEnhance());
+                    requestedPages, safeRequest.getRegion(), safeRequest);
         }
         throw new BusinessException(415, "OCR 仅支持 PDF、PNG 和 JPEG");
     }
@@ -82,7 +84,7 @@ public class OcrServiceImpl implements OcrService {
     private OcrResultVO recognizeImage(Long fileId, Integer versionNo, byte[] content,
                                        String language, List<Integer> pages,
                                        OcrRequestDTO.Region requestedRegion,
-                                       boolean enhance) {
+                                       OcrRequestDTO options) {
         if (!pages.isEmpty() && !pages.equals(List.of(1))) {
             throw new BusinessException(400, "图片只有第 1 页");
         }
@@ -97,9 +99,10 @@ public class OcrServiceImpl implements OcrService {
         }
         validatePixels(image);
         CroppedImage cropped = crop(image, requestedRegion);
-        byte[] png = encodePng(enhance ? enhance(cropped.image()) : cropped.image());
+        var prepared = OcrImagePreprocessor.prepare(cropped.image(), options);
+        byte[] png = encodePng(prepared.image());
         requireEngine();
-        OcrEngine.Result recognized = engine.recognize(png, language);
+        OcrEngine.Result recognized = prepared.originalCoordinates(engine.recognize(png, language));
         OcrResultVO.Page page = toPage(1, "OCR", image.getWidth(), image.getHeight(),
                 recognized, cropped.region(), cropped.offsetX(), cropped.offsetY());
         return withFingerprint(fileId, versionNo, engine.name(), language,
@@ -110,7 +113,7 @@ public class OcrServiceImpl implements OcrService {
                                      String language, List<Integer> requestedPages,
                                      Integer requestedDpi,
                                      OcrRequestDTO.Region requestedRegion,
-                                     boolean enhance) {
+                                     OcrRequestDTO options) {
         int dpi = resolveDpi(requestedDpi);
         try (PDDocument document = Loader.loadPDF(content)) {
             int totalPages = document.getNumberOfPages();
@@ -154,9 +157,9 @@ public class OcrServiceImpl implements OcrService {
                 validatePixels(image);
                 renderedPages++;
                 CroppedImage cropped = crop(image, requestedRegion);
-                OcrEngine.Result recognized = engine.recognize(
-                        encodePng(enhance ? enhance(cropped.image()) : cropped.image()),
-                        language);
+                var prepared = OcrImagePreprocessor.prepare(cropped.image(), options);
+                OcrEngine.Result recognized = prepared.originalCoordinates(engine.recognize(
+                        encodePng(prepared.image()), language));
                 String pageText = recognized.lines().stream()
                         .map(OcrEngine.Line::text)
                         .reduce((left, right) -> left + "\n" + right).orElse("");
@@ -284,49 +287,7 @@ public class OcrServiceImpl implements OcrService {
      * 转灰度并按 1%～99% 分位拉伸对比度。透明像素按白底处理，尺寸和坐标不变。
      */
     static BufferedImage enhance(BufferedImage source) {
-        int width = source.getWidth();
-        int height = source.getHeight();
-        BufferedImage flattened = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
-        var graphics = flattened.createGraphics();
-        try {
-            graphics.setColor(java.awt.Color.WHITE);
-            graphics.fillRect(0, 0, width, height);
-            graphics.drawImage(source, 0, 0, null);
-        } finally {
-            graphics.dispose();
-        }
-
-        int[] pixels = flattened.getRGB(0, 0, width, height, null, 0, width);
-        int[] histogram = new int[256];
-        for (int pixel : pixels) {
-            int gray = (((pixel >> 16) & 0xff) * 77
-                    + ((pixel >> 8) & 0xff) * 150 + (pixel & 0xff) * 29) >> 8;
-            histogram[gray]++;
-        }
-        int lowTarget = Math.max(0, pixels.length / 100);
-        int highTarget = Math.max(lowTarget, pixels.length - pixels.length / 100);
-        int low = 0;
-        int accumulated = 0;
-        while (low < 255 && (accumulated += histogram[low]) <= lowTarget) low++;
-        int high = 255;
-        accumulated = 0;
-        while (high > 0 && (accumulated += histogram[high]) <= pixels.length - highTarget) high--;
-        if (high <= low) {
-            low = 0;
-            high = 255;
-        }
-        double scale = 255d / Math.max(1, high - low);
-        int[] enhanced = new int[pixels.length];
-        for (int index = 0; index < pixels.length; index++) {
-            int pixel = pixels[index];
-            int gray = (((pixel >> 16) & 0xff) * 77
-                    + ((pixel >> 8) & 0xff) * 150 + (pixel & 0xff) * 29) >> 8;
-            int value = Math.max(0, Math.min(255,
-                    (int) Math.round((gray - low) * scale)));
-            enhanced[index] = (value << 16) | (value << 8) | value;
-        }
-        flattened.setRGB(0, 0, width, height, enhanced, 0, width);
-        return flattened;
+        return OcrImagePreprocessor.grayscale(source, true, false);
     }
 
     private NativeText nativeText(PDDocument document, int pageNo) throws IOException {
@@ -390,7 +351,7 @@ public class OcrServiceImpl implements OcrService {
     private void requireEngine() {
         if (!engine.available()) {
             throw new BusinessException(503,
-                    "云端 OCR 未启用或不可用，请配置默认 OCR 模型并检查密钥");
+                    "云端 OCR 未启用或不可用，请检查 OCR_ENABLED、供应商配置和凭据");
         }
     }
 

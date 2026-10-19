@@ -41,6 +41,11 @@ import java.util.concurrent.TimeoutException;
 @Component
 public class TaskExecutionEngine {
 
+    private ExecutionLeaseService leases;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setExecutionLeases(ExecutionLeaseService leases) { this.leases = leases; }
+
     /** 取消只对未进入终态的任务生效。 */
     private static final List<String> CANCELLABLE_FROM = List.of("PENDING", "RUNNING");
     /** 成功只允许从 RUNNING 流转，避免把 PENDING 直接置为成功。 */
@@ -82,6 +87,12 @@ public class TaskExecutionEngine {
         }
     }
 
+    /** 恢复扫描遇到背压时保留 PENDING，下次再尝试，不把已排队记录误标失败。 */
+    public boolean submitRecovered(Long taskId) {
+        try { coordinator.execute(() -> execute(taskId)); return true; }
+        catch (RejectedExecutionException rejected) { return false; }
+    }
+
     /**
      * 执行一个任务，按需重试。
      *
@@ -96,12 +107,26 @@ public class TaskExecutionEngine {
         }
 
         // 原子占用：只有把 PENDING 成功改成 RUNNING 的线程才有权执行
-        int acquired = taskMapper.markRunning(taskId, "启动");
+        int acquired = leases != null && leases.enabled()
+                ? leases.claimTask(taskId) : taskMapper.markRunning(taskId, "启动");
         if (acquired != 1) {
             log.info("任务已被其他执行线程接管或已进入终态, taskId={}, status={}", taskId, task.getStatus());
             return;
         }
 
+        try (var registration = leases == null ? ExecutionLeaseService.NOOP : leases.trackTask(taskId)) {
+            executeClaimedTask(task);
+        } catch (BusinessException failure) {
+            if (leases != null && leases.enabled() && !leases.taskActive(taskId)) {
+                log.info("旧任务执行者已失去租约，停止处理, taskId={}", taskId);
+                return;
+            }
+            throw failure;
+        }
+    }
+
+    private void executeClaimedTask(ProcessingTask task) {
+        Long taskId = task.getId();
         TaskType type;
         try {
             type = parseType(task.getTaskType());
@@ -135,7 +160,7 @@ public class TaskExecutionEngine {
         int retriesDone = 0;
         while (true) {
             TaskExecutionContextImpl context =
-                    new TaskExecutionContextImpl(taskMapper, stepMapper, task, attemptNo);
+                    new TaskExecutionContextImpl(taskMapper, stepMapper, task, attemptNo, leases);
             Outcome outcome = runOnce(task, handler.get(), context, timeoutSeconds);
             if (outcome.status() == TaskStatus.SUCCEEDED || outcome.status() == TaskStatus.CANCELLED) {
                 finish(taskId, outcome.status(), outcome.status() == TaskStatus.SUCCEEDED
@@ -155,7 +180,8 @@ public class TaskExecutionEngine {
             ProcessingTask update = new ProcessingTask();
             update.setId(taskId);
             update.setRetryCount(retriesDone);
-            taskMapper.updateById(update);
+            if (leases == null) taskMapper.updateById(update);
+            else leases.mutateTask(taskId, () -> taskMapper.updateById(update));
         }
     }
 
@@ -246,6 +272,11 @@ public class TaskExecutionEngine {
     private void finish(Long taskId, TaskStatus target, int progress,
                         String errorCode, String errorMessage) {
         List<String> from = target == TaskStatus.SUCCEEDED ? RUNNING_ONLY : CANCELLABLE_FROM;
+        if (leases != null && leases.enabled()) {
+            try { leases.mutateTask(taskId, () -> taskMapper.finish(taskId, target.name(), progress, errorCode, errorMessage, from)); }
+            catch (BusinessException lostLease) { log.info("执行租约已失效，保留恢复器决定的终态, taskId={}", taskId); }
+            return;
+        }
         int updated = taskMapper.finish(taskId, target.name(), progress, errorCode, errorMessage, from);
         if (updated != 1) {
             log.warn("任务状态流转被拒绝（可能已进入终态）, taskId={}, target={}", taskId, target);

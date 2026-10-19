@@ -6,8 +6,8 @@ import com.documenter.exception.BusinessException;
 import com.documenter.service.ModelConfigService;
 import com.documenter.service.OcrEngine;
 import com.documenter.util.Digests;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -42,6 +42,8 @@ import java.util.Map;
  */
 @Slf4j
 @Component
+@org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(
+        prefix = "res.ocr", name = "provider", havingValue = "cloud-vision", matchIfMissing = true)
 public class CloudVisionOcrEngine implements OcrEngine {
 
     private static final String OCR_SCOPE = "OCR";
@@ -166,12 +168,12 @@ public class CloudVisionOcrEngine implements OcrEngine {
                                 int maxOutputChars, int maxTableRows,
                                 int maxTableColumns, int maxTableCells) {
         try {
-            JsonNode root = new com.fasterxml.jackson.databind.ObjectMapper()
+            JsonNode root = new tools.jackson.databind.ObjectMapper()
                     .readTree(responseBody);
             String content = messageContent(root.path("choices").path(0)
                     .path("message").path("content"));
             String json = extractJson(content);
-            JsonNode contentRoot = new com.fasterxml.jackson.databind.ObjectMapper()
+            JsonNode contentRoot = new tools.jackson.databind.ObjectMapper()
                     .readTree(json);
             JsonNode linesNode = contentRoot.path("lines");
             if (!linesNode.isArray()) {
@@ -212,7 +214,7 @@ public class CloudVisionOcrEngine implements OcrEngine {
             return new Result(lines, tables, truncated);
         } catch (BusinessException e) {
             throw e;
-        } catch (IOException | RuntimeException invalid) {
+        } catch (RuntimeException invalid) {
             throw new BusinessException(502, "云端 OCR 返回格式不合法");
         }
     }
@@ -323,7 +325,7 @@ public class CloudVisionOcrEngine implements OcrEngine {
         }
         try {
             return objectMapper.writeValueAsString(payload);
-        } catch (IOException serializationFailure) {
+        } catch (tools.jackson.core.JacksonException serializationFailure) {
             throw new BusinessException(500, "云端 OCR 请求构造失败");
         }
     }

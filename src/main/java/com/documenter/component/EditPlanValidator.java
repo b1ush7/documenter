@@ -3,6 +3,7 @@ package com.documenter.component;
 import com.documenter.configuration.AiModelProperties;
 import com.documenter.service.ToolExecutionContext;
 import com.documenter.util.XlsxFormulaTarget;
+import com.documenter.util.DocxNormalizationSpec;
 import com.documenter.exception.BusinessException;
 import com.documenter.vo.DocumentEditPlan;
 import com.documenter.vo.DocumentEditPlan.Operation;
@@ -84,6 +85,7 @@ public class EditPlanValidator {
         Set<String> formulaTargets = new HashSet<>();
         boolean hasXlsx = false;
         boolean hasDocx = false;
+        Set<String> batchSelectors = new HashSet<>();
 
         for (int index = 0; index < plan.operations().size(); index++) {
             Operation operation = plan.operations().get(index);
@@ -120,6 +122,19 @@ public class EditPlanValidator {
                 continue;
             }
             hasDocx = true;
+
+            if (type == OperationType.NORMALIZE_DOCX_FORMAT || type == OperationType.RESIZE_DOCX_IMAGES) {
+                if (!"body".equals(operation.target()) || operation.image() != null || operation.format() != null) {
+                    problems.add(position + "批量操作仅支持 target=body，且不能包含 image/format");
+                }
+                try {
+                    String selector = type == OperationType.NORMALIZE_DOCX_FORMAT
+                            ? DocxNormalizationSpec.format(operation.content()).selector()
+                            : DocxNormalizationSpec.json(DocxNormalizationSpec.images(operation.content()));
+                    if (!batchSelectors.add(type + ":" + selector)) problems.add(position + "重复的批量格式范围");
+                } catch (BusinessException invalid) { problems.add(position + "：" + invalid.getMessage()); }
+                continue;
+            }
 
             if (operation.target() == null || operation.target().isBlank()) {
                 problems.add(position + "缺少目标块标识");
@@ -231,6 +246,10 @@ public class EditPlanValidator {
     public void validateForContext(DocumentEditPlan plan, ToolExecutionContext context) {
         validate(plan, context.blockIds());
         for (var operation : plan.operations()) {
+            if (operation.operationType() == OperationType.NORMALIZE_DOCX_FORMAT
+                    || operation.operationType() == OperationType.RESIZE_DOCX_IMAGES) {
+                DocxNormalizationSpec.validateContext(operation, context);
+            }
             if (isXlsxOperation(operation.operationType())) {
                 if (!"XLSX".equals(context.format()) || context.xlsxStructure() == null) {
                     throw new BusinessException(422, "当前文档格式不能执行 XLSX 计划");

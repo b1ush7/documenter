@@ -120,6 +120,12 @@ public record DocumentEditPlan(
         /** 设置标题、正文、列表格式或段前分页，使用 format，不使用 content。 */
         FORMAT_PARAGRAPH(false),
 
+        /** 正文范围的批量字体/段落格式，target=body，content 为受限 JSON。 */
+        NORMALIZE_DOCX_FORMAT(true),
+
+        /** 批量调整正文已有图片的显示尺寸，target=body，content 为受限 JSON。 */
+        RESIZE_DOCX_IMAGES(true),
+
         /** XLSX 单单元格公式，target 使用原始工作表名称!A1，content 为公式。 */
         SET_FORMULA(true),
 

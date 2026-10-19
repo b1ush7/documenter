@@ -16,10 +16,40 @@ import java.time.Duration;
 @ConfigurationProperties(prefix = "res.storage")
 public class StorageProperties {
 
-    /** 存储实现类型，目前只实现 local。 */
+    /** 正式文件存储：local / oss。临时文件始终使用本地目录。 */
     private String type = "local";
 
+    private Oss oss = new Oss();
+
+    @Getter
+    @Setter
+    public static class Oss {
+        private String endpoint;
+        private String region;
+        private String bucket;
+        private String accessKeyId;
+        private String accessKeySecret;
+        /** 可选 STS Token；到期后需替换凭据并重启。 */
+        private String securityToken;
+        private String prefix = "documenter";
+    }
+
     private Local local = new Local();
+
+    private Recycle recycle = new Recycle();
+
+    @Getter
+    @Setter
+    public static class Recycle {
+        /** 必须显式开启才允许永久回收；未开启时仍可预演。 */
+        private boolean enabled;
+        private boolean dryRun = true;
+        private Duration interval = Duration.ofHours(24);
+        private Duration deletedRetention = Duration.ofDays(30);
+        /** 防止回收已落盘但尚未提交元数据的文件。 */
+        private Duration orphanGrace = Duration.ofHours(24);
+        private int batchSize = 100;
+    }
 
     /** 上传限制。 */
     private Upload upload = new Upload();

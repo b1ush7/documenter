@@ -10,6 +10,8 @@ import com.documenter.service.FileService;
 import com.documenter.service.FileStorage;
 import com.documenter.service.VersionWriter;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
@@ -119,6 +121,30 @@ class DocumentVersionServiceImplTest {
         when(assets.advanceVersion(10L, 2)).thenReturn(1);
         when(assets.selectLatestVersion(10L)).thenReturn(3);
         when(assets.updateById(any(FileAsset.class))).thenReturn(1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1020, 1205, 1213})
+    void databaseWriteContentionReturnsConflictWithoutFurtherWrites(int code) {
+        when(assets.selectById(10L)).thenReturn(currentJpeg());
+        when(assets.advanceVersion(10L, 2)).thenThrow(new org.springframework.jdbc.UncategorizedSQLException(
+                "advance", "UPDATE", new java.sql.SQLException("database detail", "HY000", code)));
+        var error = assertThrows(BusinessException.class, () -> service.appendVersion(10L, 7L,
+                new VersionWriter.VersionContent("new.jpg", 3, "sha"), ChangeType.MANUAL_EDIT, null, null, 2));
+        assertEquals(409, error.getCode());
+        verify(versions, never()).insert(any(DocumentVersion.class));
+        verify(assets, never()).updateById(any(FileAsset.class));
+    }
+
+    @Test
+    void unrelatedDatabaseFailureIsNotMisreportedAsVersionConflict() {
+        when(assets.selectById(10L)).thenReturn(currentJpeg());
+        var failure = new org.springframework.jdbc.UncategorizedSQLException("advance", "UPDATE",
+                new java.sql.SQLException("connection lost", "08006", 2006));
+        when(assets.advanceVersion(10L, 2)).thenThrow(failure);
+        assertSame(failure, assertThrows(org.springframework.dao.DataAccessException.class,
+                () -> service.appendVersion(10L, 7L, new VersionWriter.VersionContent("new.jpg", 3, "sha"),
+                        ChangeType.MANUAL_EDIT, null, null, 2)));
     }
 
     private static FileAsset currentJpeg() {

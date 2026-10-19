@@ -29,6 +29,18 @@ public class OcrRequestDTO {
     /** true 时在 OCR 前转灰度并按 1%/99% 分位拉伸对比度，不改变坐标和尺寸。 */
     private boolean enhance;
 
+    /** 在所选区域内顺时针旋转 0/90/180/270 度；结果坐标仍相对原图。 */
+    private int rotationDegrees;
+
+    /** 中值去噪，适合轻度散点噪声。 */
+    private boolean denoise;
+
+    /** 轻度反差锐化，不保证恢复严重失焦文字。 */
+    private boolean sharpen;
+
+    /** Gamma 提亮低照度图片。 */
+    private boolean lowLight;
+
     /** 相对于实际渲染页面或原始图片的像素矩形；为空时识别整页。 */
     @Valid
     private Region region;
