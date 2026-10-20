@@ -21,6 +21,14 @@ public final class PreviewResponses {
     public static final String HEADER_WIDTH = "X-Image-Width";
     /** 响应头：图片像素高度。 */
     public static final String HEADER_HEIGHT = "X-Image-Height";
+    /**
+     * 响应头：本版本总页数。
+     *
+     * <p>DOCX / XLSX 的页数只有真正渲染时才由渲染后端报出，元信息接口给不了，
+     * 所以随页面图片一起返回；前端据此显示「第 N / M 页」并正确禁用翻页按钮。
+     * 无法确定时不发这个头。
+     */
+    public static final String HEADER_TOTAL_PAGES = "X-Total-Pages";
 
     private PreviewResponses() {
     }
@@ -31,15 +39,19 @@ public final class PreviewResponses {
                 .filename(preview.fileName(), StandardCharsets.UTF_8)
                 .build();
         byte[] content = preview.content();
-        return ResponseEntity.ok()
+        ResponseEntity.BodyBuilder builder = ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION, disposition.toString())
                 .header(HEADER_WIDTH, String.valueOf(preview.widthPixels()))
                 .header(HEADER_HEIGHT, String.valueOf(preview.heightPixels()))
                 // 预览内容按内容摘要缓存，因此允许浏览器长时间缓存
                 .header(HttpHeaders.CACHE_CONTROL, "private, max-age=3600")
                 .contentType(MediaType.IMAGE_PNG)
-                .contentLength(content.length)
-                .body(content);
+                .contentLength(content.length);
+        // 总页数已知时一并返回；前端不需要为了页数再额外请求
+        if (preview.totalPages() != null) {
+            builder.header(HEADER_TOTAL_PAGES, String.valueOf(preview.totalPages()));
+        }
+        return builder.body(content);
     }
 
     /** 组装原图响应，用于图片版本直接回传（保留原始格式与透明度）。 */

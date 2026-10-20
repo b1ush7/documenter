@@ -50,6 +50,10 @@ public class SecurityConfig {
         configuration.addAllowedMethod(HttpMethod.DELETE);
         configuration.addAllowedMethod(HttpMethod.OPTIONS);
         configuration.setAllowedHeaders(List.of("*"));
+        // 跨域时自定义响应头默认对前端不可见，必须显式暴露：
+        // 预览接口用它回传图片尺寸与总页数（DOCX/XLSX 的页数只有渲染后才确定）
+        configuration.setExposedHeaders(List.of(
+                "X-Image-Width", "X-Image-Height", "X-Total-Pages", "Content-Disposition"));
         configuration.setAllowCredentials(false);
         configuration.setMaxAge(3600L);
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();

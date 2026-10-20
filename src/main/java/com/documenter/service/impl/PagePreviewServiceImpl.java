@@ -140,11 +140,23 @@ public class PagePreviewServiceImpl implements PagePreviewService {
             return buildPreview(cached, pageNo, actualDpi);
         }
 
-        byte[] png = PDF_EXTENSION.equals(extension)
-                ? renderPdfPage(readAll(version), pageNo, actualDpi, version)
-                : renderViaOffice(version, extension, pageNo, actualDpi);
+        // DOCX / XLSX 的总页数只有渲染后才由渲染后端报出来，这里一路带到响应头；
+        // PDF 的页数元信息接口已经给了，无需重复计算。
+        Integer totalPages = null;
+        byte[] png;
+        if (PDF_EXTENSION.equals(extension)) {
+            png = renderPdfPage(readAll(version), pageNo, actualDpi, version);
+        } else {
+            OfficeRender rendered = renderViaOffice(version, extension, pageNo, actualDpi);
+            png = rendered.png();
+            totalPages = rendered.totalPages();
+        }
         writeCache(cacheKey, png);
-        return buildPreview(png, pageNo, actualDpi);
+        return buildPreview(png, pageNo, actualDpi, totalPages);
+    }
+
+    /** Office 渲染结果：这一页的 PNG 字节，以及渲染后端报出的本版本总页数。 */
+    private record OfficeRender(byte[] png, Integer totalPages) {
     }
 
     /**
@@ -153,8 +165,8 @@ public class PagePreviewServiceImpl implements PagePreviewService {
      * <p>不经过「先转 PDF 再栅格化」两步：kit 本身就能按页输出图片，
      * 少一步转换既更快，也少一次可能引入偏差的中间格式。
      */
-    private byte[] renderViaOffice(FileDownload version, String extension,
-                                   int pageNo, int dpi) {
+    private OfficeRender renderViaOffice(FileDownload version, String extension,
+                                         int pageNo, int dpi) {
         if (!renderService.available()) {
             throw new BusinessException(503,
                     "当前部署未接入 Office 渲染后端，无法生成 " + extension.toUpperCase()
@@ -179,7 +191,8 @@ public class PagePreviewServiceImpl implements PagePreviewService {
                         "第 " + pageNo + " 页不存在或无法渲染（该版本共 "
                                 + manifest.pageCount() + " 页）");
             }
-            return Files.readAllBytes(Path.of(manifest.pages().get(0).path()));
+            return new OfficeRender(Files.readAllBytes(Path.of(manifest.pages().get(0).path())),
+                    manifest.pageCount());
         } catch (IOException e) {
             log.warn("Office 渲染页面失败, fileId={}, versionNo={}, pageNo={}",
                     version.asset().getId(), version.asset().getLatestVersion(), pageNo, e);
@@ -229,7 +242,7 @@ public class PagePreviewServiceImpl implements PagePreviewService {
             String fileName = version.downloadFileName() == null
                     ? "preview" : version.downloadFileName();
             return new PdfPagePreview(content, FIRST_PAGE, dpi,
-                    image.getWidth(), image.getHeight(), fileName);
+                    image.getWidth(), image.getHeight(), fileName, 1);
         } catch (BusinessException e) {
             throw e;
         } catch (IOException e) {
@@ -240,6 +253,13 @@ public class PagePreviewServiceImpl implements PagePreviewService {
     // ------------------------------------------------------------ 辅助
 
     private PdfPagePreview buildPreview(byte[] png, int pageNo, int dpi) {
+        return buildPreview(png, pageNo, dpi, null);
+    }
+
+    /**
+     * @param totalPages 本版本总页数；未知传 null（如缓存命中时不再重新渲染，故拿不到页数）
+     */
+    private PdfPagePreview buildPreview(byte[] png, int pageNo, int dpi, Integer totalPages) {
         // 读回尺寸用于响应头，前端可据此预留高度避免布局跳动
         int width = 0;
         int height = 0;
@@ -253,7 +273,7 @@ public class PagePreviewServiceImpl implements PagePreviewService {
             // 尺寸仅用于展示，读不到不影响预览本身
         }
         String fileName = "page-" + pageNo + ".png";
-        return new PdfPagePreview(png, pageNo, dpi, width, height, fileName);
+        return new PdfPagePreview(png, pageNo, dpi, width, height, fileName, totalPages);
     }
 
     private int countPdfPages(FileDownload version) {
