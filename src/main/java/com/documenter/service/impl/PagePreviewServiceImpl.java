@@ -105,11 +105,17 @@ public class PagePreviewServiceImpl implements PagePreviewService {
                     null, true, false, renderService.backendName(), dpi,
                     renderService.configurationHint());
         }
-        // 后端可用时给出页数需要真正渲染一次；这里返回空页数 + 提示，
-        // 由前端在首次请求页面图片时再触发渲染，避免「只看一眼元信息就把大文档排一遍版」。
+        // 元信息必须包含真实页数，否则前端无法启用翻页。首次渲染的第一页一并缓存。
+        String countKey = cacheKey(version, FIRST_PAGE, dpi) + ".pages";
+        Integer pages = readPageCount(version, dpi);
+        if (pages == null) {
+            OfficeRender rendered = renderViaOffice(version, extension, FIRST_PAGE, dpi);
+            pages = rendered.totalPages();
+            writeCache(cacheKey(version, FIRST_PAGE, dpi), rendered.png());
+            writeCache(countKey, Integer.toString(pages).getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+        }
         return new PagePreviewInfoVO(fileId, versionNo, version.contentType(), extension,
-                null, true, true, renderService.backendName(), dpi,
-                "页数将在首次渲染时确定");
+                pages, true, true, renderService.backendName(), dpi, null);
     }
 
     // ------------------------------------------------------------ 渲染
@@ -137,7 +143,7 @@ public class PagePreviewServiceImpl implements PagePreviewService {
         String cacheKey = cacheKey(version, pageNo, actualDpi);
         byte[] cached = readCache(cacheKey);
         if (cached != null) {
-            return buildPreview(cached, pageNo, actualDpi);
+            return buildPreview(cached, pageNo, actualDpi, readPageCount(version, actualDpi));
         }
 
         // DOCX / XLSX 的总页数只有渲染后才由渲染后端报出来，这里一路带到响应头；
@@ -150,6 +156,8 @@ public class PagePreviewServiceImpl implements PagePreviewService {
             OfficeRender rendered = renderViaOffice(version, extension, pageNo, actualDpi);
             png = rendered.png();
             totalPages = rendered.totalPages();
+            writeCache(cacheKey(version, FIRST_PAGE, actualDpi) + ".pages",
+                    Integer.toString(totalPages).getBytes(java.nio.charset.StandardCharsets.US_ASCII));
         }
         writeCache(cacheKey, png);
         return buildPreview(png, pageNo, actualDpi, totalPages);
@@ -376,6 +384,17 @@ public class PagePreviewServiceImpl implements PagePreviewService {
 
     // ------------------------------------------------------------ 缓存
 
+    private Integer readPageCount(FileDownload version, int dpi) {
+        byte[] value = readCache(cacheKey(version, FIRST_PAGE, dpi) + ".pages");
+        if (value == null) return null;
+        try {
+            int count = Integer.parseInt(new String(value, java.nio.charset.StandardCharsets.US_ASCII));
+            return count > 0 ? count : null;
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
     /**
      * 缓存键：内容摘要 + 页号 + DPI。
      *
@@ -385,10 +404,11 @@ public class PagePreviewServiceImpl implements PagePreviewService {
     private String cacheKey(FileDownload version, int pageNo, int dpi) {
         String digest = version.asset().getSha256();
         if (digest == null || digest.isBlank()) {
-            digest = "unknown";
+            digest = "file-" + version.asset().getId() + "-v" + version.asset().getLatestVersion();
         }
         // 非 PDF 版本会被转换成 PDF，转换结果与源内容一一对应，因此摘要同样有效
-        return digest + "-p" + pageNo + "-d" + dpi + ".png";
+        return digest + "-" + normalizeExtension(version.asset()) + "-"
+                + renderService.backendName() + "-p" + pageNo + "-d" + dpi + ".png";
     }
 
     private byte[] readCache(String key) {

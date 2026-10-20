@@ -204,14 +204,15 @@ res:
     max-retries: ${AI_MAX_RETRIES:2}
     # ---- 智能体循环上限 ----
     # 必须有上限：模型可能陷入「调用工具 → 结果不理想 → 再调用」的循环
-    max-steps: ${AI_MAX_STEPS:8}
-    max-tool-calls: ${AI_MAX_TOOL_CALLS:12}
+    max-steps: ${AI_MAX_STEPS:16}
+    max-tool-calls: ${AI_MAX_TOOL_CALLS:32}
     max-same-tool-repeats: ${AI_MAX_SAME_TOOL_REPEATS:4}
     max-model-retries: ${AI_MAX_MODEL_RETRIES:1}
     # ---- 提示词与上下文 ----
     # 长文档按结构分块截断，而不是简单截字符串（后者会把段落切成两半）
     max-document-chars: ${AI_MAX_DOCUMENT_CHARS:12000}
     max-tool-result-chars: ${AI_MAX_TOOL_RESULT_CHARS:6000}
+    max-history-chars: ${AI_MAX_HISTORY_CHARS:48000}
     record-tool-messages: ${AI_RECORD_TOOL_MESSAGES:true}
     # 提交前确认：编辑类工具只产出计划，不直接落版本
     require-confirmation: ${AI_REQUIRE_CONFIRMATION:true}

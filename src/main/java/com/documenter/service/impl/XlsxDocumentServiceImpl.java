@@ -464,7 +464,13 @@ public class XlsxDocumentServiceImpl implements XlsxDocumentService {
         requireAiPlan(plan);
         return editAndSave(userId, fileId, sourceVersion, instruction,
                 "AI 执行 " + plan.operations().size() + " 个 XLSX 操作", ChangeType.AI_EDIT,
-                workbook -> applyAiOperations(workbook, plan));
+                workbook -> {
+                    applyAiOperations(workbook, plan);
+                    if (plan.operations().stream().anyMatch(operation ->
+                            operation.operationType() == DocumentEditPlan.OperationType.SET_FORMULA)) {
+                        recalculateFormulaCaches(workbook);
+                    }
+                });
     }
 
     private void requireAiPlan(DocumentEditPlan plan) {

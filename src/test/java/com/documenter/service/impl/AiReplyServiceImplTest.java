@@ -843,6 +843,7 @@ class AiReplyServiceImplTest {
 
     @Test
     void longHistoryIsBoundedBeforeBeingSentToModel() {
+        properties.setMaxHistoryChars(12000);
         var recent = new AiMessage();
         recent.setRole("ASSISTANT");
         recent.setContent("a".repeat(8000));

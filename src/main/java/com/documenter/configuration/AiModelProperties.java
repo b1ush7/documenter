@@ -74,12 +74,12 @@ public class AiModelProperties {
      * <p>必须有上限：模型可能陷入「调用工具 → 结果不理想 → 再调用」的循环，
      * 没有上限时一次用户请求就能消耗掉大量调用额度。
      */
-    private int maxSteps = 8;
+    private int maxSteps = 16;
 
     /** 单次对话允许的工具调用总次数。 */
-    private int maxToolCalls = 12;
+    private int maxToolCalls = 32;
 
-    /** 同一个工具在单次对话内的最大重复调用次数，用于抑制原地打转。 */
+    /** 同工具且相同参数的最大重复次数；不同编辑目标、分页不共享此限额。 */
     private int maxSameToolRepeats = 4;
 
     /** 单次模型调用失败后的重试次数（与 maxRetries 区分：这个是循环内的重试）。 */
@@ -97,6 +97,9 @@ public class AiModelProperties {
 
     /** 单条工具结果返回给模型的最大字符数，防止一次读取把上下文撑满。 */
     private int maxToolResultChars = 6000;
+
+    /** 历史消息字符预算，独立于每页文档预算，可按部署模型上下文容量调整。 */
+    private int maxHistoryChars = 48000;
 
     /** 是否把工具调用过程写入对话消息（便于前端展示「AI 做了什么」）。 */
     private boolean recordToolMessages = true;

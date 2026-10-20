@@ -219,6 +219,7 @@ public class AgentServiceImpl implements AgentService {
         int modelCalls = 0;
         int inputTokens = 0;
         int outputTokens = 0;
+        java.util.Map<String, Integer> repeatedRequests = new java.util.HashMap<>();
 
         for (int stepIndex = 1; stepIndex <= properties.getMaxSteps(); stepIndex++) {
             if (cancelSignal.getAsBoolean() || context.cancelled()) {
@@ -301,11 +302,10 @@ public class AgentServiceImpl implements AgentService {
                     continue;
                 }
 
-                if (context.usageOf(toolName) >= properties.getMaxSameToolRepeats()) {
-                    // 反复调用同一个工具通常意味着模型在原地打转，
-                    // 继续下去只会消耗调用额度而不会产生更好的结果
+                String fingerprint = toolName + ":" + canonicalArguments(request.arguments());
+                if (repeatedRequests.getOrDefault(fingerprint, 0) >= properties.getMaxSameToolRepeats()) {
                     messages.add(toolResult(request, 
-                            "工具「" + toolName + "」在本次对话中已调用 "
+                            "工具「" + toolName + "」使用相同参数在本次对话中已调用 "
                                     + properties.getMaxSameToolRepeats()
                                     + " 次。请基于已有信息给出结论，或换用其他工具。"));
                     steps.add(new Step(steps.size() + 1, StepKind.FAILURE, toolName,
@@ -314,6 +314,7 @@ public class AgentServiceImpl implements AgentService {
                 }
 
                 long toolStarted = System.nanoTime();
+                repeatedRequests.merge(fingerprint, 1, Integer::sum);
                 context.recordToolCall(toolName);
                 String resultText;
                 try {
@@ -437,8 +438,10 @@ public class AgentServiceImpl implements AgentService {
                 你是文档编辑助手。你的任务是把用户的要求转换成对文档的具体修改。
 
                 工作方式：
-                1. 先调用 read_document 了解文档结构，拿到可用的块 ID；
-                2. 根据用户要求，用编辑工具逐个提出修改；
+                1. 先调用 read_document 了解文档结构，拿到可用的块 ID；长文档先用 mode=outline 查看章节，
+                   再按需用 query 筛选或 offset 分页；hasMore=true 时用 nextOffset 继续，不能声称已读完整篇。
+                2. 根据用户要求提出修改；多段落修改优先用 edit_paragraphs，一次最多 50 条，
+                   不要把不同段落的有效修改误认为死循环，不要要求用户为了继续读取或提出计划反复授权；
                 3. 修改工具只生成待确认的计划，不会立即改动文档，因此可以放心提出；
                 4. 完成后用简洁的中文说明提出了哪些待确认修改。
                 5. XLSX 支持 set_formula、create_xlsx_table、create_xlsx_chart：公式必须基于真实列名和数据；
@@ -694,6 +697,14 @@ public class AgentServiceImpl implements AgentService {
             return text;
         }
         return text.substring(0, limit) + "…（结果过长已截断）";
+    }
+
+    private String canonicalArguments(String arguments) {
+        try {
+            return new java.util.TreeMap<>(parseArguments(arguments)).toString();
+        } catch (RuntimeException failure) {
+            return arguments;
+        }
     }
 
     private static String summarize(String text) {
