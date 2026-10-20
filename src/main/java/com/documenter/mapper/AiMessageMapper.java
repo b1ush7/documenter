@@ -21,7 +21,7 @@ public interface AiMessageMapper extends BaseMapper<AiMessage> {
     @Select("""
             SELECT * FROM ai_message WHERE session_id = #{sessionId}
               AND (role = 'USER' OR (role = 'ASSISTANT' AND run_status = 'COMPLETED'))
-            ORDER BY id DESC LIMIT 20
+            ORDER BY id DESC LIMIT 100
             """)
     List<AiMessage> selectRecentConversation(@Param("sessionId") Long sessionId);
 

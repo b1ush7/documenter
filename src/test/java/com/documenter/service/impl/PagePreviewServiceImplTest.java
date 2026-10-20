@@ -131,6 +131,56 @@ class PagePreviewServiceImplTest {
     // ============================================ 未配置转换器时的降级
 
     @Test
+    void officeMetadataReturnsRealPageCountAndSecondPageCanBeRendered() throws Exception {
+        when(renderService.available()).thenReturn(true);
+        when(renderService.backendName()).thenReturn("test-office");
+        when(versionService.downloadVersion(OWNER, FILE_ID, VERSION_NO))
+                .thenAnswer(invocation -> download(asset("docx", DOCX_CONTENT_TYPE), new byte[]{1, 2, 3}));
+        when(renderService.render(any(), anyString(), any(), any(), anyInt())).thenAnswer(invocation -> {
+            Path output = invocation.getArgument(2);
+            java.nio.file.Files.createDirectories(output);
+            int page = ((java.util.List<Integer>) invocation.getArgument(3)).getFirst();
+            Path image = output.resolve("page-" + page + ".png");
+            java.nio.file.Files.write(image, minimalPng());
+            return new com.documenter.vo.DocumentRenderManifest("test-office", 8,
+                    java.util.List.of(new com.documenter.vo.DocumentRenderManifest.Page(page, image.toString(), 1, 1, 1)),
+                    java.util.List.of());
+        });
+        assertEquals(8, service.describe(OWNER, FILE_ID, VERSION_NO).pageCount());
+        PdfPagePreview secondPage = service.renderPage(OWNER, FILE_ID, VERSION_NO, 2, null);
+        assertEquals(2, secondPage.pageNo());
+        assertEquals(8, secondPage.totalPages());
+        assertEquals(8, service.describe(OWNER, FILE_ID, VERSION_NO).pageCount());
+    }
+
+    @Test
+    void officePageCountSurvivesCacheHitsAndServiceRestart(@org.junit.jupiter.api.io.TempDir Path directory) throws Exception {
+        PreviewProperties preview = new PreviewProperties();
+        StorageProperties storage = new StorageProperties();
+        storage.getLocal().setTemp(directory.toString());
+        service = new PagePreviewServiceImpl(versionService, renderService, preview, storage);
+        when(renderService.available()).thenReturn(true);
+        when(renderService.backendName()).thenReturn("test-office");
+        when(versionService.downloadVersion(OWNER, FILE_ID, VERSION_NO))
+                .thenAnswer(invocation -> download(asset("docx", DOCX_CONTENT_TYPE), new byte[]{1, 2, 3}));
+        when(renderService.render(any(), anyString(), any(), any(), anyInt())).thenAnswer(invocation -> {
+            Path output = invocation.getArgument(2);
+            java.nio.file.Files.createDirectories(output);
+            Path image = output.resolve("first.png");
+            java.nio.file.Files.write(image, minimalPng());
+            return new com.documenter.vo.DocumentRenderManifest("test-office", 5,
+                    java.util.List.of(new com.documenter.vo.DocumentRenderManifest.Page(1, image.toString(), 1, 1, 1)),
+                    java.util.List.of());
+        });
+        assertEquals(5, service.describe(OWNER, FILE_ID, VERSION_NO).pageCount());
+        assertEquals(5, service.renderPage(OWNER, FILE_ID, VERSION_NO, 1, null).totalPages());
+        service = new PagePreviewServiceImpl(versionService, renderService, preview, storage);
+        assertEquals(5, service.describe(OWNER, FILE_ID, VERSION_NO).pageCount());
+        assertEquals(5, service.renderPage(OWNER, FILE_ID, VERSION_NO, 1, null).totalPages());
+        verify(renderService, org.mockito.Mockito.times(1)).render(any(), anyString(), any(), any(), anyInt());
+    }
+
+    @Test
     void docxWithoutOfficeBackendIsReportedAsNotPreviewable() {
         when(renderService.available()).thenReturn(false);
         when(renderService.configurationHint())

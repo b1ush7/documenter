@@ -59,6 +59,11 @@ class XlsxFormulaPlanTest {
             assertEquals("SUM(A1)", sheet.getRow(1).getCell(0).getCellFormula());
             assertTrue(sheet.getRow(1).getCell(0).getCellStyle().getWrapText());
             assertEquals("A1*2", sheet.getRow(0).getCell(1).getCellFormula());
+            // 直接读取保存后的缓存，不能用 evaluate 掩盖未持久化结果的问题。
+            assertEquals(org.apache.poi.ss.usermodel.CellType.NUMERIC, sheet.getRow(1).getCell(0).getCachedFormulaResultType());
+            assertEquals(12, sheet.getRow(1).getCell(0).getNumericCellValue());
+            assertEquals("yes", sheet.getRow(8).getCell(3).getStringCellValue());
+            assertEquals(24, sheet.getRow(0).getCell(1).getNumericCellValue());
             assertEquals(12, workbook.getCreationHelper().createFormulaEvaluator().evaluate(sheet.getRow(1).getCell(0)).getNumberValue());
             assertEquals("yes", workbook.getCreationHelper().createFormulaEvaluator().evaluate(sheet.getRow(8).getCell(3)).getStringValue());
         }

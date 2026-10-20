@@ -44,25 +44,27 @@ public class ReadDocumentTool extends AbstractAiTool {
 
     @Override
     public String description() {
-        return "读取当前文档的结构，返回可编辑的块清单（段落、标题、表格单元格）。"
+        return "分页读取当前文档结构，返回可编辑块 ID。支持 offset、limit、query 和 mode。"
+                + "长文档必须按 nextOffset 继续读取；mode=outline 可浏览标题及疑似未标记的编号标题。"
                 + "块 ID 用于后续编辑操作的 target 参数。"
                 + "开始任何修改前必须先调用它，否则无法知道合法的目标块 ID。";
     }
 
     @Override
     public List<ToolParameter> parameters() {
-        // 无需参数：要读的文档与版本由上下文决定，不由模型指定。
-        // 这是刻意的 —— 若让模型传 fileId，它可以尝试读取别的文件
-        return List.of();
+        return List.of(ToolParameter.optional("offset", "从第几条结果开始，默认 0；续读使用 nextOffset"),
+                ToolParameter.optional("limit", "最多返回条数，1 到 500，默认 100；还受字符预算限制"),
+                ToolParameter.optional("query", "按块 ID 或文字筛选，续读时保持不变"),
+                ToolParameter.optional("mode", "blocks（默认）或 outline（标题及疑似编号标题）"));
     }
 
     @Override
     public ToolResult execute(Map<String, Object> arguments, ToolExecutionContext context) {
-        String outline = describe(context);
+        String outline = describe(context, normalize(arguments));
         return ToolResult.of(outline);
     }
 
-    private String describe(ToolExecutionContext context) {
+    private String describe(ToolExecutionContext context, Map<String, String> args) {
         StringBuilder builder = new StringBuilder();
         builder.append("文档格式：").append(context.format())
                 .append("，当前版本：v").append(context.versionNo()).append('\n');
@@ -75,16 +77,42 @@ public class ReadDocumentTool extends AbstractAiTool {
             builder.append("（该版本没有可读取的结构信息）");
         }
 
-        String text = builder.toString();
-        int limit = properties.getMaxDocumentChars();
-        if (text.length() > limit) {
-            // 明确告知被截断，否则模型会以为自己看到了完整文档，
-            // 进而基于缺失的信息做判断
-            return text.substring(0, limit)
-                    + "\n…（内容过长已截断，共 " + text.length() + " 字符。"
-                    + "如需查看某部分，请缩小范围后重新读取）";
+        Integer requestedOffset = optionalInt(args, "offset");
+        Integer requestedLimit = optionalInt(args, "limit");
+        int offset = requestedOffset == null ? 0 : requestedOffset;
+        int limit = requestedLimit == null ? 100 : requestedLimit;
+        String mode = optionalString(args, "mode");
+        String query = optionalString(args, "query");
+        if (offset < 0 || limit < 1 || limit > 500
+                || (mode != null && !List.of("blocks", "outline").contains(mode))) {
+            throw new com.documenter.exception.BusinessException(422, "offset 必须非负，limit 必须为 1 到 500，mode 必须为 blocks 或 outline");
         }
-        return text;
+        List<String> lines = builder.toString().lines().skip(1)
+                .filter(line -> query == null || line.contains(query))
+                .filter(line -> !"outline".equals(mode) || line.contains("标题")
+                        || line.matches(".*: (?:[一二三四五六七八九十百]+[、．.].*|[0-9]+(?:\\.[0-9]+)+\\s*.*)"))
+                .toList();
+        if (offset > lines.size()) throw new com.documenter.exception.BusinessException(422, "offset 超出结果数量");
+        // 预留分页元数据空间，避免外层工具结果限制再截掉 nextOffset。
+        int budget = properties.getMaxDocumentChars() > 0 ? properties.getMaxDocumentChars() : 12000;
+        if (properties.getMaxToolResultChars() > 0) budget = Math.min(budget, properties.getMaxToolResultChars());
+        StringBuilder page = new StringBuilder();
+        int next = offset;
+        while (next < lines.size() && next - offset < limit) {
+            String line = lines.get(next);
+            if (page.length() + line.length() + 1 > budget - 300) break;
+            page.append(line).append('\n');
+            next++;
+        }
+        if (next == offset && next < lines.size()) {
+            throw new com.documenter.exception.BusinessException(422, "读取字符预算不足以容纳一个完整块，请提高文档及工具结果字符预算");
+        }
+        return "文档格式：" + context.format() + "，当前版本：v" + context.versionNo()
+                + "，total=" + lines.size() + "，offset=" + offset + "，returned=" + (next - offset)
+                + "，hasMore=" + (next < lines.size()) + "，nextOffset=" + (next < lines.size() ? next : "null")
+                + (context.xlsxStructure() != null && context.xlsxStructure().truncated()
+                    ? "，sourceTruncated=true（工作簿结构读取已达单元格上限，分页结束不代表检查了整张表）" : "")
+                + "\n" + page;
     }
 
     private void appendDocx(StringBuilder builder, List<DocxStructureVO.Block> blocks, int depth) {

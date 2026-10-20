@@ -359,7 +359,7 @@ public class AiReplyServiceImpl implements AiReplyService {
         for (AiMessage message : messages.selectRecentConversation(sessionId)) {
             if (message.getContent() == null) continue;
             chars += message.getContent().length();
-            if (chars > 12000) break;
+            if (chars > properties.getMaxHistoryChars()) break;
             history.add(new AgentService.ConversationTurn(message.getRole(), message.getContent()));
         }
         Collections.reverse(history);

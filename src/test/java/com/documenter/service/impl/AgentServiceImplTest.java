@@ -413,6 +413,33 @@ class AgentServiceImplTest {
                 "应阻止同一工具被反复调用");
     }
 
+    @Test
+    void distinctTargetsDoNotShareRepeatLimitButEquivalentRequestsAreBlocked() {
+        stubDocxVersion();
+        properties.setMaxSameToolRepeats(1);
+        ChatModel model = mock(ChatModel.class);
+        var first = dev.langchain4j.agent.tool.ToolExecutionRequest.builder().id("a").name("edit_paragraph")
+                .arguments("{\"operation\":\"REPLACE_TEXT\",\"target\":\"body/p0\",\"content\":\"x\"}").build();
+        var second = dev.langchain4j.agent.tool.ToolExecutionRequest.builder().id("b").name("edit_paragraph")
+                .arguments("{\"operation\":\"REPLACE_TEXT\",\"target\":\"body/p1\",\"content\":\"y\"}").build();
+        var duplicate = dev.langchain4j.agent.tool.ToolExecutionRequest.builder().id("c").name("edit_paragraph")
+                .arguments("{\"content\":\"x\",\"target\":\"body/p0\",\"operation\":\"REPLACE_TEXT\"}").build();
+        when(model.chat(any(ChatRequest.class))).thenReturn(
+                ChatResponse.builder().aiMessage(AiMessage.from(List.of(first, second, duplicate))).build(),
+                ChatResponse.builder().aiMessage(AiMessage.from("done")).build());
+        AiModelProvider provider = mock(AiModelProvider.class);
+        when(provider.available()).thenReturn(true);
+        when(provider.chatModel()).thenReturn(model);
+        var agent = new AgentServiceImpl(properties, provider, docxService, xlsxService,
+                versionService, new EditPlanValidator(properties),
+                new com.documenter.component.EditPlanExecutor(docxService, xlsxService), quota,
+                List.of(new com.documenter.component.tool.EditParagraphTool()));
+        var result = agent.run(USER_ID, FILE_ID, VERSION_NO, "修改两段", List.of(), null);
+        assertEquals(2, result.usage().toolCalls());
+        assertEquals(2, result.plans().size());
+        assertTrue(result.steps().stream().anyMatch(step -> "重复调用过多，已阻止".equals(step.detail())));
+    }
+
     // ============================================ 版本与鉴权
 
     @Test
