@@ -35,6 +35,21 @@ class DocxNormalizationToolTest {
     }
 
     @Test
+    void firstLineIndentCanBeSetAloneAndSurvivesPlanSerialization() {
+        var plan = format.execute(Map.of("formatJson", "{\"scope\":\"BODY\",\"firstLineIndentChars\":2}"), context()).plan();
+        validator.validateForContext(plan, context());
+        var restored = tools.jackson.databind.json.JsonMapper.builder().build()
+                .readValue(DocxNormalizationSpec.json(plan), DocumentEditPlan.class);
+        assertEquals(2.0, DocxNormalizationSpec.format(restored.operations().getFirst().content()).firstLineIndentChars());
+        assertEquals(0.0, DocxNormalizationSpec.format("{\"firstLineIndentChars\":0}").firstLineIndentChars());
+        assertNull(DocxNormalizationSpec.format("{\"fontSizePoints\":12}").firstLineIndentChars());
+        for (String invalid : List.of("{\"firstLineIndentChars\":-1}", "{\"firstLineIndentChars\":21}",
+                "{\"firstLineIndentChars\":\"2\"}", "{\"firstLineIndentChars\":1e300}")) {
+            assertCode(() -> format.execute(Map.of("formatJson", invalid), context()));
+        }
+    }
+
+    @Test
     void unboundAndWrongFormatCannotProducePlans() {
         for (var ctx : List.of(ToolExecutionContext.withoutDocument(7L),
                 ToolExecutionContext.forVersion(7L, 10L, 1, "XLSX", null, null))) {

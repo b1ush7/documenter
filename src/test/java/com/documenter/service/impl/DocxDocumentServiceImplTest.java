@@ -85,6 +85,8 @@ class DocxDocumentServiceImplTest {
         try (var document = open(storedDocxBytes())) {
             assertEquals("new heading", document.getParagraphs().get(0).getText());
             assertEquals("Heading2", document.getParagraphs().get(0).getStyle());
+            assertEquals(1, document.getParagraphs().get(0).getCTP().getPPr().getOutlineLvl().getVal().intValue());
+            org.junit.jupiter.api.Assertions.assertNotNull(document.getStyles().getStyle("Heading2"));
             assertEquals("bullet", document.getParagraphs().get(1).getNumFmt());
             assertEquals("decimal", document.getParagraphs().get(2).getNumFmt());
             assertEquals(document.getParagraphs().get(2).getNumID(), document.getParagraphs().get(3).getNumID());
@@ -105,6 +107,7 @@ class DocxDocumentServiceImplTest {
             for (String text : List.of("keep heading", "normal")) {
                 var paragraph = document.createParagraph();
                 paragraph.setStyle("Heading2");
+                paragraph.getCTP().getPPr().addNewOutlineLvl().setVal(java.math.BigInteger.ONE);
                 paragraph.setNumID(id);
                 paragraph.setNumILvl(java.math.BigInteger.ZERO);
                 paragraph.createRun().setText(text);
@@ -120,6 +123,8 @@ class DocxDocumentServiceImplTest {
             assertEquals("keep heading", document.getParagraphs().get(0).getText());
             assertEquals("Heading2", document.getParagraphs().get(0).getStyle());
             assertEquals("Normal", document.getParagraphs().get(1).getStyle());
+            assertEquals(9, document.getParagraphs().get(1).getCTP().getPPr().getOutlineLvl().getVal().intValue());
+            assertNull(com.documenter.util.DocxNormalizer.headingLevel(document, document.getParagraphs().get(1)));
             assertEquals("normal", document.getParagraphs().get(1).getText());
             assertNull(document.getParagraphs().get(0).getNumID());
             assertNull(document.getParagraphs().get(1).getNumID());
@@ -360,6 +365,8 @@ class DocxDocumentServiceImplTest {
             assertEquals(7, document.getParagraphs().size());
             assertEquals("验收标题", document.getParagraphs().get(0).getText());
             assertEquals("第一章", document.getParagraphs().get(1).getText());
+            assertEquals(0, document.getParagraphs().get(1).getCTP().getPPr().getOutlineLvl().getVal().intValue());
+            org.junit.jupiter.api.Assertions.assertNotNull(document.getStyles().getStyle("Heading1"));
             assertEquals("正文内容", document.getParagraphs().get(2).getText());
             assertTrue(document.getParagraphs().get(3).getNumID() != null);
             assertTrue(document.getParagraphs().get(5).getNumID() != null);

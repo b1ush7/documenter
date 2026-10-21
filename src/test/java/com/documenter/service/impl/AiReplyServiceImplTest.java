@@ -416,6 +416,62 @@ class AiReplyServiceImplTest {
     private record ImageWorkflow(AiReplyServiceImpl service, FileStorage storage,
                                   VersionWriter writer, CreateAiReplyDTO request, byte[] imageBytes) { }
 
+    @Test
+    void defaultFormattingStreamsPendingPlanAndConfirmsLargeDocumentExactlyOnce() throws Exception {
+        var workflow = imageWorkflow(true);
+        byte[] source;
+        try (var input = versions.downloadVersion(7L, 10L, 1).resource().getInputStream();
+             var document = new org.apache.poi.xwpf.usermodel.XWPFDocument(input);
+             var output = new java.io.ByteArrayOutputStream()) {
+            for (int i = 1; i < 609; i++) document.createParagraph().createRun().setText("paragraph " + i);
+            var heading = document.createParagraph();
+            heading.setStyle("Heading1");
+            heading.createRun().setText("Existing heading");
+            heading.getRuns().getFirst().setFontSize(18);
+            var tableRun = document.createTable(1, 1).getRow(0).getCell(0).getParagraphs().getFirst().createRun();
+            tableRun.setText("table text");
+            tableRun.setFontSize(9);
+            document.write(output);
+            source = output.toByteArray();
+        }
+        var old = versions.downloadVersion(7L, 10L, 1);
+        when(versions.downloadVersion(7L, 10L, 1)).thenReturn(new FileDownload(old.asset(),
+                new ByteArrayResource(source), source.length, old.contentType(), "test.docx"));
+        workflow.request().setContent("正确排版");
+        List<AiReplyService.StreamEvent> events = new ArrayList<>();
+        var pending = workflow.service().createStreaming(7L, 1L, workflow.request(), events::add, () -> false);
+        assertEquals("COMPLETED", pending.runStatus());
+        assertEquals("PENDING", pending.planStatus());
+        assertEquals(1, pending.changes().size());
+        assertEquals(0, pending.result().usage().modelCalls());
+        assertEquals(1, pending.result().usage().toolCalls());
+        assertNull(pending.result().verificationNotice());
+        assertTrue(events.stream().anyMatch(event -> event.type() == AiReplyService.StreamEvent.Type.COMPLETED));
+        assertEquals("PENDING", store.get(pending.message().getId()).getPlanStatus());
+        verifyNoInteractions(workflow.storage(), workflow.writer());
+        assertEquals(2, workflow.service().confirm(7L, 1L, pending.message().getId()).outputVersion());
+        assertEquals(2, workflow.service().confirm(7L, 1L, pending.message().getId()).outputVersion());
+        var saved = org.mockito.ArgumentCaptor.forClass(byte[].class);
+        verify(workflow.storage()).store(saved.capture(), eq("docx"));
+        verify(workflow.writer()).appendVersion(eq(10L), eq(7L), any(),
+                eq(com.documenter.enums.ChangeType.AI_EDIT), any(), any(), eq(1));
+        try (var document = new org.apache.poi.xwpf.usermodel.XWPFDocument(
+                new java.io.ByteArrayInputStream(saved.getValue()))) {
+            assertEquals(610, document.getParagraphs().size());
+            for (int i = 0; i < 609; i++) {
+                var paragraph = document.getParagraphs().get(i);
+                assertEquals(i == 0 ? "image anchor" : "paragraph " + i, paragraph.getText());
+                assertEquals(1.5, paragraph.getSpacingBetween(), .001);
+                assertEquals(12.0, paragraph.getRuns().getFirst().getFontSizeAsDouble());
+            }
+            assertEquals(18.0, document.getParagraphs().getLast().getRuns().getFirst().getFontSizeAsDouble());
+            var tableParagraph = document.getTables().getFirst().getRow(0).getCell(0).getParagraphs().getFirst();
+            assertEquals("table text", tableParagraph.getText());
+            assertEquals(9.0, tableParagraph.getRuns().getFirst().getFontSizeAsDouble());
+            assertArrayEquals(workflow.imageBytes(), document.getAllPictures().getFirst().getData());
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"normalize_docx_format", "resize_docx_images"})
     void normalizationReplyPersistsPreviewAndConfirmsExactlyOnce(String tool) throws Exception {
@@ -440,7 +496,11 @@ class AiReplyServiceImplTest {
             assertEquals("image anchor", document.getParagraphs().getFirst().getText());
             assertArrayEquals(workflow.imageBytes(), document.getAllPictures().getFirst().getData());
             var runs = document.getParagraphs().getFirst().getRuns();
-            if (tool.equals("normalize_docx_format")) assertEquals("宋体", runs.getFirst().getFontFamily());
+            if (tool.equals("normalize_docx_format")) {
+                assertEquals("宋体", runs.getFirst().getFontFamily());
+                assertEquals(java.math.BigInteger.valueOf(200), document.getParagraphs().getFirst()
+                        .getCTP().getPPr().getInd().getFirstLineChars());
+            }
             else assertEquals(2160000, runs.get(1).getCTR().getDrawingArray(0).getInlineArray(0).getExtent().getCx());
         }
     }
@@ -458,7 +518,7 @@ class AiReplyServiceImplTest {
     private ImageWorkflow normalizationWorkflow(String tool) throws Exception {
         var workflow = imageWorkflow(true);
         var options = tool.equals("normalize_docx_format")
-                ? Map.of("formatJson", "{\"fontFamily\":\"宋体\",\"fontSizePoints\":12}")
+                ? Map.of("formatJson", "{\"fontFamily\":\"宋体\",\"fontSizePoints\":12,\"firstLineIndentChars\":2}")
                 : Map.of("layoutJson", "{\"widthCm\":6}");
         workflow.request().setContent("[stub-tool] " + tool + " " + json.writeValueAsString(options));
         return workflow;

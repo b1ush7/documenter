@@ -20,7 +20,8 @@ public final class DocxNormalizationSpec {
 
     public record Format(String scope, Integer headingLevel, String fontFamily, Double fontSizePoints,
                          Double lineSpacing, Double spaceBeforePoints, Double spaceAfterPoints,
-                         String alignment, Boolean bold, Boolean italic, boolean includeTables) {
+                         String alignment, Boolean bold, Boolean italic, boolean includeTables,
+                         Double firstLineIndentChars) {
         public String selector() { return scope + ":" + headingLevel + ":" + includeTables; }
         public boolean matches(Integer heading, boolean inTable) {
             if (!includeTables && inTable) return false;
@@ -37,7 +38,8 @@ public final class DocxNormalizationSpec {
 
     public static Format format(String content) {
         var n = object(content, Set.of("scope", "headingLevel", "fontFamily", "fontSizePoints", "lineSpacing",
-                "spaceBeforePoints", "spaceAfterPoints", "alignment", "bold", "italic", "includeTables"));
+                "spaceBeforePoints", "spaceAfterPoints", "alignment", "bold", "italic", "includeTables",
+                "firstLineIndentChars"));
         String scope = text(n, "scope");
         if (scope == null) scope = "ALL";
         if (!Set.of("ALL", "BODY", "HEADINGS").contains(scope)) fail("scope 仅支持 ALL、BODY、HEADINGS");
@@ -54,12 +56,13 @@ public final class DocxNormalizationSpec {
         Double line = number(n, "lineSpacing", .5, 5);
         Double before = number(n, "spaceBeforePoints", 0, 200);
         Double after = number(n, "spaceAfterPoints", 0, 200);
+        Double firstLine = number(n, "firstLineIndentChars", 0, 20);
         String alignment = alignment(n, Set.of("LEFT", "CENTER", "RIGHT", "JUSTIFY"));
         Boolean bold = bool(n, "bold"), italic = bool(n, "italic");
         if (family == null && size == null && line == null && before == null && after == null
-                && alignment == null && bold == null && italic == null) fail("至少指定一项实际格式");
+                && alignment == null && bold == null && italic == null && firstLine == null) fail("至少指定一项实际格式");
         return new Format(scope, level == null ? null : level.intValue(), family, size, line, before, after,
-                alignment, bold, italic, !Boolean.FALSE.equals(bool(n, "includeTables")));
+                alignment, bold, italic, !Boolean.FALSE.equals(bool(n, "includeTables")), firstLine);
     }
 
     public static Images images(String content) {
