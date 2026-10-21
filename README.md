@@ -4,7 +4,7 @@
 
 ## 本地开始
 
-验证码默认走本地 Mock，保持 `VERIFICATION_MOCK_ENABLED=true`。OCR 默认关闭；已接入阿里云 `RecognizeAllText`，开通高精版后按 [阿里云 OCR 部署说明](docs/aliyun-ocr.md) 配置 `OCR_PROVIDER=aliyun`、`ALIYUN_OCR_TYPE=Advanced`、RAM 凭据及 `OCR_ENABLED=true`。支持行文字、原图坐标、表格结构和扫描 PDF 逐页识别，实际识别质量仍需样本验收。
+验证码默认走本地 Mock，保持 `VERIFICATION_MOCK_ENABLED=true`。OCR 默认关闭；已接入阿里云 `RecognizeAllText`，开通高精版后配置 `OCR_PROVIDER=aliyun`、`ALIYUN_OCR_TYPE=Advanced`、RAM 凭据及 `OCR_ENABLED=true`。支持行文字、原图坐标、表格结构和扫描 PDF 逐页识别，实际识别质量仍需样本验收。
 
 1. 准备 JDK 21、Maven、支持迁移脚本排序规则的 MariaDB 和 Redis。
 2. 按 [.env.example](.env.example) 设置进程环境变量；Spring Boot **不会自动读取 .env**。
