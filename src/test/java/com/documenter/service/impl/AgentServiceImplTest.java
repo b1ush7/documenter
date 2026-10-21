@@ -93,13 +93,150 @@ class AgentServiceImplTest {
 
     // ============================================ 端到端循环
 
+    @Test
+    void emptyReplyIsRetriedAndCanRecover() {
+        ChatModel model = mock(ChatModel.class);
+        when(model.chat(any(ChatRequest.class))).thenReturn(
+                ChatResponse.builder().aiMessage(AiMessage.from("")).build(),
+                ChatResponse.builder().aiMessage(AiMessage.from("请说明希望使用的排版格式。" )).build());
+        var result = agentWithModel(model).run(USER_ID, null, null, "编辑", List.of(), null);
+        assertEquals(Termination.COMPLETED, result.termination());
+        assertFalse(result.reply().isBlank());
+        assertEquals(2, result.usage().modelCalls());
+    }
+
+    @Test
+    void repeatedEmptyReplyFailsInsteadOfReportingSuccess() {
+        ChatModel model = mock(ChatModel.class);
+        when(model.chat(any(ChatRequest.class))).thenReturn(
+                ChatResponse.builder().aiMessage(AiMessage.from("")).build());
+        var result = agentWithModel(model).run(USER_ID, null, null, "编辑", List.of(), null);
+        assertEquals(Termination.MODEL_UNAVAILABLE, result.termination());
+        assertFalse(result.reply().isBlank());
+        assertEquals(2, result.usage().modelCalls());
+        assertFalse(result.hasPendingPlans());
+    }
+
+    @Test
+    void lengthLimitedTextIsNotTreatedAsCompletedReply() {
+        ChatModel model = mock(ChatModel.class);
+        when(model.chat(any(ChatRequest.class))).thenReturn(ChatResponse.builder()
+                .aiMessage(AiMessage.from("unfinished"))
+                .finishReason(dev.langchain4j.model.output.FinishReason.LENGTH).build());
+        var result = agentWithModel(model).run(USER_ID, null, null, "编辑", List.of(), null);
+        assertEquals(Termination.MODEL_UNAVAILABLE, result.termination());
+        assertTrue(result.truncated());
+        assertEquals(2, result.usage().modelCalls());
+    }
+
+    @Test
+    void defaultFormattingBuildsOneBatchPlanWithoutModelOrFullDocumentReads() {
+        stubDocxVersion();
+        var result = agentWith(List.of(new com.documenter.component.tool.NormalizeDocxFormatTool()))
+                .run(USER_ID, FILE_ID, VERSION_NO, "正确排版", List.of(), null);
+        assertEquals(Termination.COMPLETED, result.termination());
+        assertEquals(0, result.usage().modelCalls());
+        assertEquals(1, result.usage().toolCalls());
+        assertEquals(1, result.plans().size());
+        var operation = result.plans().getFirst().operations().getFirst();
+        assertEquals("NORMALIZE_DOCX_FORMAT", operation.type());
+        var spec = com.documenter.util.DocxNormalizationSpec.format(operation.content());
+        assertEquals("BODY", spec.scope());
+        assertEquals(12.0, spec.fontSizePoints());
+        assertFalse(spec.includeTables());
+        assertTrue(result.reply().contains("确认后"));
+        assertEquals(null, result.verificationNotice());
+        verify(docxService, never()).editPlan(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void defaultFormattingDoesNotOverrideEarlierUserRequirements() {
+        stubDocxVersion();
+        ChatModel model = mock(ChatModel.class);
+        when(model.chat(any(ChatRequest.class))).thenReturn(
+                ChatResponse.builder().aiMessage(AiMessage.from("将按之前指定的格式处理。" )).build());
+        var result = agentWithModel(model, List.of(new com.documenter.component.tool.NormalizeDocxFormatTool()))
+                .runConversation(USER_ID, FILE_ID, VERSION_NO, "正确排版",
+                List.of(new AgentService.ConversationTurn("USER", "正文用黑体14磅")), null);
+        assertEquals(1, result.usage().modelCalls());
+        assertFalse(result.hasPendingPlans());
+    }
+
+    @Test
+    void repeatedOversizedBatchesStopWithoutExecutingAnyRejectedRequest() {
+        stubDocxVersion();
+        properties.setMaxToolCalls(1);
+        ChatModel model = mock(ChatModel.class);
+        var first = dev.langchain4j.agent.tool.ToolExecutionRequest.builder().id("a").name("read_document")
+                .arguments("{}").build();
+        var second = dev.langchain4j.agent.tool.ToolExecutionRequest.builder().id("b").name("read_document")
+                .arguments("{}").build();
+        when(model.chat(any(ChatRequest.class))).thenReturn(
+                ChatResponse.builder().aiMessage(AiMessage.from(List.of(first, second))).build());
+        var result = agentWithModel(model).run(USER_ID, FILE_ID, VERSION_NO, "检查正文", List.of(), null);
+        assertEquals(Termination.MAX_TOOL_CALLS, result.termination());
+        assertEquals(2, result.usage().modelCalls());
+        assertEquals(0, result.usage().toolCalls());
+        assertFalse(result.hasPendingPlans());
+    }
+
+    @Test
+    void defaultFormattingRespectsCancellationAndToolBudget() {
+        stubDocxVersion();
+        var agent = agentWith(List.of(new com.documenter.component.tool.NormalizeDocxFormatTool()));
+        var cancelled = agent.run(USER_ID, FILE_ID, VERSION_NO, "正确排版", List.of(), () -> true);
+        assertEquals(Termination.CANCELLED, cancelled.termination());
+        assertFalse(cancelled.hasPendingPlans());
+        properties.setMaxToolCalls(0);
+        var limited = agent.run(USER_ID, FILE_ID, VERSION_NO, "正确排版", List.of(), null);
+        assertEquals(Termination.MAX_TOOL_CALLS, limited.termination());
+        assertEquals(0, limited.usage().toolCalls());
+    }
+
+    @Test
+    void oversizedToolBatchCanRecoverWithOneBulkFormattingRequest() {
+        stubDocxVersion();
+        properties.setMaxToolCalls(1);
+        ChatModel model = mock(ChatModel.class);
+        var first = dev.langchain4j.agent.tool.ToolExecutionRequest.builder().id("a").name("read_document")
+                .arguments("{}").build();
+        var second = dev.langchain4j.agent.tool.ToolExecutionRequest.builder().id("b").name("read_document")
+                .arguments("{}").build();
+        var bulk = dev.langchain4j.agent.tool.ToolExecutionRequest.builder().id("c").name("normalize_docx_format")
+                .arguments("{\"formatJson\":\"{\\\"scope\\\":\\\"BODY\\\",\\\"lineSpacing\\\":1.5}\"}").build();
+        when(model.chat(any(ChatRequest.class))).thenReturn(
+                ChatResponse.builder().aiMessage(AiMessage.from(List.of(first, second))).build(),
+                ChatResponse.builder().aiMessage(AiMessage.from(List.of(bulk))).build(),
+                ChatResponse.builder().aiMessage(AiMessage.from("")).build());
+        AiModelProvider provider = mock(AiModelProvider.class);
+        when(provider.available()).thenReturn(true);
+        when(provider.chatModel()).thenReturn(model);
+        var agent = new AgentServiceImpl(properties, provider, docxService, xlsxService,
+                versionService, new EditPlanValidator(properties),
+                new com.documenter.component.EditPlanExecutor(docxService, xlsxService), quota,
+                List.of(new com.documenter.component.tool.NormalizeDocxFormatTool()));
+        var result = agent.run(USER_ID, FILE_ID, VERSION_NO, "把正文行距设置为1.5倍", List.of(), null);
+        assertEquals(Termination.COMPLETED, result.termination());
+        assertEquals(1, result.usage().toolCalls());
+        assertEquals(1, result.plans().size());
+        assertFalse(result.reply().isBlank());
+        var captured = org.mockito.ArgumentCaptor.forClass(ChatRequest.class);
+        verify(model, times(3)).chat(captured.capture());
+        assertEquals(2, captured.getAllValues().get(1).messages().stream()
+                .filter(message -> message instanceof dev.langchain4j.data.message.ToolExecutionResultMessage).count());
+    }
+
     private AgentServiceImpl agentWithModel(ChatModel model) {
+        return agentWithModel(model, List.of());
+    }
+
+    private AgentServiceImpl agentWithModel(ChatModel model, List<AiTool> availableTools) {
         AiModelProvider provider = mock(AiModelProvider.class);
         when(provider.available()).thenReturn(true);
         when(provider.chatModel()).thenReturn(model);
         return new AgentServiceImpl(properties, provider, docxService, xlsxService,
                 versionService, new EditPlanValidator(properties),
-                new com.documenter.component.EditPlanExecutor(docxService, xlsxService), quota, List.of());
+                new com.documenter.component.EditPlanExecutor(docxService, xlsxService), quota, availableTools);
     }
 
     @Test

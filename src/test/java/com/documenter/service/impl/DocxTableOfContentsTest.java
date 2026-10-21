@@ -51,6 +51,13 @@ class DocxTableOfContentsTest {
             assertTrue(instruction.contains("\\o \"1-3\""));
             assertTrue(instruction.contains("\\h"));
             assertEquals("标题", document.getParagraphs().get(2).getText());
+            var heading = document.getParagraphs().get(2);
+            assertEquals(0, heading.getCTP().getPPr().getOutlineLvl().getVal().intValue());
+            assertNotNull(document.getStyles().getStyle("Heading1"));
+            assertEquals(0, document.getStyles().getStyle("Heading1").getCTStyle()
+                    .getPPr().getOutlineLvl().getVal().intValue());
+            assertTrue(document.getParagraphs().get(1).getRuns().getFirst().getCTR()
+                    .getFldCharArray(0).isSetDirty());
         }
         when(versions.downloadVersion(USER_ID, FILE_ID, 2))
                 .thenReturn(download(edited));
@@ -103,6 +110,89 @@ class DocxTableOfContentsTest {
         verify(storage, never()).store(any(byte[].class), anyString());
     }
 
+    @Test
+    void rejectsDocumentsWithoutHeadingsInsteadOfCreatingBrokenToc() throws Exception {
+        try (var document = new XWPFDocument(); var output = new java.io.ByteArrayOutputStream()) {
+            document.createParagraph().createRun().setText("普通正文，虽然加粗但不是标题");
+            document.getParagraphs().getFirst().getRuns().getFirst().setBold(true);
+            document.write(output);
+            prepare(output.toByteArray());
+        }
+        var error = assertThrows(BusinessException.class, () -> service.createOrRefreshTableOfContents(
+                USER_ID, FILE_ID, VERSION, request("START", 3, true, "目录")));
+        assertEquals(422, error.getCode());
+        assertTrue(error.getMessage().contains("请先"));
+        verifyNoInteractions(storage, writer);
+    }
+
+    @Test
+    void rejectsHeadingsOutsideRequestedRangeAndExplicitBodyOutline() throws Exception {
+        try (var document = new XWPFDocument(); var output = new java.io.ByteArrayOutputStream()) {
+            var heading = document.createParagraph();
+            heading.setStyle("Heading4");
+            heading.createRun().setText("四级标题");
+            var body = document.createParagraph();
+            body.setStyle("Heading1");
+            body.getCTP().getPPr().addNewOutlineLvl().setVal(java.math.BigInteger.valueOf(9));
+            body.createRun().setText("明确设置为正文的旧标题");
+            document.write(output);
+            prepare(output.toByteArray());
+        }
+        assertThrows(BusinessException.class, () -> service.createOrRefreshTableOfContents(
+                USER_ID, FILE_ID, VERSION, request("START", 3, true, "目录")));
+        verifyNoInteractions(storage, writer);
+    }
+
+    @Test
+    void acceptsOutlineHeadingsWithoutChangingTheirExistingStyle() throws Exception {
+        try (var document = new XWPFDocument(); var output = new java.io.ByteArrayOutputStream()) {
+            var heading = document.createParagraph();
+            heading.createRun().setText("带大纲级别的标题");
+            heading.getCTP().addNewPPr().addNewOutlineLvl().setVal(java.math.BigInteger.ONE);
+            document.write(output);
+            prepare(output.toByteArray());
+        }
+        service.createOrRefreshTableOfContents(USER_ID, FILE_ID, VERSION, request("END", 2, true, "目录"));
+        try (var document = open(saved())) {
+            assertNull(document.getParagraphs().getFirst().getStyle());
+            assertEquals(1, document.getParagraphs().getFirst().getCTP().getPPr().getOutlineLvl().getVal().intValue());
+        }
+    }
+
+    @Test
+    void refreshingTocAppliesNewLevelAndHyperlinkSettings() throws Exception {
+        prepare(tocDocument());
+        service.createOrRefreshTableOfContents(USER_ID, FILE_ID, VERSION, request("START", 1, false, "目录"));
+        try (var document = open(saved())) {
+            var toc = document.getParagraphs().getLast();
+            assertEquals("TOC \\o \"1-1\" \\z \\u", instruction(toc));
+            assertTrue(toc.getRuns().getFirst().getCTR().getFldCharArray(0).isSetDirty());
+        }
+    }
+
+    @Test
+    void refreshingPreservesNestedPageReferenceFieldsInCachedToc() throws Exception {
+        try (var document = open(tocDocument()); var output = new java.io.ByteArrayOutputStream()) {
+            var paragraph = document.getParagraphs().getLast();
+            int index = paragraph.getRuns().size() - 1;
+            paragraph.insertNewRun(index++).getCTR().addNewFldChar().setFldCharType(STFldCharType.BEGIN);
+            paragraph.insertNewRun(index++).getCTR().addNewInstrText().setStringValue("PAGEREF _Toc123 \\h");
+            paragraph.insertNewRun(index++).getCTR().addNewFldChar().setFldCharType(STFldCharType.SEPARATE);
+            paragraph.insertNewRun(index++).setText("2");
+            paragraph.insertNewRun(index).getCTR().addNewFldChar().setFldCharType(STFldCharType.END);
+            document.write(output);
+            prepare(output.toByteArray());
+        }
+        service.createOrRefreshTableOfContents(USER_ID, FILE_ID, VERSION, request("START", 2, false, "目录"));
+        byte[] edited = saved();
+        try (var document = open(edited)) {
+            assertTrue(instruction(document.getParagraphs().getLast()).contains("PAGEREF _Toc123 \\h"));
+            assertTrue(document.getParagraphs().getLast().getText().contains("2"));
+        }
+        when(versions.downloadVersion(USER_ID, FILE_ID, 2)).thenReturn(download(edited));
+        assertEquals("TOC \\o \"1-2\" \\z \\u", service.readTableOfContents(USER_ID, FILE_ID, 2).instruction());
+    }
+
     private void prepare(byte[] source) {
         when(versions.downloadVersion(USER_ID, FILE_ID, VERSION)).thenReturn(download(source));
         when(storage.store(any(byte[].class), eq("docx"))).thenReturn("toc.docx");
@@ -122,7 +212,9 @@ class DocxTableOfContentsTest {
     private static byte[] simpleDocument() throws Exception {
         try (XWPFDocument document = new XWPFDocument();
              java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream()) {
-            document.createParagraph().createRun().setText("标题");
+            var heading = document.createParagraph();
+            heading.setStyle("Heading1"); // 复现旧文件：样式名存在，但没有 styles.xml 定义。
+            heading.createRun().setText("标题");
             document.createParagraph().createRun().setText("正文");
             document.write(output);
             return output.toByteArray();
@@ -132,7 +224,9 @@ class DocxTableOfContentsTest {
     private static byte[] tocDocument() throws Exception {
         try (XWPFDocument document = new XWPFDocument();
              java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream()) {
-            document.createParagraph().createRun().setText("标题");
+            var heading = document.createParagraph();
+            heading.setStyle("Heading1");
+            heading.createRun().setText("标题");
             var paragraph = document.createParagraph();
             XWPFRun begin = paragraph.createRun();
             begin.getCTR().addNewFldChar().setFldCharType(STFldCharType.BEGIN);

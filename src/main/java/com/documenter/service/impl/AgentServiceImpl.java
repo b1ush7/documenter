@@ -36,6 +36,7 @@ import dev.langchain4j.model.chat.request.ChatRequestParameters;
 import dev.langchain4j.model.chat.request.DefaultChatRequestParameters;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
+import dev.langchain4j.model.output.FinishReason;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.ObjectMapper;
@@ -196,6 +197,14 @@ public class AgentServiceImpl implements AgentService {
                     safeSources, notice(safeSources));
         }
 
+        // 常见的无参数整篇排版直接使用经过校验的批量工具，避免模型先通读再逐段编辑。
+        if ("DOCX".equals(context.format()) && isDefaultFormattingRequest(instruction)
+                && (history == null || history.stream().noneMatch(turn -> turn != null
+                    && "USER".equals(turn.role()) && !isDefaultFormattingRequest(turn.content())))
+                && toolIndex.containsKey("normalize_docx_format")) {
+            return defaultFormatting(context, steps, startedAt, cancelSignal, safeSources);
+        }
+
         ChatModel chatModel = modelProvider.chatModel();
         StreamingChatModel streamingModel = streaming ? modelProvider.streamingChatModel() : null;
         List<ChatMessage> messages = new ArrayList<>();
@@ -219,6 +228,8 @@ public class AgentServiceImpl implements AgentService {
         int modelCalls = 0;
         int inputTokens = 0;
         int outputTokens = 0;
+        boolean recoveredIncompleteReply = false;
+        boolean recoveredToolBatch = false;
         java.util.Map<String, Integer> repeatedRequests = new java.util.HashMap<>();
 
         for (int stepIndex = 1; stepIndex <= properties.getMaxSteps(); stepIndex++) {
@@ -263,17 +274,54 @@ public class AgentServiceImpl implements AgentService {
             }
 
             AiMessage aiMessage = response.aiMessage();
-            messages.add(aiMessage);
+            log.debug("模型响应, step={}, finishReason={}, textLength={}, requestedTools={}, usedTools={}, maxTools={}",
+                    stepIndex, response.finishReason(), aiMessage == null || aiMessage.text() == null
+                            ? 0 : aiMessage.text().length(),
+                    aiMessage == null || !aiMessage.hasToolExecutionRequests() ? 0 : aiMessage.toolExecutionRequests().size(),
+                    context.toolCallCount(), properties.getMaxToolCalls());
 
-            if (!aiMessage.hasToolExecutionRequests()) {
-                String reply = aiMessage.text() == null ? "" : aiMessage.text();
+            if (aiMessage == null || !aiMessage.hasToolExecutionRequests()) {
+                String reply = aiMessage == null || aiMessage.text() == null ? "" : aiMessage.text();
+                boolean outputLimit = response.finishReason() == FinishReason.LENGTH;
+                if (reply.isBlank() || outputLimit) {
+                    if (!context.collectedPlans().isEmpty()) {
+                        return finish("已生成待确认的修改计划，确认后才会保存为新版本。", steps, context,
+                                Termination.COMPLETED, modelCalls, inputTokens, outputTokens, startedAt, false, safeSources);
+                    }
+                    steps.add(new Step(steps.size() + 1, StepKind.FAILURE, "chat",
+                            "模型响应为空或输出被截断，且没有修改计划，结束原因：" + response.finishReason(), 0));
+                    if (!recoveredIncompleteReply && stepIndex < properties.getMaxSteps()) {
+                        recoveredIncompleteReply = true;
+                        messages.add(UserMessage.from("上次响应为空或超过输出长度限制，也没有生成修改计划。请简洁地完成原始要求："
+                                + "需要修改文件时必须调用修改工具；整篇排版使用 normalize_docx_format，"
+                                + "不必继续通读全文。无法确定用户要求时请明确提出问题，不能返回空内容。"));
+                        continue;
+                    }
+                    return finish("模型未返回完整的有效回复或修改计划，请重试。本次未生成可确认的修改。",
+                            steps, context, Termination.MODEL_UNAVAILABLE, modelCalls, inputTokens,
+                            outputTokens, startedAt, outputLimit, safeSources);
+                }
                 return finish(reply, steps, context, Termination.COMPLETED,
                         modelCalls, inputTokens, outputTokens, startedAt, false, safeSources);
             }
+            messages.add(aiMessage);
 
             // ---- 检查点：全部在执行之前判断，避免上限被超出一次 ----
             if (context.toolCallCount() + aiMessage.toolExecutionRequests().size()
                     > properties.getMaxToolCalls()) {
+                int remaining = Math.max(0, properties.getMaxToolCalls() - context.toolCallCount());
+                steps.add(new Step(steps.size() + 1, StepKind.FAILURE, "tool_budget",
+                        "本批请求 " + aiMessage.toolExecutionRequests().size() + " 次工具调用，剩余 " + remaining
+                                + " 次；本批未执行", 0));
+                if (!recoveredToolBatch && remaining > 0 && stepIndex < properties.getMaxSteps()) {
+                    recoveredToolBatch = true;
+                    for (ToolExecutionRequest request : aiMessage.toolExecutionRequests()) {
+                        messages.add(toolResult(request, "本批工具调用超过剩余额度，整批均未执行。剩余 "
+                                + remaining + " 次；请合并修改，DOCX 整篇排版使用 normalize_docx_format，"
+                                + "多段文字修改使用 edit_paragraphs，不要逐段调用或重复读取全文。"));
+                    }
+                    continue;
+                }
                 return finish("已达到本次对话的工具调用上限，请分多次完成较大的修改。",
                         steps, context, Termination.MAX_TOOL_CALLS, modelCalls, inputTokens,
                         outputTokens, startedAt, true, safeSources);
@@ -353,6 +401,45 @@ public class AgentServiceImpl implements AgentService {
     }
 
     // ---------------------------------------------------------------- 计划执行
+
+    private static boolean isDefaultFormattingRequest(String instruction) {
+        return instruction != null && Set.of("正确排版", "重新排版", "规范排版", "统一排版", "整理排版",
+                "优化排版", "帮我排版", "排版").contains(instruction.strip().replaceAll("[。！!]+$", ""));
+    }
+
+    private AgentRunResult defaultFormatting(ToolExecutionContext context, List<Step> steps, long startedAt,
+                                             BooleanSupplier cancelled, List<AgentRunResult.Source> sources) {
+        if (cancelled.getAsBoolean()) {
+            return finish("已按请求中止。", steps, context, Termination.CANCELLED,
+                    0, 0, 0, startedAt, false, sources);
+        }
+        if (properties.getMaxToolCalls() < 1) {
+            return finish("当前配置未允许工具调用，无法生成排版计划。", steps, context,
+                    Termination.MAX_TOOL_CALLS, 0, 0, 0, startedAt, true, sources);
+        }
+        String name = "normalize_docx_format";
+        context.recordToolCall(name);
+        try {
+            AiTool.ToolResult result = toolIndex.get(name).execute(Map.of(
+                    "formatJson", "{\"scope\":\"BODY\",\"fontFamily\":\"宋体\",\"fontSizePoints\":12,"
+                            + "\"lineSpacing\":1.5,\"spaceBeforePoints\":0,\"spaceAfterPoints\":6,"
+                            + "\"alignment\":\"JUSTIFY\",\"includeTables\":false}",
+                    "reason", "用户未指定排版参数，采用通用正文格式，待用户确认"), context);
+            if (result.plan() == null || result.plan().isEmpty()) {
+                throw new BusinessException(422, "批量排版工具没有生成修改计划");
+            }
+            planValidator.validateForContext(result.plan(), context);
+            context.collectPlan(result.plan());
+            steps.add(new Step(steps.size() + 1, StepKind.TOOL_CALL, name, summarize(result.text()), elapsedMs(startedAt)));
+            return finish("已按通用正文格式生成排版建议：宋体、小四（12 磅）、1.5 倍行距、段前 0 磅、"
+                            + "段后 6 磅、两端对齐。保留已有标题格式，不修改表格内段落。确认后保存为新版本。",
+                    steps, context, Termination.COMPLETED, 0, 0, 0, startedAt, false, sources);
+        } catch (BusinessException failure) {
+            steps.add(new Step(steps.size() + 1, StepKind.FAILURE, name, failure.getMessage(), elapsedMs(startedAt)));
+            return finish("无法生成通用排版计划：" + failure.getMessage(), steps, context,
+                    Termination.INVALID_PLAN, 0, 0, 0, startedAt, false, sources);
+        }
+    }
 
     @Override
     public EditPlanExecutor.ExecutionResult executePlan(Long userId, Long fileId,
@@ -438,8 +525,10 @@ public class AgentServiceImpl implements AgentService {
                 你是文档编辑助手。你的任务是把用户的要求转换成对文档的具体修改。
 
                 工作方式：
-                1. 先调用 read_document 了解文档结构，拿到可用的块 ID；长文档先用 mode=outline 查看章节，
-                   再按需用 query 筛选或 offset 分页；hasMore=true 时用 nextOffset 继续，不能声称已读完整篇。
+                1. 修改具体内容前调用 read_document 了解目标结构，拿到可用块 ID。
+                   仅统一格式时只需查看少量样本，不必读完整篇；outline 为空只代表没有匹配标题，不代表文档为空。
+                   内容任务按需用 query 筛选或 offset 分页；续读严格使用 nextOffset，不要猜测页偏移。
+                   hasMore=true 时不能声称已读完整篇。
                 2. 根据用户要求提出修改；多段落修改优先用 edit_paragraphs，一次最多 50 条，
                    不要把不同段落的有效修改误认为死循环，不要要求用户为了继续读取或提出计划反复授权；
                 3. 修改工具只生成待确认的计划，不会立即改动文档，因此可以放心提出；
@@ -450,8 +539,10 @@ public class AgentServiceImpl implements AgentService {
                 6. DOCX 整篇格式统一优先使用 normalize_docx_format，已有图片统一尺寸使用 resize_docx_images，
                    不要逐段调用，也不要用 insert_image 重复插图。两者均在用户确认后批量执行并保存一个新版本。
                    字号使用磅（小四12、四号14、三号16），行距用倍数，图片尺寸用厘米。
+                   首行缩进使用 firstLineIndentChars：2 表示两字符，0 表示取消；仅修改用户要求的字段。
                    正文与标题要求不同时分范围提出格式规则；仅修改用户指定的格式，不改文字、页眉页脚。
                    标题范围依赖已有标题样式/大纲级别；未标记的标题不能声称已自动识别。
+                   批量格式工具自行处理全部匹配段落，不需要获取每个段落 ID，禁止为统一排版逐段调用 edit_paragraph。
 
                 硬性约束：
                 - 只能使用已提供的工具，不得假设存在其他能力（例如删除文件、发送网络请求）；
@@ -601,7 +692,8 @@ public class AgentServiceImpl implements AgentService {
                                   List<AgentRunResult.Source> sources) {
         return new AgentRunResult(reply, steps, context.collectedPlans(),
                 usage(modelCalls, context.toolCallCount(), inputTokens, outputTokens, startedAt),
-                termination, truncated, sources, notice(sources));
+                termination, truncated, sources,
+                sources.isEmpty() && !context.collectedPlans().isEmpty() ? null : notice(sources));
     }
 
     private static List<AgentRunResult.Source> normalizeSources(List<AgentRunResult.Source> sources) {

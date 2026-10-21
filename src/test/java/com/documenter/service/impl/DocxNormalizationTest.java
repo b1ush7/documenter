@@ -195,6 +195,78 @@ class DocxNormalizationTest {
         assertNotNull(new NormalizeDocxFormatTool().execute(Map.of("formatJson","{\"scope\":\"HEADINGS\",\"headingLevel\":2,\"fontSizePoints\":16}"),context).plan());
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(doubles = {2, 0, 1.5})
+    void firstLineIndentUsesCharacterUnitsAndPreservesUnselectedContent(double characters) throws Exception {
+        byte[] source;
+        try (var document = new XWPFDocument()) {
+            var body = document.createParagraph();
+            body.createRun().setText("正文 text");
+            body.getRuns().getFirst().setFontSize(11);
+            body.setIndentationLeft(720);
+            body.setIndentationRight(360);
+            var indent = body.getCTP().getPPr().getInd();
+            indent.setFirstLine(BigInteger.valueOf(480));
+            indent.setHanging(BigInteger.valueOf(240));
+            indent.setHangingChars(BigInteger.valueOf(100));
+            var heading = document.createParagraph();
+            heading.setStyle("Heading1");
+            heading.createRun().setText("标题");
+            heading.setIndentationFirstLine(120);
+            var cell = document.createTable(1, 1).getRow(0).getCell(0).getParagraphs().getFirst();
+            cell.createRun().setText("表格文字");
+            cell.setIndentationFirstLine(240);
+            var header = document.createHeader(HeaderFooterType.DEFAULT).createParagraph();
+            header.createRun().setText("页眉");
+            header.setIndentationFirstLine(360);
+            source = bytes(document);
+        }
+        prepare(source);
+        var context = ToolExecutionContext.forVersion(7L, 10L, 1, "DOCX", service.readStructure(7L, 10L, 1), null);
+        var plan = new NormalizeDocxFormatTool().execute(Map.of("formatJson",
+                "{\"scope\":\"BODY\",\"includeTables\":false,\"firstLineIndentChars\":" + characters + "}"), context).plan();
+        new EditPlanValidator(new AiModelProperties()).validateForContext(plan, context);
+        verifyNoInteractions(storage, writer);
+        service.editPlan(7L, 10L, 1, plan, "修改首行缩进");
+        try (var document = new XWPFDocument(new ByteArrayInputStream(saved()))) {
+            var body = document.getParagraphs().getFirst();
+            var indent = body.getCTP().getPPr().getInd();
+            assertEquals(BigInteger.valueOf(Math.round(characters * 100)), indent.getFirstLineChars());
+            assertFalse(indent.isSetFirstLine());
+            assertFalse(indent.isSetHanging());
+            assertFalse(indent.isSetHangingChars());
+            assertEquals(720, body.getIndentationLeft());
+            assertEquals(360, body.getIndentationRight());
+            assertEquals("正文 text", body.getText());
+            assertEquals(11.0, body.getRuns().getFirst().getFontSizeAsDouble());
+            assertEquals(120, document.getParagraphs().get(1).getIndentationFirstLine());
+            assertEquals(240, document.getTables().getFirst().getRow(0).getCell(0).getParagraphs().getFirst().getIndentationFirstLine());
+            assertEquals(360, document.getHeaderList().getFirst().getParagraphs().getLast().getIndentationFirstLine());
+        }
+    }
+
+    @Test
+    void omittedFirstLineIndentPreservesExistingIndentSettings() throws Exception {
+        byte[] source;
+        try (var document = new XWPFDocument()) {
+            var paragraph = document.createParagraph();
+            paragraph.createRun().setText("保留缩进");
+            paragraph.setIndentationHanging(480);
+            paragraph.getCTP().getPPr().getInd().setHangingChars(BigInteger.valueOf(200));
+            source = bytes(document);
+        }
+        prepare(source);
+        var plan = new DocumentEditPlan("只改字号", List.of(new DocumentEditPlan.Operation(
+                "NORMALIZE_DOCX_FORMAT", "body", "{\"fontSizePoints\":12}", null)), null);
+        service.editPlan(7L, 10L, 1, plan, "只改字号");
+        try (var document = new XWPFDocument(new ByteArrayInputStream(saved()))) {
+            var indent = document.getParagraphs().getFirst().getCTP().getPPr().getInd();
+            assertEquals(BigInteger.valueOf(200), indent.getHangingChars());
+            assertEquals(480, document.getParagraphs().getFirst().getIndentationHanging());
+            assertFalse(indent.isSetFirstLineChars());
+        }
+    }
+
     private void prepare(byte[] source) {
         var asset=new FileAsset();asset.setId(10L);asset.setUserId(7L);asset.setExtension("docx");
         when(versions.downloadVersion(7L,10L,1)).thenReturn(new FileDownload(asset,new ByteArrayResource(source),source.length,

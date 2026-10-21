@@ -45,7 +45,8 @@ public class ReadDocumentTool extends AbstractAiTool {
     @Override
     public String description() {
         return "分页读取当前文档结构，返回可编辑块 ID。支持 offset、limit、query 和 mode。"
-                + "长文档必须按 nextOffset 继续读取；mode=outline 可浏览标题及疑似未标记的编号标题。"
+                + "需要通读时按 nextOffset 继续读取；统一格式只需少量样本，直接使用 normalize_docx_format。"
+                + "mode=outline 可浏览标题及疑似未标记的编号标题；outline 为空不代表文档为空。"
                 + "块 ID 用于后续编辑操作的 target 参数。"
                 + "开始任何修改前必须先调用它，否则无法知道合法的目标块 ID。";
     }

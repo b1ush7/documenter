@@ -270,8 +270,36 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
         String title = normalizeTocTitle(request.getTitle());
         return editAndSave(userId, fileId, sourceVersion, request.getInstruction(),
                 "插入或刷新 DOCX 目录域", document -> {
+                    var headings = document.getParagraphs().stream()
+                            .filter(paragraph -> !paragraph.getText().isBlank())
+                            .filter(paragraph -> {
+                                Integer level = DocxNormalizer.headingLevel(document, paragraph);
+                                return level != null && level <= maxLevel;
+                            }).toList();
+                    if (headings.isEmpty()) {
+                        throw new BusinessException(422, "未找到 1 到 " + maxLevel
+                                + " 级标题，无法生成目录。请先将章节段落设置为标题，或扩大目录标题级别范围。");
+                    }
+                    // 修复旧版本仅有样式名但没有样式定义/大纲级别的标题。
+                    for (var heading : headings) {
+                        int level = DocxNormalizer.headingLevel(document, heading);
+                        ensureHeadingStyle(document, heading.getStyle(), level);
+                        setOutlineLevel(heading, level - 1);
+                    }
                     TocField existing = findTocField(document);
                     if (existing != null) {
+                        boolean written = false;
+                        for (var run : existing.paragraph().getRuns()) {
+                            for (var text : run.getCTR().getInstrTextList()) {
+                                text.setStringValue(written ? "" : instruction);
+                                written = true;
+                            }
+                            for (var field : run.getCTR().getFldCharList()) {
+                                if (STFldCharType.BEGIN.equals(field.getFldCharType())) field.setDirty(true);
+                            }
+                            if (run.getCTR().getFldCharList().stream().anyMatch(field ->
+                                    STFldCharType.SEPARATE.equals(field.getFldCharType()))) break;
+                        }
                         document.getSettings().setUpdateFields();
                         return;
                     }
@@ -332,7 +360,9 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
 
     private static void writeTocField(XWPFParagraph paragraph, String instruction) {
         XWPFRun begin = paragraph.createRun();
-        begin.getCTR().addNewFldChar().setFldCharType(STFldCharType.BEGIN);
+        var field = begin.getCTR().addNewFldChar();
+        field.setFldCharType(STFldCharType.BEGIN);
+        field.setDirty(true);
         XWPFRun instr = paragraph.createRun();
         instr.getCTR().addNewInstrText().setStringValue(instruction);
         XWPFRun separate = paragraph.createRun();
@@ -354,16 +384,36 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                     if (!instruction.isEmpty()) instruction.append(' ');
                     instruction.append(text.getStringValue());
                 }
+                if (run.getCTR().getFldCharList().stream().anyMatch(field ->
+                        STFldCharType.SEPARATE.equals(field.getFldCharType()))) break;
             }
             String normalized = instruction.toString().strip();
             if (normalized.matches("(?is)^TOC(?:\\s.*)?$")) {
-                return new TocField(blockId, normalized);
+                return new TocField(blockId, normalized, paragraph);
             }
         }
         return null;
     }
 
-    private record TocField(String blockId, String instruction) { }
+    private record TocField(String blockId, String instruction, XWPFParagraph paragraph) { }
+
+    private static void setOutlineLevel(XWPFParagraph paragraph, int level) {
+        var properties = paragraph.getCTP().isSetPPr() ? paragraph.getCTP().getPPr() : paragraph.getCTP().addNewPPr();
+        var outline = properties.isSetOutlineLvl() ? properties.getOutlineLvl() : properties.addNewOutlineLvl();
+        outline.setVal(BigInteger.valueOf(level));
+    }
+
+    private static void ensureHeadingStyle(XWPFDocument document, String styleId, int level) {
+        if (styleId == null || styleId.isBlank()) return;
+        var styles = document.getStyles() == null ? document.createStyles() : document.getStyles();
+        if (styles.getStyle(styleId) != null) return; // 保留已有字体、编号及样式继承。
+        var style = org.openxmlformats.schemas.wordprocessingml.x2006.main.CTStyle.Factory.newInstance();
+        style.setStyleId(styleId);
+        style.setType(org.openxmlformats.schemas.wordprocessingml.x2006.main.STStyleType.PARAGRAPH);
+        style.addNewName().setVal("heading " + level);
+        style.addNewPPr().addNewOutlineLvl().setVal(BigInteger.valueOf(level - 1));
+        styles.addStyle(new org.apache.poi.xwpf.usermodel.XWPFStyle(style));
+    }
 
     private static void validateFootnoteOperations(EditDocxFootnotesDTO request) {
         if (request == null || request.getOperations() == null
@@ -863,8 +913,17 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
             throw new BusinessException(422, "段前分页仅支持正文顶层段落，不支持表格或页眉页脚");
         }
         switch (formatType) {
-            case SET_HEADING -> { clearNumbering(paragraph); paragraph.setStyle("Heading" + level); }
-            case SET_NORMAL -> { clearNumbering(paragraph); paragraph.setStyle("Normal"); }
+            case SET_HEADING -> {
+                clearNumbering(paragraph);
+                ensureHeadingStyle(paragraph.getDocument(), "Heading" + level, level);
+                paragraph.setStyle("Heading" + level);
+                setOutlineLevel(paragraph, level - 1);
+            }
+            case SET_NORMAL -> {
+                clearNumbering(paragraph);
+                paragraph.setStyle("Normal");
+                setOutlineLevel(paragraph, 9);
+            }
             case SET_BULLET -> applyNumbering(paragraph, bulletNumId);
             case SET_NUMBERED -> applyNumbering(paragraph, numberedNumId);
             case CLEAR_LIST -> clearNumbering(paragraph);
@@ -1415,6 +1474,11 @@ public class DocxDocumentServiceImpl implements DocxDocumentService {
                                                    ParagraphAlignment alignment) {
         XWPFParagraph paragraph = document.createParagraph();
         paragraph.setStyle(style);
+        if (style.startsWith("Heading") && style.matches("Heading[1-9]")) {
+            int level = Integer.parseInt(style.substring("Heading".length()));
+            ensureHeadingStyle(document, style, level);
+            setOutlineLevel(paragraph, level - 1);
+        }
         paragraph.setAlignment(alignment);
         paragraph.setSpacingAfter(120);
         paragraph.setSpacingBetween(1.5);

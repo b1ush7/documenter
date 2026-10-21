@@ -1536,7 +1536,7 @@ ADD 在目标段落末尾添加脚注引用，并创建独立 footnote part；UP
 | `title` | 否 | 最多 100 字符，默认“目录”；空字符串表示不添加标题段 |
 | `instruction` | 否 | 最多 2000 字符，写入版本说明 |
 
-文档没有 TOC 时插入独立复杂域和占位提示；已有 TOC 时不重复插入，只设置 `w:updateFields` 请求办公软件下次打开时刷新已有域和页码。编辑保存本身不计算标题页码。启用 `libreoffice` 后端后，PDF 导出与预览会在只读副本中用 Writer 更新目录与最终页码，不覆盖源 DOCX；本机固定中文样本已实跑，见 [Office 验收](docs/office-rendering-testing.md)。Microsoft Word 和业务模板的版式仍需对应环境验收。
+生成前校验正文中是否存在请求级别范围内的非空标题；没有时返回业务码 422，提示先设置章节标题或扩大级别范围，不保存无目录项的新版本。兼容修复旧文件中仅有标题样式名却缺少样式定义或大纲级别的标题。文档没有 TOC 时插入独立复杂域和占位提示；已有 TOC 时不重复插入，更新其标题级别、超链接选项并标记域需要刷新。已有目录的位置和标题段落保持原样。设置 `w:updateFields` 请求办公软件下次打开时刷新域和页码。编辑保存本身不计算标题页码。启用 `libreoffice` 后端后，PDF 导出与预览会在只读副本中用 Writer 更新目录与最终页码，不覆盖源 DOCX；本机固定中文样本已实跑，见 [Office 验收](docs/office-rendering-testing.md)。Microsoft Word 和业务模板的版式仍需对应环境验收。
 
 ## 5. 异步任务
 
@@ -2209,7 +2209,7 @@ target 是内部定位形式“原始工作表名称!规范单元格”，单元
 
 复用已有同步/SSE 回复、查询、确认及放弃接口，不新增 HTTP 路径、DTO 字段或数据库表。绑定 DOCX 并指定源 `versionNo` 后，可直接发送“正文统一宋体小四、1.5 倍行距，一级标题黑体三号加粗，已有图片统一宽 6 厘米，保持比例”等指令。
 
-- `normalize_docx_format`：`formatJson` 支持 `scope=ALL/BODY/HEADINGS`、可选标题级别 `headingLevel=1..9`、`fontFamily`、`fontSizePoints`、倍数 `lineSpacing`、段前后磅数 `spaceBeforePoints/spaceAfterPoints`、`alignment=LEFT/CENTER/RIGHT/JUSTIFY`、`bold/italic` 和 `includeTables`（默认 true）。未提供的格式保留，正文与标题不同可生成多项范围操作。每个范围最多 5000 个段落。
+- `normalize_docx_format`：`formatJson` 支持 `scope=ALL/BODY/HEADINGS`、可选标题级别 `headingLevel=1..9`、`fontFamily`、`fontSizePoints`、倍数 `lineSpacing`、段前后磅数 `spaceBeforePoints/spaceAfterPoints`、首行缩进字符数 `firstLineIndentChars`（0～20，2 表示两字符，0 取消首行缩进）、`alignment=LEFT/CENTER/RIGHT/JUSTIFY`、`bold/italic` 和 `includeTables`（默认 true）。设置首行缩进时清除冲突的悬挂/磅值首行缩进，保留左右缩进；未提供的格式保留，正文与标题不同可生成多项范围操作。每个范围最多 5000 个段落。
 - `resize_docx_images`：`layoutJson` 支持 `widthCm/heightCm`（至少一个）、`keepAspectRatio`（默认 true）和可选 `alignment=LEFT/CENTER/RIGHT`。等比模式按尺寸框适配；明确关闭等比时须同时给出宽高。最多 500 张正文及表格已有图片，不替换原始图片文件。
 
 计划类型分别为 `NORMALIZE_DOCX_FORMAT` 和 `RESIZE_DOCX_IMAGES`，`target` 固定为 `body`，`content` 为规范化选项 JSON。现有 `changes` 的 `before` 返回源版本匹配数量，`after` 返回选项；前端应展示确认差异，并允许新类型使用通用文本展示。确认后批量执行，仅写入一个 `AI_EDIT` 版本；重复确认返回相同版本。放弃不写入，版本冲突返回 `409` 并清理生成产物。此能力的本地测试使用桩模型和真实 DOCX 回读，尚未验收生产模型的自然语言调用效果。

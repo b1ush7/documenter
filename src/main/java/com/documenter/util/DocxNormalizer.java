@@ -42,6 +42,15 @@ public final class DocxNormalizer {
             var p = item.value();
             if (spec.alignment() != null) p.setAlignment(alignment(spec.alignment()));
             if (spec.lineSpacing() != null) p.setSpacingBetween(spec.lineSpacing(), LineSpacingRule.AUTO);
+            if (spec.firstLineIndentChars() != null) {
+                var properties = p.getCTP().isSetPPr() ? p.getCTP().getPPr() : p.getCTP().addNewPPr();
+                var indent = properties.isSetInd() ? properties.getInd() : properties.addNewInd();
+                // 字符缩进以百分之一字符存储；仅清除冲突的首行/悬挂值，保留左右缩进。
+                if (indent.isSetFirstLine()) indent.unsetFirstLine();
+                if (indent.isSetHanging()) indent.unsetHanging();
+                if (indent.isSetHangingChars()) indent.unsetHangingChars();
+                indent.setFirstLineChars(java.math.BigInteger.valueOf(Math.round(spec.firstLineIndentChars() * 100)));
+            }
             if (spec.spaceBeforePoints() != null) {
                 p.setSpacingBefore((int) Math.round(spec.spaceBeforePoints() * 20));
                 var spacing = p.getCTP().getPPr().getSpacing();
